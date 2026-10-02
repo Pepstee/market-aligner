@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from datetime import datetime
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from .application_archive import (
     RELEASE_REQUIRED_ROLES,
@@ -17,6 +17,7 @@ from .application_compiler import ApplicationSource
 from .application_sanity_review import SanityReviewReceipt
 from .evidence_matching import canonical_json
 from .external_document_assurance import ExternalDocumentAssuranceReceipt
+from .form_answers import form_answer_bindings_bytes
 from .rendering import ApplicationArtifacts
 
 
@@ -29,6 +30,7 @@ def fixture_release_archive_receipt(
     source: ApplicationSource,
     artifacts: ApplicationArtifacts,
     questions: Mapping[str, tuple[str, str]] | None,
+    form_answer_bindings: Sequence[tuple[str, str]],
     document_assurance_receipts: tuple[
         ExternalDocumentAssuranceReceipt,
         ExternalDocumentAssuranceReceipt,
@@ -59,7 +61,7 @@ def fixture_release_archive_receipt(
         for fact in source.facts
     ]
     question_document = {
-        key: {"question": value[0], "answer": value[1]}
+        key: {"question_id": value[0], "question": value[1]}
         for key, value in sorted((questions or {}).items())
     }
     payloads: dict[str, tuple[bytes, str]] = {
@@ -107,13 +109,7 @@ def fixture_release_archive_receipt(
         "form.questions": (_json_bytes(question_document), "application/json"),
         "form.answers": (artifacts.editable.answers_text.encode(), "text/plain"),
         "form.approved_field_mapping": (
-            _json_bytes(
-                {
-                    "schema_version": "jaa.fixture-approved-form-mapping.v1",
-                    "fields": [],
-                    "consents": [],
-                }
-            ),
+            form_answer_bindings_bytes(source, questions, form_answer_bindings),
             "application/json",
         ),
         "evidence.approved_claim_ids": (_json_bytes(approved_claims), "application/json"),

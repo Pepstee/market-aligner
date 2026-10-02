@@ -946,6 +946,7 @@ def run_cv_composition_orchestration(
 __all__ = [
     "CVCompositionOrchestrationResult",
     "CVCompositionServiceError",
+    "CVConstraintReceipt",
     "CandidateApplicationPackage",
     "CVPopplerQualityReceipt",
     "GenerationRevisionWriter",

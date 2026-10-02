@@ -118,11 +118,10 @@ def promote_current_processing_assessment(
     ):
         raise AssessmentPromotionError("processing receipt uses stale or legacy identity")
     scope = run.get("scope")
-    if not isinstance(scope, dict) or set(scope) != {
-        "exclude_boards",
-        "include_boards",
-        "max_total",
-    }:
+    base_scope = {"exclude_boards", "include_boards", "max_total"}
+    if (not isinstance(scope, dict)
+            or set(scope) not in (base_scope, base_scope | {"job_key"})
+            or ("job_key" in scope and scope["job_key"] != job_key)):
         raise AssessmentPromotionError("processing receipt scope is invalid")
     current_rows = jobs.completed_processing(
         profile_id=profile_id,
@@ -132,6 +131,7 @@ def promote_current_processing_assessment(
         include_boards=scope["include_boards"],
         exclude_boards=scope["exclude_boards"],
         max_total=scope["max_total"],
+        exact_job_key=scope.get("job_key"),
     )
     if _hash(current_rows) != run.get("state_sha256"):
         raise AssessmentPromotionError("processing receipt is stale for current state")

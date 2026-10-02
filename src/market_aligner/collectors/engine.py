@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+import shutil
+import math
+import threading
+
 import hashlib
 import os
 import secrets
@@ -10,11 +15,17 @@ import stat
 import tempfile
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from market_aligner.applications.canonical import ContractValidationError
+from market_aligner.collectors.evidence import (
+    bind_public_listing,
+    sanitized_attempts,
+    validate_public_listing_url,
+)
 from market_aligner.domain.contracts import JobUrl, RawPosting, write_jsonl
 from market_aligner.collectors.adapters.base import SourceUnavailable, load_adapter
 from market_aligner.state.vacancies import (
@@ -22,10 +33,48 @@ from market_aligner.state.vacancies import (
     VacancyRefreshConflict,
     VacancyRefreshIndeterminate,
     raw_posting_bytes,
-    raw_posting_content_sha256,
     raw_posting_from_bytes,
 )
-from market_aligner.collectors.scrapling_client import ScraplingClient, ScraplingFetchError
+from market_aligner.collectors.scrapling_client import (
+    ScraplingClient,
+    ScraplingFetchError,
+)
+
+
+def bounded_relative_path(root: Path, value: Any, field: str) -> Path:
+    """Resolve one configured path strictly inside ``root``."""
+    if isinstance(value, Path):
+        candidate = str(value)
+    elif isinstance(value, str):
+        candidate = value
+    else:
+        raise ValueError(f"shape: {field} must be a path string")
+    if not candidate:
+        raise ValueError(f"shape: {field} must not be empty")
+    relative = Path(candidate)
+    if relative.is_absolute():
+        raise ValueError(
+            f"escape: {field} must stay inside the data home; got absolute {candidate!r}"
+        )
+    if any(part == ".." for part in relative.parts):
+        raise ValueError(
+            f"escape: {field} must not traverse outside the data home: {candidate!r}"
+        )
+    current = Path(os.path.realpath(root))
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(
+                f"escape: {field} escapes the data home via symlink component {part!r}: "
+                f"{candidate!r}"
+            )
+    return current
+
+
+def _shape(condition: bool, message: str) -> None:
+    """Raise a stable typed-shape error for malformed configuration."""
+    if not condition:
+        raise ValueError(f"shape: {message}")
 
 
 def _raw_path(base: Path, row: RawPosting) -> Path:
@@ -36,7 +85,9 @@ def _raw_path(base: Path, row: RawPosting) -> Path:
 def _save_raw(base: Path, row: RawPosting) -> None:
     destination = _raw_path(base, row)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=destination.parent
+    )
     os.close(descriptor)
     temporary_path = Path(temporary)
     try:
@@ -73,7 +124,9 @@ def _open_private_directory(parent: int, name: str, *, create: bool) -> int:
         )
     except FileNotFoundError:
         if not create:
-            raise VacancyRefreshConflict(f"refresh object directory is unavailable: {name}")
+            raise VacancyRefreshConflict(
+                f"refresh object directory is unavailable: {name}"
+            )
         try:
             os.mkdir(name, 0o700, dir_fd=parent)
             os.fsync(parent)
@@ -94,7 +147,9 @@ def _open_private_directory(parent: int, name: str, *, create: bool) -> int:
     metadata = os.fstat(descriptor)
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
         os.close(descriptor)
-        raise VacancyRefreshConflict(f"refresh object directory ownership differs: {name}")
+        raise VacancyRefreshConflict(
+            f"refresh object directory ownership differs: {name}"
+        )
     if stat.S_IMODE(metadata.st_mode) != 0o700:
         try:
             os.fchmod(descriptor, 0o700)
@@ -108,20 +163,27 @@ def _open_private_directory(parent: int, name: str, *, create: bool) -> int:
 
 
 def _open_refresh_object_bucket(root: Path, digest: str, *, create: bool) -> int:
-    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
         raise VacancyRefreshConflict("refresh object filename is not a SHA-256")
     try:
         root_descriptor = _open_absolute_directory_no_symlinks(root)
     except OSError as exc:
-        raise VacancyRefreshConflict("external data root contains a symlink or is unavailable") from exc
+        raise VacancyRefreshConflict(
+            "external data root contains a symlink or is unavailable"
+        ) from exc
     descriptors = [root_descriptor]
     try:
         state = os.open(
-            "state", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            "state",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
             dir_fd=root_descriptor,
         )
         descriptors.append(state)
-        objects = _open_private_directory(state, "collection-refresh-objects", create=create)
+        objects = _open_private_directory(
+            state, "collection-refresh-objects", create=create
+        )
         descriptors.append(objects)
         bucket = _open_private_directory(objects, digest[:2], create=create)
         descriptors.append(bucket)
@@ -141,7 +203,9 @@ def _read_checked_object(descriptor: int, digest: str) -> bytes:
             digest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor
         )
     except OSError as exc:
-        raise VacancyRefreshConflict("refresh response object is unavailable or unsafe") from exc
+        raise VacancyRefreshConflict(
+            "refresh response object is unavailable or unsafe"
+        ) from exc
     try:
         metadata = os.fstat(handle)
         if (
@@ -161,7 +225,9 @@ def _read_checked_object(descriptor: int, digest: str) -> bytes:
     finally:
         os.close(handle)
     if hashlib.sha256(value).hexdigest() != digest:
-        raise VacancyRefreshConflict("refresh response object hash differs from filename")
+        raise VacancyRefreshConflict(
+            "refresh response object hash differs from filename"
+        )
     return value
 
 
@@ -169,7 +235,9 @@ def _write_refresh_object(root: Path, digest: str, value: bytes) -> None:
     """Write an owner-private CAS object through descriptor-relative operations."""
 
     if hashlib.sha256(value).hexdigest() != digest:
-        raise VacancyRefreshConflict("refresh response bytes differ from object filename")
+        raise VacancyRefreshConflict(
+            "refresh response bytes differ from object filename"
+        )
     bucket = _open_refresh_object_bucket(root, digest, create=True)
     temporary = f".{digest}.{secrets.token_hex(12)}.tmp"
     try:
@@ -257,7 +325,10 @@ def _verify_refresh_objects(root: Path, transition: Mapping[str, object]) -> Non
     old_sha = str(transition["old_object_sha256"])
     old_path = Path("state") / "collection-refresh-objects" / old_sha[:2] / old_sha
     old_bytes = _read_refresh_object(root, old_sha)
-    if old_bytes != transition["old_raw_bytes"] or hashlib.sha256(old_bytes).hexdigest() != old_sha:
+    if (
+        old_bytes != transition["old_raw_bytes"]
+        or hashlib.sha256(old_bytes).hexdigest() != old_sha
+    ):
         raise VacancyRefreshConflict("journalled old response object bytes differ")
 
     if transition["status"] in ("object_ready", "committed"):
@@ -301,83 +372,431 @@ class Collector:
         self.sleeper = sleeper
         self.monotonic = monotonic
         self.crash_injector = crash_injector or (lambda _point: None)
-        io = cfg.get("io", {}) or {}
-        self.urls_path = self.root / io.get("job_urls", "state/job_urls.jsonl")
-        self.raw_cache = self.root / io.get("raw_cache", "raw/vacancies")
-        self.db = JobDatabase(self.root / io.get("database", "state/vacancies.sqlite3"))
+        plan = self.plan(self.root, cfg)
+        self.urls_path = plan["job_urls"]
+        self.raw_cache = plan["raw_cache"]
+        self.db = JobDatabase(plan["database"])
+        self.raw_cache_roots = plan["raw_cache_roots"]
         self.terms = list(cfg.get("search_terms") or [])
-        boards = cfg.get("boards", {}) or {}
-        self.boards = list(boards.get("enabled") or [])
-        collection = cfg.get("collection", {}) or {}
-        self.source_workers = int(collection.get("source_workers", len(self.boards) or 1))
+        self.boards = plan["boards"]
+        collection = plan["collection"]
+        self.discover_only = collection.get("discover_only", False)
+        self.target_per_board = int(collection.get("target_per_board", 0))
+        self.inter_fetch_delay = float(collection.get("delay_seconds", 0))
+        self.fetch_attempts = int(collection.get("fetch_attempts", 1))
+        self.fetch_retry_backoff = float(collection.get("fetch_retry_backoff", 5.0))
+        self._board_locks = {board: threading.Lock() for board in self.boards}
+        self._next_fetch_start = {board: float("-inf") for board in self.boards}
+        self.source_workers = int(
+            collection.get("source_workers", len(self.boards) or 1)
+        )
         self.fetch_workers = int(collection.get("fetch_workers", 12))
-        scrapling = dict(cfg.get("scrapling", {}) or {})
-        runtime_setting = Path(scrapling.get("runtime_root") or ".")
-        runtime_root = runtime_setting if runtime_setting.is_absolute() else self.root / runtime_setting
+        scrapling = plan["scrapling"]
         self.scrapling = (
-            ScraplingClient(runtime_root, scrapling) if scrapling.get("enabled", False) else None
+            ScraplingClient(
+                plan["runtime_root"],
+                scrapling,
+                protected_roots=(self.root, plan["runtime_root"]),
+            )
+            if scrapling.get("enabled", False)
+            else None
         )
 
-    def _save_scrapling_failure(self, row: JobUrl, attempts: tuple[dict[str, Any], ...]) -> Path:
+    @staticmethod
+    def plan(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
+        """Validate configuration shapes and bound every consequential path.
+
+        Shared by :meth:`__init__` and preflight callers so malformed shapes
+        and data-home escapes are refused once, in the canonical collector
+        seam, before any journal, directory creation or provider access.
+        Shape errors carry a ``shape:`` prefix; boundary violations carry
+        ``escape:`` so callers can emit stable structured refusals.
+        """
+        root = Path(root)
+        _shape(isinstance(cfg, dict), "configuration root must be a mapping")
+        io = cfg.get("io")
+        if io is None:
+            io = {}
+        _shape(isinstance(io, dict), "io must be a mapping")
+        collection = cfg.get("collection")
+        if collection is None:
+            collection = {}
+        _shape(isinstance(collection, dict), "collection must be a mapping")
+        _shape(
+            isinstance(collection.get("discover_only", False), bool),
+            "collection.discover_only must be a boolean",
+        )
+
+        delay_value = collection.get("delay_seconds", 0)
+        _shape(
+            isinstance(delay_value, (int, float))
+            and not isinstance(delay_value, bool)
+            and math.isfinite(delay_value)
+            and delay_value >= 0,
+            "collection.delay_seconds must be a finite nonnegative real number",
+        )
+
+        attempts = collection.get("fetch_attempts", 1)
+        _shape(
+            isinstance(attempts, int) and not isinstance(attempts, bool)
+            and 1 <= attempts <= 10,
+            "collection.fetch_attempts must be an integer in [1,10]",
+        )
+        backoff = collection.get("fetch_retry_backoff", 5.0)
+        _shape(
+            isinstance(backoff, (int, float)) and not isinstance(backoff, bool)
+            and math.isfinite(backoff) and 0 <= backoff <= 60,
+            "collection.fetch_retry_backoff must be finite and in [0,60] seconds",
+        )
+
+        target_value = collection.get("target_per_board", 0)
+        _shape(
+            isinstance(target_value, int)
+            and not isinstance(target_value, bool)
+            and target_value >= 0,
+            "collection.target_per_board must be an exact nonnegative integer "
+            "(0 means uncapped)",
+        )
+
+        boards_cfg = cfg.get("boards")
+        _shape(isinstance(boards_cfg, dict), "boards must be a mapping")
+        enabled = boards_cfg.get("enabled")
+        _shape(
+            isinstance(enabled, list)
+            and not isinstance(enabled, (str, bytes))
+            and bool(enabled),
+            "boards.enabled must be a nonempty list",
+        )
+        for index, board in enumerate(enabled):
+            _shape(
+                isinstance(board, str) and bool(board.strip()) and len(board) <= 128,
+                f"boards.enabled[{index}] must be a bounded nonempty string",
+            )
+        _shape(
+            len(set(enabled)) == len(enabled),
+            "boards.enabled must not contain duplicate boards",
+        )
+
+        legacy_roots = io.get("raw_cache_roots")
+        if legacy_roots is None or legacy_roots == []:
+            raw_cache_roots = None
+        else:
+            _shape(
+                isinstance(legacy_roots, list)
+                and not isinstance(legacy_roots, (str, bytes)),
+                "io.raw_cache_roots must be a JSON list of relative path strings",
+            )
+            for index, entry in enumerate(legacy_roots):
+                _shape(
+                    isinstance(entry, str) and bool(entry),
+                    f"io.raw_cache_roots[{index}] must be a non-empty relative path string",
+                )
+            raw_cache_roots = [
+                bounded_relative_path(root, entry, f"io.raw_cache_roots[{index}]")
+                for index, entry in enumerate(legacy_roots)
+            ]
+
+        scrapling = cfg.get("scrapling")
+        if scrapling is None:
+            scrapling = {}
+        _shape(isinstance(scrapling, dict), "scrapling must be a mapping")
+        runtime_root_value = scrapling.get("runtime_root")
+        runtime_root = (
+            bounded_relative_path(root, runtime_root_value, "scrapling.runtime_root")
+            if runtime_root_value
+            else root
+        )
+
+        for board in enabled:
+            board_config = cfg.get(board)
+            _shape(
+                board_config is None or isinstance(board_config, dict),
+                f"configuration for enabled board {board!r} must be a mapping",
+            )
+
+        return {
+            "job_urls": bounded_relative_path(
+                root, io.get("job_urls", "state/job_urls.jsonl"), "io.job_urls"
+            ),
+            "raw_cache": bounded_relative_path(
+                root, io.get("raw_cache", "raw/vacancies"), "io.raw_cache"
+            ),
+            "database": bounded_relative_path(
+                root, io.get("database", "state/vacancies.sqlite3"), "io.database"
+            ),
+            "raw_cache_roots": raw_cache_roots,
+            "runtime_root": runtime_root,
+            # Canonical source scope: sorted unique, produced exactly once here
+            # and consumed unchanged by CLI bindings, per-board locks, journal
+            # receipts and the collector's own board loop.
+            "boards": sorted({str(board) for board in enabled}),
+            "collection": collection,
+            "scrapling": scrapling,
+        }
+
+    @staticmethod
+    def preflight(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
+        """Report local collection prerequisites only.
+
+        Runs :meth:`plan` first so malformed configuration shapes and
+        data-home escapes are refused in the canonical collector seam.
+        This is a scope-limited static check: dependency presence, browser
+        executable availability, credential presence (never values) and a
+        read-only data-root inspection. It is NOT a live provider
+        verification and does not imply every adapter is supported.
+        """
+        plan = Collector.plan(root, cfg)
+        checks: list[dict[str, Any]] = []
+
+        def _add(name: str, ok: bool, detail: str) -> None:
+            checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+        boards: list[str] = plan["boards"]
+
+        for module in ("requests", "yaml"):
+            try:
+                ok = importlib.util.find_spec(module) is not None
+                _add(f"dependency:{module}", ok, "installed" if ok else "missing")
+            except Exception as exc:
+                _add(f"dependency:{module}", False, type(exc).__name__)
+
+        saramin_browser = False
+        if "saramin" in boards:
+            from .adapters.saramin import SaraminAdapter
+
+            try:
+                mode = SaraminAdapter(config=cfg.get("saramin") or {})._detail_mode()
+                saramin_browser = mode == "browser"
+                _add("saramin:detail_mode", True, mode)
+            except ValueError as exc:
+                _add("saramin:detail_mode", False, str(exc))
+
+        needs_playwright = saramin_browser or any(
+            b in ("jobkorea", "notefolio") for b in boards
+        )
+        if needs_playwright:
+            try:
+                spec = importlib.util.find_spec("playwright")
+            except Exception as exc:
+                spec = None
+                _add("browser:chromium", False, type(exc).__name__)
+            _add("dependency:playwright", spec is not None,
+                 "installed" if spec is not None else "missing")
+            if spec is not None:
+                try:
+                    from playwright.sync_api import sync_playwright
+
+                    with sync_playwright() as p:
+                        executable = Path(p.chromium.executable_path)
+                        exists = executable.is_file() and os.access(executable, os.X_OK)
+                        _add(
+                            "browser:chromium",
+                            exists,
+                            str(executable) if exists else "chromium executable missing",
+                        )
+                except Exception as exc:
+                    _add("browser:chromium", False, type(exc).__name__)
+
+        if "saramin" in boards:
+            saramin_cfg = cfg.get("saramin") or {}
+            key_name = saramin_cfg.get("access_key_env") or "SARAMIN_ACCESS_KEY"
+            if not isinstance(key_name, str) or not key_name.isidentifier():
+                _add("credential:saramin", False, "invalid environment variable name")
+            else:
+                present = bool(os.environ.get(key_name))
+                _add(f"credential:{key_name}", present, "set" if present else "missing")
+
+        resolved_root = Path(root)
+        try:
+            probe = resolved_root
+            while not probe.exists():
+                if probe.parent == probe:
+                    break
+                probe = probe.parent
+            if not probe.is_dir():
+                _add("data-directory:writable", False, f"not a directory: {probe}")
+            else:
+                writable = os.access(probe, os.W_OK | os.X_OK)
+                _add("data-directory:writable", writable, str(probe))
+                free_bytes = shutil.disk_usage(probe).free
+                _add(
+                    "disk-free",
+                    free_bytes >= 2 * (1024 ** 3),
+                    f"{free_bytes / (1024 ** 3):.1f} GB free",
+                )
+        except Exception as exc:
+            _add("data-directory:writable", False, type(exc).__name__)
+
+        return {
+            "ok": all(check["ok"] for check in checks),
+            "scope": "local prerequisites only; not live provider verification",
+            "checks": checks,
+        }
+
+    @staticmethod
+    def bounded_paths(root: Path, cfg: dict[str, Any]) -> dict[str, Any]:
+        """Backward-compatible view over :meth:`plan` (paths only)."""
+        return Collector.plan(root, cfg)
+
+    def _save_transport_receipt(
+        self, row: JobUrl, attempts: tuple[dict[str, Any], ...]
+    ) -> Path:
+        safe_attempts = sanitized_attempts(attempts)
         safe = row.job_id.replace("/", "_").replace(":", "_")
-        path = self.raw_cache / "_scrapling_failures" / row.board / f"{safe}.json"
+        path = self.root / "state" / "transport-receipts" / row.board / f"{safe}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
-            "board": row.board,
-            "job_id": row.job_id,
-            "url": row.url,
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
-            "attempts": list(attempts),
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "board": row.board,
+                    "job_id": row.job_id,
+                    "recorded_at": datetime.now(timezone.utc).isoformat(),
+                    "attempts": list(safe_attempts),
+                    "schema_version": "market-aligner.sanitized-fetch-attempts.v1",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         return path
 
-    def _fetch_row(self, adapter: Any, row: JobUrl) -> tuple[RawPosting, str | None]:
+    def _fetch_row(
+        self, adapter: Any, row: JobUrl, *, deadline: float | None = None,
+    ) -> tuple[RawPosting, str | None] | None:
         try:
-            return adapter.fetch(row, True), None
-        except Exception as adapter_error:
+            for attempt in range(self.fetch_attempts):
+                if deadline is not None and self.monotonic() >= deadline:
+                    return None
+                try:
+                    posting = adapter.fetch(row, True)
+                    break
+                except Exception:
+                    if attempt + 1 == self.fetch_attempts:
+                        raise
+                    delay = min(60.0, self.fetch_retry_backoff * (2 ** attempt))
+                    if deadline is not None:
+                        delay = min(delay, max(0.0, deadline - self.monotonic()))
+                    if delay:
+                        self.sleeper(delay)
+            # Integrity/privacy failures are not network retries.
+            raw, _ = bind_public_listing(posting, protected_roots=(self.root,))
+            return raw, None
+        except Exception:
+            if deadline is not None and self.monotonic() >= deadline:
+                return None
             if self.scrapling is None:
                 raise
             try:
                 result = self.scrapling.fetch_with_chain(row.url)
             except ScraplingFetchError as scrapling_error:
-                failure_path = self._save_scrapling_failure(row, scrapling_error.attempts)
+                self._save_transport_receipt(row, scrapling_error.attempts)
                 raise RuntimeError(
-                    f"adapter failed ({adapter_error!r}); full Scrapling chain failed; "
-                    f"complete attempts saved to {failure_path}"
+                    "adapter and configured Scrapling chain failed"
                 ) from scrapling_error
-            raw = RawPosting(
-                board=row.board,
-                job_id=row.job_id,
-                url=str(result.response.get("url") or row.url),
-                fetched_at=datetime.now(timezone.utc).isoformat(),
-                raw_text=str(result.response.get("text") or ""),
-                raw_json={
-                    "_collector": {
-                        "primary_adapter_error": repr(adapter_error),
-                        "fallback": "scrapling-full",
-                        "selected_engine": result.engine,
-                    },
-                    "_scrapling": {
-                        "attempts": list(result.attempts),
-                    },
-                },
+            self._save_transport_receipt(row, result.attempts)
+            raw, _ = bind_public_listing(
+                RawPosting(
+                    board=row.board,
+                    job_id=row.job_id,
+                    url=row.url,
+                    fetched_at=datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                    raw_text=str(result.response.get("text") or ""),
+                    raw_json=None,
+                    content_type="text/html",
+                    http_status=int(result.response["status"]),
+                    public_content_base64=str(result.response["body_base64"]),
+                ),
+                protected_roots=(self.root,),
             )
             return raw, result.engine
 
     def migrate_existing(self) -> None:
         configured = list(((self.cfg.get("io") or {}).get("raw_cache_roots") or ()))
-        roots = [self.root / str(path) for path in configured] if configured else [self.raw_cache]
+        roots = (
+            [self.root / str(path) for path in configured]
+            if configured
+            else [self.raw_cache]
+        )
         added, fetched = self.db.import_existing_roots(self.urls_path, roots)
         if added or fetched:
-            self.log(f"[migrate] preserved {added} discovered and {fetched} fetched legacy rows")
+            self.log(
+                f"[migrate] preserved {added} discovered and {fetched} fetched legacy rows"
+            )
 
-    def _discover_board(self, board: str) -> tuple[str, Any, list[JobUrl], Exception | None]:
+    def _board_config(self, board: str) -> dict[str, Any]:
+        """Per-board adapter config; in TARGET mode raise discovery depth only.
+
+        Returns a copy: the configured board mapping is never mutated, and a
+        ``None`` board config is corrected to an empty mapping. Configured
+        values already meeting the floor are kept unchanged, as are all other
+        board settings and all non-TARGET behavior.
+        """
+        config = dict(self.cfg.get(board) or {})
+        target = self.target_per_board
+        if target <= 0:
+            return config
+        if board == "wanted":
+            list_limit = config.get("list_limit")
+            list_limit = list_limit if isinstance(list_limit, int) and not isinstance(list_limit, bool) and list_limit > 0 else 20
+            floor_pages = ((target + list_limit - 1) // list_limit) + 5
+            max_pages = config.get("max_pages")
+            if not (isinstance(max_pages, int) and not isinstance(max_pages, bool) and max_pages >= floor_pages):
+                config["max_pages"] = floor_pages
+        elif board == "jobkorea":
+            max_pages = config.get("max_pages")
+            if not (isinstance(max_pages, int) and not isinstance(max_pages, bool) and max_pages >= 8):
+                config["max_pages"] = 8
+            config["entry_only"] = False
+        elif board == "notefolio":
+            max_scrolls = config.get("max_scrolls")
+            if not (isinstance(max_scrolls, int) and not isinstance(max_scrolls, bool) and max_scrolls >= 100):
+                config["max_scrolls"] = 100
+        return config
+
+    def _discover_board(
+        self, board: str, *, deadline: float | None = None
+    ) -> tuple[str, Any, list[JobUrl], Exception | None]:
+        if deadline is not None and self.monotonic() >= deadline:
+            return board, None, [], None
         adapter_loader = self.adapter_loader or load_adapter
-        adapter = adapter_loader(board, config=dict(self.cfg.get(board, {}) or {}))
+        adapter = adapter_loader(board, config=self._board_config(board))
+        target = self.target_per_board
+        known: set[str] = set()
+        if target > 0:
+            known = self.db.discovered_keys(board)
+            if len(known) >= target:
+                # Target already met by stored postings: skip live discovery
+                # but still return the adapter so saved pending rows resume.
+                return board, adapter, [], None
         rows: list[JobUrl] = []
+        observed_keys: set[str] = set()
         try:
-            for row in adapter.discover(self.terms, live=True):
-                rows.append(row)
+            iterator = iter(adapter.discover(self.terms, live=True))
+            while deadline is None or self.monotonic() < deadline:
+                try:
+                    row = next(iterator)
+                except StopIteration:
+                    break
+                # Preserve every yielded row, including rediscoveries of keys
+                # already known or seen this run (useful to trust upgrades);
+                # only new unique keys count against the target budget.
+                if target > 0 and row.key in observed_keys:
+                    continue
+                observed_keys.add(row.key)
+                rows.append(row)  # preserve the response that crossed the deadline
+                if target > 0:
+                    try:
+                        validate_public_listing_url(row.url)
+                    except ContractValidationError:
+                        continue  # rejected by cycle; never consume target budget
+                    key = row.key
+                    if key not in known:
+                        known.add(key)
+                        if len(known) >= target:
+                            break
         except SourceUnavailable:
             raise
         except Exception as exc:  # preserve pages yielded before a late failure
@@ -404,7 +823,9 @@ class Collector:
             context_sha256=context_sha256,
         )
         if transition is None:
-            job, observed_content_sha256, _old_fetched_at = self.db.fetched_posting(job_key)
+            job, observed_content_sha256, _old_fetched_at = self.db.fetched_posting(
+                job_key
+            )
             if observed_content_sha256 != expected_content_sha256:
                 raise ValueError(
                     f"expected content identity does not match current vacancy: {job_key}"
@@ -413,9 +834,10 @@ class Collector:
                 raise ValueError(
                     f"vacancy board is not enabled by collection config: {job.board}"
                 )
-            old_path = _raw_path(self.raw_cache, RawPosting(
-                job.board, job.job_id, job.url, _old_fetched_at
-            ))
+            old_path = _raw_path(
+                self.raw_cache,
+                RawPosting(job.board, job.job_id, job.url, _old_fetched_at),
+            )
             if not old_path.is_file():
                 raise FileNotFoundError(
                     f"exact old raw-cache response is unavailable: {old_path}"
@@ -481,7 +903,9 @@ class Collector:
             self.crash_injector("after_fetch_before_persist")
             if raw.key != job_key or raw.board != job.board or raw.job_id != job.job_id:
                 self.db.mark_vacancy_refresh_indeterminate(refresh_id)
-                raise ValueError(f"adapter returned a different vacancy identity: {raw.key}")
+                raise ValueError(
+                    f"adapter returned a different vacancy identity: {raw.key}"
+                )
             self.db.record_vacancy_refresh_fetch(
                 refresh_id,
                 new_raw_bytes=raw_posting_bytes(raw),
@@ -523,12 +947,16 @@ class Collector:
                 "finished_at": finished_at(),
                 "started_at": str(transition["started_at"]),
                 "new_raw_object_path": str(
-                    Path("state") / "collection-refresh-objects"
-                    / new_object_sha256[:2] / new_object_sha256
+                    Path("state")
+                    / "collection-refresh-objects"
+                    / new_object_sha256[:2]
+                    / new_object_sha256
                 ),
                 "old_raw_object_path": str(
-                    Path("state") / "collection-refresh-objects"
-                    / old_object_sha256[:2] / old_object_sha256
+                    Path("state")
+                    / "collection-refresh-objects"
+                    / old_object_sha256[:2]
+                    / old_object_sha256
                 ),
                 "raw_cache_file_sha256": new_object_sha256,
                 "raw_cache_path": str(raw_cache_path.relative_to(self.root)),
@@ -545,14 +973,20 @@ class Collector:
             self.crash_injector("after_cas_pre_cache")
         else:
             sealed_value = transition.get("receipt_basis")
-            if transition["status"] != "committed" or not isinstance(sealed_value, dict):
-                raise VacancyRefreshConflict("refresh journal has no recoverable terminal state")
+            if transition["status"] != "committed" or not isinstance(
+                sealed_value, dict
+            ):
+                raise VacancyRefreshConflict(
+                    "refresh journal has no recoverable terminal state"
+                )
             sealed = sealed_value
             _verify_refresh_objects(self.root, transition)
 
         new_raw_bytes = bytes(transition["new_raw_bytes"])
         new_raw = raw_posting_from_bytes(new_raw_bytes)
-        _current_job, current_content, current_fetched_at = self.db.fetched_posting(job_key)
+        _current_job, current_content, current_fetched_at = self.db.fetched_posting(
+            job_key
+        )
         if (
             current_content != transition["new_content_sha256"]
             or current_fetched_at != transition["new_fetched_at"]
@@ -560,50 +994,122 @@ class Collector:
             raise VacancyRefreshConflict("committed refresh has been superseded")
         raw_path = _raw_path(self.raw_cache, new_raw)
         if sealed.get("raw_cache_path") != str(raw_path.relative_to(self.root)):
-            raise VacancyRefreshConflict("sealed raw-cache path differs from vacancy identity")
+            raise VacancyRefreshConflict(
+                "sealed raw-cache path differs from vacancy identity"
+            )
         _replace_durable_bytes(raw_path, new_raw_bytes)
         self.crash_injector("after_cache_pre_receipt")
         return {**sealed, "raw_cache_path_absolute": str(raw_path)}
 
-    def cycle(self) -> dict[str, int]:
+    def cycle(self, *, deadline: float | None = None) -> dict[str, int]:
         adapters: dict[str, Any] = {}
         fetch_queue: list[tuple[Any, JobUrl]] = []
         pending_by_board: dict[str, deque[tuple[Any, JobUrl]]] = {}
         discovered = new = errors = 0
+
+        def past_deadline() -> bool:
+            return deadline is not None and self.monotonic() >= deadline
+
         pending = self.db.boards_with_pending_discoveries(self.boards)
-        due = [b for b in self.boards if b in pending or self.db.source_due(
-            b, float((self.cfg.get(b, {}) or {}).get("minimum_poll_minutes", 15) or 15)
-        )]
+        due = [
+            b
+            for b in self.boards
+            if b in pending
+            or self.db.source_due(
+                b,
+                float(
+                    (self.cfg.get(b, {}) or {}).get("minimum_poll_minutes", 15) or 15
+                ),
+            )
+        ]
+        if past_deadline():
+            due = []
         if not due:
             self.log("[cycle] no source is due yet")
-            return {"seen": 0, "new": 0, "fetched": 0, "errors": 0,
-                    "database_total": self.db.stats()["postings"]}
+            return {
+                "seen": 0,
+                "new": 0,
+                "fetched": 0,
+                "errors": 0,
+                "database_total": self.db.stats()["postings"],
+            }
         fetched = 0
         with (
             ThreadPoolExecutor(max_workers=max(1, self.source_workers)) as source_pool,
             ThreadPoolExecutor(max_workers=max(1, self.fetch_workers)) as fetch_pool,
         ):
-            futures = {source_pool.submit(self._discover_board, b): b for b in due}
+            futures = {
+                source_pool.submit(self._discover_board, b, deadline=deadline): b for b in due
+            }
             fetch_futures: dict[Any, JobUrl] = {}
             for future in as_completed(futures):
                 board = futures[future]
                 try:
                     _, adapter, rows, discovery_error = future.result()
+                    if adapter is None:
+                        continue
                     adapters[board] = adapter
                     discovered += len(rows)
                     for row in rows:
-                        is_new = self.db.upsert_discovered(row)
+                        try:
+                            validate_public_listing_url(row.url)
+                        except ContractValidationError:
+                            errors += 1
+                            self.log(
+                                f"[discover] {board} rejected an unsafe listing URL"
+                            )
+                            continue
+                        observed = JobUrl(
+                            board=row.board,
+                            job_id=row.job_id,
+                            url=row.url,
+                            posted_at=row.posted_at,
+                            discovered_at=(
+                                row.discovered_at
+                                or datetime.now(timezone.utc).strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ"
+                                )
+                            ),
+                            market=row.market,
+                        )
+                        is_new = self.db.upsert_discovered(
+                            observed, release_trusted=True
+                        )
                         new += int(is_new)
-                        if not self.db.has_raw(row.key):
-                            pending_by_board.setdefault(board, deque()).append((adapter, row))
-                    self.db.mark_source(board, repr(discovery_error) if discovery_error else None)
+                        if not self.discover_only and not self.db.has_raw(observed.key):
+                            pending_by_board.setdefault(board, deque()).append(
+                                (adapter, observed)
+                            )
+                    if not self.discover_only:
+                        saved_seen = {row.key for _, row in pending_by_board.get(board, ())}
+                        for saved in self.db.pending_discoveries([board]):
+                            if saved.key in saved_seen or self.db.has_raw(saved.key):
+                                continue
+                            try:
+                                validate_public_listing_url(saved.url)
+                            except ContractValidationError:
+                                errors += 1
+                                self.log(
+                                    f"[resume] {board} rejected an unsafe saved listing URL"
+                                )
+                                continue
+                            saved_seen.add(saved.key)
+                            pending_by_board.setdefault(board, deque()).append(
+                                (adapters[board], saved)
+                            )
+
+                    self.db.mark_source(
+                        board, repr(discovery_error) if discovery_error else None
+                    )
                     self.log(
                         f"[discover] {board}: {len(rows)} current matches, "
                         f"{len(pending_by_board.get(board, ()))} to fetch"
                     )
                     if discovery_error:
                         errors += 1
-                        self.log(f"[discover] {board} ended early after preserving {len(rows)} matches: {discovery_error}")
+                        self.log(
+                            f"[discover] {board} ended early after preserving {len(rows)} matches: {discovery_error}"
+                        )
                 except SourceUnavailable as exc:
                     self.db.mark_source(board, str(exc))
                     self.log(f"[discover] {exc}")
@@ -611,6 +1117,9 @@ class Collector:
                     errors += 1
                     self.db.mark_source(board, repr(exc))
                     self.log(f"[discover] {board} failed: {exc}")
+
+            if past_deadline():
+                pending_by_board.clear()
 
             # Round-robin the per-board queues before submission. A board with
             # thousands of matches must not occupy the executor's entire FIFO
@@ -625,28 +1134,93 @@ class Collector:
                     if queue:
                         next_active.append(board)
                 active = next_active
-            for adapter, row in fetch_queue:
-                fetch_futures[fetch_pool.submit(self._fetch_row, adapter, row)] = row
 
-            for future in as_completed(fetch_futures):
-                row = fetch_futures[future]
-                try:
-                    raw, fallback_engine = future.result()
-                    self.db.store_raw(raw)
-                    _save_raw(self.raw_cache, raw)
-                    fetched += 1
-                    if fallback_engine:
-                        self.log(f"[fetch] {row.key} recovered by Scrapling {fallback_engine}")
-                    if fetched % 25 == 0:
-                        self.log(f"[fetch] {fetched}/{len(fetch_queue)} stored")
-                except Exception as exc:
-                    errors += 1
-                    self.db.record_error(row.key, repr(exc))
-                    self.log(f"[fetch] {row.key} failed: {exc}")
+            queued = iter(fetch_queue)
+
+            def submit_next() -> None:
+                if past_deadline():
+                    return
+                pair = next(queued, None)
+                if pair is None:
+                    return
+                adapter, row = pair
+                fetch_futures[fetch_pool.submit(self._bounded_fetch, adapter, row, deadline)] = row
+
+            for _ in range(max(1, self.fetch_workers)):
+                submit_next()
+
+            while fetch_futures:
+                done, _ = wait(set(fetch_futures), return_when=FIRST_COMPLETED)
+                for future in done:
+                    row = fetch_futures.pop(future)
+                    try:
+                        outcome = future.result()
+                        if outcome is None:
+                            # past deadline at worker entry: skipped, stays pending, not an error
+                            continue
+                        raw, fallback_engine = outcome
+                        self.db.store_raw(raw, release_trusted=True)
+                        _save_raw(self.raw_cache, raw)
+                        fetched += 1
+                        if fallback_engine:
+                            self.log(
+                                f"[fetch] {row.key} recovered by Scrapling {fallback_engine}"
+                            )
+                        if fetched % 25 == 0:
+                            self.log(f"[fetch] {fetched}/{len(fetch_queue)} stored")
+                    except Exception:
+                        errors += 1
+                        self.db.record_error(row.key, "fetch_error")
+                        self.log(f"[fetch] {row.key} failed: fetch_error")
+                    submit_next()
         total = self.db.export_urls(self.urls_path)
-        result = {"seen": discovered, "new": new, "fetched": fetched, "errors": errors, "database_total": total}
+        result = {
+            "seen": discovered,
+            "new": new,
+            "fetched": fetched,
+            "errors": errors,
+            "database_total": total,
+        }
         self.log(f"[cycle] {result}")
         return result
+
+    def _respect_inter_fetch_delay(self, board: str, deadline: float | None) -> bool:
+        """Space this board's fetch starts by ``delay_seconds``.
+
+        Returns False when the deadline expires while waiting; callers skip
+        the row (no error). Boards are independent; other boards unaffected.
+        """
+        lock = self._board_locks[board]
+        with lock:
+            now = self.monotonic()
+            if deadline is not None and now >= deadline:
+                return False
+            wait = self._next_fetch_start[board] - now
+            while wait > 0:
+                if deadline is not None:
+                    remaining = deadline - now
+                    if remaining <= 0:
+                        return False
+                    wait = min(wait, remaining)
+                self.sleeper(wait)
+                now = self.monotonic()
+                if deadline is not None and now >= deadline:
+                    return False
+                wait = self._next_fetch_start[board] - now
+            self._next_fetch_start[board] = max(now, self._next_fetch_start[board]) + self.inter_fetch_delay
+            return True
+
+    def _bounded_fetch(
+        self,
+        adapter: Any,
+        row: JobUrl,
+        deadline: float | None,
+    ) -> tuple[RawPosting, str | None] | None:
+        if deadline is not None and self.monotonic() >= deadline:
+            return None
+        if not self._respect_inter_fetch_delay(row.board, deadline):
+            return None
+        return self._fetch_row(adapter, row, deadline=deadline)
 
     def run(
         self, hours: float = 0, poll_minutes: float = 15, once: bool = False
@@ -659,8 +1233,8 @@ class Collector:
         started = self.monotonic()
         deadline = started + hours * 3600 if hours > 0 else None
         cycles: list[dict[str, int]] = []
-        while True:
-            cycles.append(self.cycle())
+        while deadline is None or self.monotonic() < deadline:
+            cycles.append(self.cycle(deadline=deadline))
             if once:
                 return cycles
             assert deadline is not None
@@ -668,3 +1242,4 @@ class Collector:
             if remaining <= 0:
                 return cycles
             self.sleeper(min(max(1, poll_minutes * 60), remaining))
+        return cycles

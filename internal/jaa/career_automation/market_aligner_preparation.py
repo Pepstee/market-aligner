@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -32,6 +33,7 @@ from .candidate_application_factory import (
     CandidateApplicationMaterialization,
     CandidateApplicationMaterializationReceipt,
     CandidateApplicationDeploymentBinding,
+    MarketApplicationDecisionAuthority,
     build_candidate_application_deployment_binding,
     build_market_application_decision_authority,
     materialize_candidate_application_source,
@@ -43,6 +45,7 @@ from cv_generation.editorial_composition import (
     EditorialCompositionRuntime,
     build_cover_letter_editorial_request,
     build_editorial_request,
+    run_cover_letter_composition_runtime,
     run_editorial_composition_runtime,
 )
 from .handoff_admission import (
@@ -135,6 +138,84 @@ class MarketApplicationPreparation:
     recruiter_archive_root: str | None = None
     recruiter_archive_manifest_relative_path: str | None = None
     release_authority: bool = False
+
+
+@dataclass(frozen=True)
+class MarketApplicationMaterializationContext:
+    """Exact admitted MA source and authorities for the system submit runner."""
+
+    application_id: str
+    materialization: CandidateApplicationMaterialization
+    market_decision_authority: MarketApplicationDecisionAuthority
+    decision_receipt: Mapping[str, object]
+    candidate_projection: Mapping[str, object]
+    raw_listing_bytes: bytes = field(repr=False)
+    candidate_authority_bytes: bytes = field(repr=False)
+    contact_authority_path: Path
+    profile_id: str
+    profile_version: str
+    candidate_intent_sha256: str
+    final_score: float
+    opportunity_score: float
+    geography_priority_rank: int
+    source_observed_at: str
+    release_authority: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.application_id, str)
+            or len(self.application_id) != 68
+            or not self.application_id.startswith("app_")
+            or any(char not in "0123456789abcdef" for char in self.application_id[4:])
+            or type(self.materialization) is not CandidateApplicationMaterialization
+            or type(self.market_decision_authority)
+            is not MarketApplicationDecisionAuthority
+            or self.market_decision_authority.application_id != self.application_id
+            or self.materialization.receipt.deployment_binding.application_id
+            != self.application_id
+            or self.materialization.source.job_key
+            != self.market_decision_authority.source_job_key
+            or self.materialization.source.vacancy_sha256
+            != self.market_decision_authority.raw_listing_sha256
+            or not isinstance(self.decision_receipt, Mapping)
+            or not isinstance(self.candidate_projection, Mapping)
+            or not isinstance(self.raw_listing_bytes, bytes)
+            or not isinstance(self.candidate_authority_bytes, bytes)
+            or hashlib.sha256(self.raw_listing_bytes).hexdigest()
+            != self.market_decision_authority.raw_listing_sha256
+            or hashlib.sha256(self.candidate_authority_bytes).hexdigest()
+            != self.market_decision_authority.candidate_authority_file_sha256
+            or self.market_decision_authority.decision_receipt()
+            != dict(self.decision_receipt)
+            or self.market_decision_authority.candidate_projection_sha256
+            != self.candidate_projection.get("projection_sha256")
+            or not isinstance(self.profile_id, str)
+            or not self.profile_id.strip()
+            or not isinstance(self.profile_version, str)
+            or not self.profile_version.strip()
+            or not isinstance(self.candidate_intent_sha256, str)
+            or len(self.candidate_intent_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in self.candidate_intent_sha256)
+            or isinstance(self.final_score, bool)
+            or not isinstance(self.final_score, (int, float))
+            or not math.isfinite(self.final_score)
+            or not (0.0 <= self.final_score <= 100.0)
+            or isinstance(self.opportunity_score, bool)
+            or not isinstance(self.opportunity_score, (int, float))
+            or not math.isfinite(self.opportunity_score)
+            or not (0.0 <= self.opportunity_score <= 1.0)
+            or isinstance(self.geography_priority_rank, bool)
+            or not isinstance(self.geography_priority_rank, int)
+            or self.geography_priority_rank not in {1, 2, 3, 4, 5}
+            or not isinstance(self.source_observed_at, str)
+            or not self.source_observed_at
+            or not isinstance(self.contact_authority_path, Path)
+            or not self.contact_authority_path.is_absolute()
+            or self.release_authority is not False
+        ):
+            raise ValueError("market application materialization context differs")
+        self.market_decision_authority.__post_init__()
+        self.materialization.receipt.__post_init__()
 
 
 class PreparationInputMaterializer(Protocol):
@@ -334,7 +415,10 @@ class CanonicalPreparationInputMaterializer:
             raise ValueError("canonical materializer listing differs from vacancy")
         return {
             "base_source": materialization.source,
+            "candidate_projection": dict(projection),
+            "decision_receipt": dict(decision),
             "listing_text": listing_text,
+            "market_decision_authority": market_authority,
             "materialization": materialization,
             "request": request,
             "cover_letter_request": cover_request,
@@ -374,7 +458,8 @@ def prepare_admitted_market_application_from_authorities(
     candidate_authority_bytes: bytes | None = None,
     contact_resource_lease: CandidateContactResourceLease | None = None,
     output_root_descriptor: int | None = None,
-) -> MarketApplicationPreparation:
+    materialization_only: bool = False,
+) -> MarketApplicationPreparation | MarketApplicationMaterializationContext:
     """Materialize one real preparation from admitted and operator authority.
 
     Provider-backed writing remains outside this function. The materializer
@@ -395,10 +480,16 @@ def prepare_admitted_market_application_from_authorities(
         raise ValueError("production preparation requires canonical contact loader")
     if environment == "production" and (
         type(input_materializer) is not CanonicalPreparationInputMaterializer
-        or type(editorial_runtime) is not EditorialCompositionRuntime
-        or type(cover_letter_editorial_runtime) is not EditorialCompositionRuntime
-        or editorial_runtime.document_kind != "cv"
-        or cover_letter_editorial_runtime.document_kind != "cover_letter"
+        or (
+            not materialization_only
+            and (
+                type(editorial_runtime) is not EditorialCompositionRuntime
+                or type(cover_letter_editorial_runtime)
+                is not EditorialCompositionRuntime
+                or editorial_runtime.document_kind != "cv"
+                or cover_letter_editorial_runtime.document_kind != "cover_letter"
+            )
+        )
     ):
         raise ValueError(
             "production preparation requires canonical materializer and editorial runtime"
@@ -489,7 +580,10 @@ def prepare_admitted_market_application_from_authorities(
     materialization = arguments.get("materialization")
     if source is None:
         raise ValueError("preparation materializer omitted the application source")
-    if request is None or (environment == "production" and cover_letter_request is None):
+    if not materialization_only and (
+        request is None
+        or (environment == "production" and cover_letter_request is None)
+    ):
         raise ValueError("preparation materializer omitted an editorial request")
     if not isinstance(materialization, CandidateApplicationMaterialization):
         raise ValueError("preparation requires typed candidate materialization")
@@ -512,12 +606,41 @@ def prepare_admitted_market_application_from_authorities(
         raise ValueError("materialization differs from admitted candidate authorities")
     if source.contact != contact_authority.contact:
         raise ValueError("materialized application contact differs from operator authority")
-    if request.authority.source_sha256 != candidate_sha256:
+    if request is not None and request.authority.source_sha256 != candidate_sha256:
         raise ValueError("materialized editorial request differs from candidate authority")
-    receipt.authorize_editorial_request(request)
-    if cover_letter_request is not None:
+    if request is not None:
+        receipt.authorize_editorial_request(request)
+    if cover_letter_request is not None and not materialization_only:
         receipt.authorize_editorial_request(cover_letter_request)
     arguments["materialization_receipt"] = receipt
+    if materialization_only:
+        market_authority = arguments.get("market_decision_authority")
+        decision_receipt = arguments.get("decision_receipt")
+        candidate_projection = arguments.get("candidate_projection")
+        if (
+            type(market_authority) is not MarketApplicationDecisionAuthority
+            or not isinstance(decision_receipt, Mapping)
+            or not isinstance(candidate_projection, Mapping)
+            or not verified.candidate_intent_sha256
+        ):
+            raise ValueError("integrated materialization context is incomplete")
+        return MarketApplicationMaterializationContext(
+            application_id=verified.application_id,
+            materialization=materialization,
+            market_decision_authority=market_authority,
+            decision_receipt=dict(decision_receipt),
+            candidate_projection=dict(candidate_projection),
+            raw_listing_bytes=verified.raw_listing_bytes,
+            candidate_authority_bytes=candidate_bytes,
+            contact_authority_path=contact_path,
+            profile_id=verified.profile_id,
+            profile_version=verified.profile_version,
+            candidate_intent_sha256=verified.candidate_intent_sha256,
+            final_score=verified.final_score,
+            opportunity_score=verified.opportunity_score,
+            geography_priority_rank=verified.geography_priority_rank,
+            source_observed_at=verified.source_observed_at,
+        )
     if environment == "production":
         assert editorial_runtime is not None
         assert cover_letter_editorial_runtime is not None
@@ -555,7 +678,7 @@ def prepare_admitted_market_application_from_authorities(
             cover_humanized_draft,
             cover_writer_evidence,
             cover_humanizer_evidence,
-        ) = run_editorial_composition_runtime(
+        ) = run_cover_letter_composition_runtime(
             cover_letter_request,
             runtime=cover_letter_editorial_runtime,
             materialization_receipt=receipt,

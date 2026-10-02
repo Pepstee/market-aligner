@@ -8,6 +8,7 @@ non-release and grants no browser or submission authority.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -39,12 +40,11 @@ from .current_time import installed_production_current_time_witness
 from .handoff_admission import HandoffAdmissionStore, ProtectedLocalOutbox
 from .market_aligner_preparation import (
     CanonicalPreparationInputMaterializer,
+    MarketApplicationMaterializationContext,
     MarketApplicationPreparation,
     prepare_admitted_market_application_from_authorities,
 )
-from .production_handoff_admission_runner import PRODUCTION_ADMISSION_DATABASE
 from .production_handoff_admission_runner import (
-    PRODUCTION_ADMISSION_ROOT,
     _PinnedProductionPaths,
     _ProductionAdmissionDeployment,
     _open_absolute_directory_chain,
@@ -52,9 +52,9 @@ from .production_handoff_admission_runner import (
 from .production_handoff_runner import (
     PRODUCTION_MARKET_DATA_HOME,
     PRODUCTION_MARKET_OUTBOX_ROOT,
-    PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT,
     PRODUCTION_MARKET_REPOSITORY_ROOT,
     _read_root_owned_configuration,
+    installed_production_handoff_deployment,
 )
 from .production_recruiter_assessor import ProductionDetachedRecruiterAssessor
 
@@ -140,6 +140,7 @@ class ProductionPreparationDeploymentError(ValueError):
 @dataclass(frozen=True)
 class _ProductionPreparationDeployment:
     repository_root: Path
+    data_home: Path
     admission_database: Path
     outbox_root: Path
     candidate_authority_path: Path
@@ -149,8 +150,13 @@ class _ProductionPreparationDeployment:
     output_root: Path
     recruiter_archive_root: Path
     codex_binary: Path
+    poppler_bin: Path
     model: str
     timeout_seconds: float
+
+    @property
+    def poppler_library_directory(self) -> Path:
+        return self.poppler_bin.parent / "lib/x86_64-linux-gnu"
 
 
 @dataclass(frozen=True)
@@ -462,34 +468,238 @@ class _PinnedPreparationResources:
             os.close(self._descriptors.pop())
 
 
-def _expected_configuration() -> dict[str, object]:
-    return {
-        "admission_database": str(PRODUCTION_ADMISSION_DATABASE),
-        "candidate_authority_path": str(PRODUCTION_CANDIDATE_AUTHORITY_PATH),
+_PREPARATION_HOST_ARGUMENTS = (
+    "data_home",
+    "repository_root",
+    "outbox_root",
+    "candidate_authority_path",
+    "contact_authority_path",
+    "contact_public_key_path",
+    "contact_registry_path",
+    "codex_binary",
+    "poppler_bin",
+)
+_PREPARATION_PATH_KEYS = frozenset(
+    {
+        "admission_database",
+        "candidate_authority_path",
+        "codex_binary",
+        "contact_authority_path",
+        "contact_public_key_path",
+        "contact_registry_path",
+        "outbox_root",
+        "poppler_bin",
+        "output_root",
+        "recruiter_archive_root",
+        "repository_root",
+    }
+)
+
+
+def _normalized_preparation_path(value: object, label: str) -> Path:
+    if not isinstance(value, (str, Path)):
+        raise ProductionPreparationDeploymentError(
+            f"preparation configuration {label} is invalid"
+        )
+    path = Path(value)
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or str(path) != str(value)
+        or path == Path("/")
+    ):
+        raise ProductionPreparationDeploymentError(
+            f"preparation configuration {label} is not a normalized absolute path"
+        )
+    return path
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left in right.parents or right in left.parents
+
+
+def _expected_configuration(
+    *,
+    data_home: str | Path = PRODUCTION_MARKET_DATA_HOME,
+    repository_root: str | Path = PRODUCTION_MARKET_REPOSITORY_ROOT,
+    outbox_root: str | Path = PRODUCTION_MARKET_OUTBOX_ROOT,
+    candidate_authority_path: str | Path = PRODUCTION_CANDIDATE_AUTHORITY_PATH,
+    contact_authority_path: str | Path = PRODUCTION_CONTACT_AUTHORITY_PATH,
+    contact_public_key_path: str | Path = PRODUCTION_CONTACT_PUBLIC_KEY_PATH,
+    contact_registry_path: str | Path = PRODUCTION_CONTACT_REGISTRY_PATH,
+    codex_binary: str | Path = PRODUCTION_CODEX_BINARY,
+    poppler_bin: str | Path = PRODUCTION_POPPLER_BIN,
+) -> dict[str, object]:
+    data_home_path = _normalized_preparation_path(data_home, "data_home")
+    repository_path = _normalized_preparation_path(repository_root, "repository_root")
+    outbox_path = _normalized_preparation_path(outbox_root, "outbox_root")
+    authority_path = _normalized_preparation_path(
+        candidate_authority_path, "candidate_authority_path"
+    )
+    contact_path = _normalized_preparation_path(
+        contact_authority_path, "contact_authority_path"
+    )
+    public_key_path = _normalized_preparation_path(
+        contact_public_key_path, "contact_public_key_path"
+    )
+    registry_path = _normalized_preparation_path(
+        contact_registry_path, "contact_registry_path"
+    )
+    codex_path = _normalized_preparation_path(codex_binary, "codex_binary")
+    poppler_path = _normalized_preparation_path(poppler_bin, "poppler_bin")
+    document = {
+        "admission_database": str(
+            data_home_path / "state/jaa-production-admissions/admissions.sqlite3"
+        ),
+        "candidate_authority_path": str(authority_path),
         "candidate_authority_sha256": PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
-        "codex_binary": str(PRODUCTION_CODEX_BINARY),
+        "codex_binary": str(codex_path),
         "codex_binary_sha256": PRODUCTION_CODEX_BINARY_SHA256,
-        "contact_authority_path": str(PRODUCTION_CONTACT_AUTHORITY_PATH),
+        "contact_authority_path": str(contact_path),
         "contact_envelope_sha256": PRODUCTION_CONTACT_ENVELOPE_SHA256,
-        "contact_public_key_path": str(PRODUCTION_CONTACT_PUBLIC_KEY_PATH),
+        "contact_public_key_path": str(public_key_path),
         "contact_public_key_file_sha256": PRODUCTION_CONTACT_PUBLIC_KEY_FILE_SHA256,
-        "contact_registry_path": str(PRODUCTION_CONTACT_REGISTRY_PATH),
+        "contact_registry_path": str(registry_path),
         "contact_registry_file_sha256": PRODUCTION_CONTACT_REGISTRY_FILE_SHA256,
         "model": PRODUCTION_CODEX_MODEL,
-        "outbox_root": str(PRODUCTION_MARKET_OUTBOX_ROOT),
-        "poppler_bin": str(PRODUCTION_POPPLER_BIN),
+        "outbox_root": str(outbox_path),
+        "poppler_bin": str(poppler_path),
         "poppler_sha256": dict(PRODUCTION_POPPLER_SHA256),
-        "output_root": str(PRODUCTION_PREPARATION_OUTPUT_ROOT),
-        "recruiter_archive_root": str(PRODUCTION_RECRUITER_ARCHIVE_ROOT),
-        "repository_root": str(PRODUCTION_MARKET_REPOSITORY_ROOT),
+        "output_root": str(
+            data_home_path / "state/jaa-production-preparations"
+        ),
+        "recruiter_archive_root": str(
+            data_home_path / "state/jaa-production-recruiter-diagnostics"
+        ),
+        "repository_root": str(repository_path),
         "schema_version": _CONFIG_SCHEMA,
         "timeout_seconds": PRODUCTION_CODEX_TIMEOUT_SECONDS,
         "trust_root_id": PRODUCTION_HANDOFF_TRUST_ROOT_ID,
     }
+    _validate_preparation_configuration(document)
+    return document
 
 
-def production_preparation_configuration_bytes() -> bytes:
-    return canonical_json_bytes(_expected_configuration())
+def _validate_preparation_configuration(document: object) -> dict[str, object]:
+    if type(document) is not dict:
+        raise ProductionPreparationDeploymentError(
+            "preparation deployment keys differ from the supported schema"
+        )
+    expected = {
+        "admission_database",
+        "candidate_authority_path",
+        "candidate_authority_sha256",
+        "codex_binary",
+        "codex_binary_sha256",
+        "contact_authority_path",
+        "contact_envelope_sha256",
+        "contact_public_key_path",
+        "contact_public_key_file_sha256",
+        "contact_registry_path",
+        "contact_registry_file_sha256",
+        "model",
+        "outbox_root",
+        "poppler_bin",
+        "poppler_sha256",
+        "output_root",
+        "recruiter_archive_root",
+        "repository_root",
+        "schema_version",
+        "timeout_seconds",
+        "trust_root_id",
+    }
+    if set(document) != expected:
+        raise ProductionPreparationDeploymentError(
+            "preparation deployment keys differ from the supported schema"
+        )
+    fixed_values = {
+        "candidate_authority_sha256": PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
+        "codex_binary_sha256": PRODUCTION_CODEX_BINARY_SHA256,
+        "contact_envelope_sha256": PRODUCTION_CONTACT_ENVELOPE_SHA256,
+        "contact_public_key_file_sha256": PRODUCTION_CONTACT_PUBLIC_KEY_FILE_SHA256,
+        "contact_registry_file_sha256": PRODUCTION_CONTACT_REGISTRY_FILE_SHA256,
+        "model": PRODUCTION_CODEX_MODEL,
+        "poppler_sha256": dict(PRODUCTION_POPPLER_SHA256),
+        "schema_version": _CONFIG_SCHEMA,
+        "timeout_seconds": PRODUCTION_CODEX_TIMEOUT_SECONDS,
+        "trust_root_id": PRODUCTION_HANDOFF_TRUST_ROOT_ID,
+    }
+    if any(document.get(key) != value for key, value in fixed_values.items()):
+        raise ProductionPreparationDeploymentError(
+            "preparation deployment authority or dependency identity differs"
+        )
+    paths = {
+        key: _normalized_preparation_path(document.get(key), key)
+        for key in _PREPARATION_PATH_KEYS
+    }
+    database = paths["admission_database"]
+    if database.parts[-3:] != (
+        "state",
+        "jaa-production-admissions",
+        "admissions.sqlite3",
+    ):
+        raise ProductionPreparationDeploymentError(
+            "preparation admission database is outside the deployed data home"
+        )
+    data_home = database.parents[2]
+    if (
+        paths["output_root"]
+        != data_home / "state/jaa-production-preparations"
+        or paths["recruiter_archive_root"]
+        != data_home / "state/jaa-production-recruiter-diagnostics"
+    ):
+        raise ProductionPreparationDeploymentError(
+            "preparation output roots differ from the deployed data home"
+        )
+    core_roots = (
+        paths["repository_root"],
+        data_home,
+        paths["outbox_root"],
+    )
+    if any(
+        _paths_overlap(core_roots[left], core_roots[right])
+        for left in range(len(core_roots))
+        for right in range(left + 1, len(core_roots))
+    ):
+        raise ProductionPreparationDeploymentError(
+            "preparation repository, data and outbox roots overlap"
+        )
+    external_files = (
+        paths["candidate_authority_path"],
+        paths["contact_authority_path"],
+        paths["contact_public_key_path"],
+        paths["contact_registry_path"],
+        paths["codex_binary"],
+        paths["poppler_bin"],
+    )
+    if any(
+        _paths_overlap(path, root)
+        for path in external_files
+        for root in core_roots
+    ):
+        raise ProductionPreparationDeploymentError(
+            "preparation authority or dependency path overlaps a deployment root"
+        )
+    if paths["poppler_bin"].name != "bin":
+        raise ProductionPreparationDeploymentError(
+            "Poppler binary directory must be named bin"
+        )
+    return document
+
+
+def production_preparation_configuration_bytes(
+    **host_paths: str | Path,
+) -> bytes:
+    if host_paths and set(host_paths) != set(_PREPARATION_HOST_ARGUMENTS):
+        raise ProductionPreparationDeploymentError(
+            "host preparation requires all nine deployment paths"
+        )
+    document = (
+        _expected_configuration(**host_paths)
+        if host_paths
+        else _expected_configuration()
+    )
+    return canonical_json_bytes(document)
 
 
 def installed_production_preparation_deployment() -> _ProductionPreparationDeployment:
@@ -498,21 +708,43 @@ def installed_production_preparation_deployment() -> _ProductionPreparationDeplo
         document = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProductionPreparationDeploymentError("preparation deployment is invalid JSON") from exc
-    if document != _expected_configuration() or raw != production_preparation_configuration_bytes():
-        raise ProductionPreparationDeploymentError("preparation deployment differs from compiled authority")
-    if Path(__file__).resolve().parents[3] != PRODUCTION_MARKET_REPOSITORY_ROOT:
+    validated = _validate_preparation_configuration(document)
+    if raw != canonical_json_bytes(validated):
+        raise ProductionPreparationDeploymentError(
+            "preparation deployment is not canonical JSON"
+        )
+    values = {
+        key: Path(validated[key])
+        for key in _PREPARATION_PATH_KEYS
+    }
+    data_home = values["admission_database"].parents[2]
+    handoff = installed_production_handoff_deployment()
+    if (
+        data_home != handoff.data_home
+        or values["repository_root"] != handoff.repository_root
+        or values["outbox_root"] != handoff.output_root
+        or values["candidate_authority_path"] != handoff.candidate_authority_path
+        or validated["candidate_authority_sha256"]
+        != handoff.candidate_authority_sha256
+    ):
+        raise ProductionPreparationDeploymentError(
+            "preparation deployment differs from the installed handoff authority"
+        )
+    if Path(__file__).resolve().parents[3] != values["repository_root"]:
         raise ProductionPreparationDeploymentError("preparation executes from another repository")
     return _ProductionPreparationDeployment(
-        repository_root=PRODUCTION_MARKET_REPOSITORY_ROOT,
-        admission_database=PRODUCTION_ADMISSION_DATABASE,
-        outbox_root=PRODUCTION_MARKET_OUTBOX_ROOT,
-        candidate_authority_path=PRODUCTION_CANDIDATE_AUTHORITY_PATH,
-        contact_authority_path=PRODUCTION_CONTACT_AUTHORITY_PATH,
-        contact_public_key_path=PRODUCTION_CONTACT_PUBLIC_KEY_PATH,
-        contact_registry_path=PRODUCTION_CONTACT_REGISTRY_PATH,
-        output_root=PRODUCTION_PREPARATION_OUTPUT_ROOT,
-        recruiter_archive_root=PRODUCTION_RECRUITER_ARCHIVE_ROOT,
-        codex_binary=PRODUCTION_CODEX_BINARY,
+        repository_root=values["repository_root"],
+        data_home=data_home,
+        admission_database=values["admission_database"],
+        outbox_root=values["outbox_root"],
+        candidate_authority_path=values["candidate_authority_path"],
+        contact_authority_path=values["contact_authority_path"],
+        contact_public_key_path=values["contact_public_key_path"],
+        contact_registry_path=values["contact_registry_path"],
+        output_root=values["output_root"],
+        recruiter_archive_root=values["recruiter_archive_root"],
+        codex_binary=values["codex_binary"],
+        poppler_bin=values["poppler_bin"],
         model=PRODUCTION_CODEX_MODEL,
         timeout_seconds=PRODUCTION_CODEX_TIMEOUT_SECONDS,
     )
@@ -581,7 +813,12 @@ def _require_compatible_admitted_producer(
         raise ProductionPreparationDeploymentError("producer commit identity is malformed")
     if admitted_producer_commit == current_commit:
         return
-    repository = f"/proc/self/fd/{repository_descriptor}"
+    try:
+        repository = _descriptor_directory_path(repository_descriptor)
+    except OSError as exc:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer repository lease is unavailable on this host"
+        ) from exc
     try:
         ancestor = subprocess.run(
             [
@@ -623,6 +860,54 @@ def _require_compatible_admitted_producer(
         raise ProductionPreparationDeploymentError(
             "handoff authority changed after the admitted producer commit"
         )
+    try:
+        _require_descriptor_path_identity(repository_descriptor, repository)
+    except OSError as exc:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer repository lease changed during verification"
+        ) from exc
+
+
+def _normalized_device(value: int) -> int:
+    return value & ((1 << 64) - 1)
+
+
+def _require_descriptor_path_identity(descriptor: int, path: str) -> None:
+    descriptor_metadata = os.fstat(descriptor)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    # Linux exposes this exact already-owned descriptor through a kernel link.
+    # Ordinary caller paths must still reject symlinks; both routes verify inode
+    # and device against the original descriptor after opening.
+    if path != f"/proc/self/fd/{descriptor}":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    path_descriptor = os.open(path, flags)
+    try:
+        path_metadata = os.fstat(path_descriptor)
+    finally:
+        os.close(path_descriptor)
+    if (
+        not stat.S_ISDIR(descriptor_metadata.st_mode)
+        or not stat.S_ISDIR(path_metadata.st_mode)
+        or descriptor_metadata.st_ino != path_metadata.st_ino
+        or _normalized_device(descriptor_metadata.st_dev)
+        != _normalized_device(path_metadata.st_dev)
+    ):
+        raise OSError("descriptor directory identity differs")
+
+
+def _descriptor_directory_path(descriptor: int) -> str:
+    proc_path = f"/proc/self/fd/{descriptor}"
+    if os.path.isdir(proc_path):
+        _require_descriptor_path_identity(descriptor, proc_path)
+        return proc_path
+    if not hasattr(fcntl, "F_GETPATH"):
+        raise OSError("host cannot resolve a directory descriptor")
+    raw = fcntl.fcntl(descriptor, fcntl.F_GETPATH, b"\0" * 1024)
+    path = os.fsdecode(raw.split(b"\0", 1)[0])
+    if not path:
+        raise OSError("directory descriptor has no host path")
+    _require_descriptor_path_identity(descriptor, path)
+    return path
 
 
 def _open_admission_database(data_descriptor: int) -> tuple[int, int]:
@@ -729,7 +1014,7 @@ def _verify_preparation_output(
                 )
         expected_files = {"cover-letter.pdf", "cv.pdf", "receipt.json"}
         actual_files: set[str] = set()
-        with os.scandir(f"/proc/self/fd/{chain[-1]}") as entries:
+        with os.scandir(chain[-1]) as entries:
             for entry in entries:
                 if entry.name == "objects":
                     continue
@@ -755,7 +1040,7 @@ def _verify_preparation_output(
                 raise ProductionPreparationDeploymentError(
                     "production preparation object directory differs"
                 )
-            with os.scandir(f"/proc/self/fd/{objects_descriptor}") as entries:
+            with os.scandir(objects_descriptor) as entries:
                 object_names = tuple(entry.name for entry in entries)
             if not object_names:
                 raise ProductionPreparationDeploymentError(
@@ -821,7 +1106,8 @@ def _run_production_preparation(
     deployment: _ProductionPreparationDeployment,
     *,
     after_preflight_hook: Callable[[str], None] | None = None,
-) -> MarketApplicationPreparation:
+    materialization_only: bool = False,
+) -> MarketApplicationPreparation | MarketApplicationMaterializationContext:
     if (
         not application_id.startswith("app_")
         or len(application_id) != 68
@@ -839,7 +1125,7 @@ def _run_production_preparation(
     try:
         for name, expected in PRODUCTION_POPPLER_SHA256.items():
             resources.pin_file(
-                PRODUCTION_POPPLER_BIN / name,
+                deployment.poppler_bin / name,
                 expected_sha256=expected,
                 expected_mode=0o755,
                 expected_uid=os.geteuid(),
@@ -848,7 +1134,7 @@ def _run_production_preparation(
             )
         for name, expected in PRODUCTION_POPPLER_LIBRARY_SHA256.items():
             resources.pin_file(
-                PRODUCTION_POPPLER_LIBRARY_DIRECTORY / name,
+                deployment.poppler_library_directory / name,
                 expected_sha256=expected,
                 expected_mode=0o644,
                 expected_uid=os.geteuid(),
@@ -899,11 +1185,13 @@ def _run_production_preparation(
         resources.verify()
         pinned = _PinnedProductionPaths(
             _ProductionAdmissionDeployment(
-                data_home=PRODUCTION_MARKET_DATA_HOME,
+                data_home=deployment.data_home,
                 repository_root=deployment.repository_root,
                 outbox_root=deployment.outbox_root,
-                execution_receipt_root=PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT,
-                admission_root=PRODUCTION_ADMISSION_ROOT,
+                execution_receipt_root=deployment.outbox_root / "receipts",
+                admission_root=(
+                    deployment.data_home / "state/jaa-production-admissions"
+                ),
             )
         )
         current_commit = _git_commit(
@@ -962,7 +1250,7 @@ def _run_production_preparation(
         resources.verify()
         os.environ[PUBLIC_KEY_ENV] = str(deployment.contact_public_key_path)
         os.environ[REGISTRY_ENV] = str(deployment.contact_registry_path)
-        os.environ["JAA_POPPLER_BIN"] = str(PRODUCTION_POPPLER_BIN)
+        os.environ["JAA_POPPLER_BIN"] = str(deployment.poppler_bin)
         candidate_bytes = resources.file_bytes(deployment.candidate_authority_path)
         contact_lease = CandidateContactResourceLease(
             authority_path=deployment.contact_authority_path,
@@ -976,53 +1264,65 @@ def _run_production_preparation(
         codex_descriptor = resources.file_descriptor(deployment.codex_binary)
         poppler_runtime = pinned_poppler_runtime(
             {
-                name: resources.file_descriptor(PRODUCTION_POPPLER_BIN / name)
+                name: resources.file_descriptor(deployment.poppler_bin / name)
                 for name in PRODUCTION_POPPLER_SHA256
             },
             PRODUCTION_POPPLER_SHA256,
             library_descriptors={
                 name: resources.file_descriptor(
-                    PRODUCTION_POPPLER_LIBRARY_DIRECTORY / name
+                    deployment.poppler_library_directory / name
                 )
                 for name in PRODUCTION_POPPLER_LIBRARY_SHA256
             },
             expected_library_sha256=PRODUCTION_POPPLER_LIBRARY_SHA256,
         )
 
-        def runtime(kind: str) -> EditorialCompositionRuntime:
-            prefix = "cover_letter_" if kind == "cover_letter" else ""
-            return EditorialCompositionRuntime(
-                environment="production",
-                writer=DetachedCodexEditorialAdapter(
-                    stage=f"{prefix}writer" if prefix else "resume_writer",
-                    model=deployment.model,
-                    codex_binary=str(deployment.codex_binary),
+        editorial_runtime = None
+        cover_letter_editorial_runtime = None
+        orchestration_extras = None
+        if not materialization_only:
+            def runtime(kind: str) -> EditorialCompositionRuntime:
+                prefix = "cover_letter_" if kind == "cover_letter" else ""
+                return EditorialCompositionRuntime(
                     environment="production",
-                    timeout_seconds=deployment.timeout_seconds,
-                    codex_binary_fd=codex_descriptor,
-                ),
-                humanizer=DetachedCodexEditorialAdapter(
-                    stage=f"{prefix}humanizer" if prefix else "humanizer",
-                    model=deployment.model,
-                    codex_binary=str(deployment.codex_binary),
-                    environment="production",
-                    timeout_seconds=deployment.timeout_seconds,
-                    codex_binary_fd=codex_descriptor,
-                ),
-                document_kind=kind,
-            )
+                    writer=DetachedCodexEditorialAdapter(
+                        stage=f"{prefix}writer" if prefix else "resume_writer",
+                        model=deployment.model,
+                        codex_binary=str(deployment.codex_binary),
+                        environment="production",
+                        timeout_seconds=deployment.timeout_seconds,
+                        codex_binary_fd=codex_descriptor,
+                    ),
+                    humanizer=DetachedCodexEditorialAdapter(
+                        stage=f"{prefix}humanizer" if prefix else "humanizer",
+                        model=deployment.model,
+                        codex_binary=str(deployment.codex_binary),
+                        environment="production",
+                        timeout_seconds=deployment.timeout_seconds,
+                        codex_binary_fd=codex_descriptor,
+                    ),
+                    document_kind=kind,
+                )
 
-        assessor = ProductionDetachedRecruiterAssessor(
-            model=deployment.model,
-            archive_root=deployment.recruiter_archive_root,
-            repository_root=deployment.repository_root,
-            cli_timeout_seconds=deployment.timeout_seconds,
-            codex_binary=str(deployment.codex_binary),
-            codex_binary_fd=codex_descriptor,
-            archive_descriptor=resources.directory_descriptor(
-                deployment.recruiter_archive_root
-            ),
-        )
+            editorial_runtime = runtime("cv")
+            cover_letter_editorial_runtime = runtime("cover_letter")
+            assessor = ProductionDetachedRecruiterAssessor(
+                model=deployment.model,
+                archive_root=deployment.recruiter_archive_root,
+                repository_root=deployment.repository_root,
+                cli_timeout_seconds=deployment.timeout_seconds,
+                codex_binary=str(deployment.codex_binary),
+                codex_binary_fd=codex_descriptor,
+                archive_descriptor=resources.directory_descriptor(
+                    deployment.recruiter_archive_root
+                ),
+            )
+            orchestration_extras = {
+                "bindings": (),
+                "form_fields": (),
+                "production_recruiter_assessor": assessor,
+                "poppler_runtime": poppler_runtime,
+            }
         result = prepare_admitted_market_application_from_authorities(
             admission_store=store,
             application_id=application_id,
@@ -1036,27 +1336,24 @@ def _run_production_preparation(
                 contact_authority_bytes=contact_lease.authority_bytes,
             ),
             environment="production",
-            editorial_runtime=runtime("cv"),
-            cover_letter_editorial_runtime=runtime("cover_letter"),
-            orchestration_extras={
-                "bindings": (),
-                "form_fields": (),
-                "production_recruiter_assessor": assessor,
-                "poppler_runtime": poppler_runtime,
-            },
+            editorial_runtime=editorial_runtime,
+            cover_letter_editorial_runtime=cover_letter_editorial_runtime,
+            orchestration_extras=orchestration_extras,
             candidate_authority_bytes=candidate_bytes,
             contact_resource_lease=contact_lease,
             output_root_descriptor=resources.directory_descriptor(
                 deployment.output_root
             ),
+            materialization_only=materialization_only,
         )
-        _verify_preparation_output(
-            result,
-            deployment.output_root,
-            output_root_descriptor=resources.directory_descriptor(
-                deployment.output_root
-            ),
-        )
+        if not materialization_only:
+            _verify_preparation_output(
+                result,
+                deployment.output_root,
+                output_root_descriptor=resources.directory_descriptor(
+                    deployment.output_root
+                ),
+            )
         pinned.verify_references()
         resources.verify()
     finally:
@@ -1083,10 +1380,26 @@ def run_production_preparation(*, application_id: str) -> MarketApplicationPrepa
     )
 
 
+def run_production_market_materialization(
+    *, application_id: str
+) -> MarketApplicationMaterializationContext:
+    result = _run_production_preparation(
+        application_id,
+        installed_production_preparation_deployment(),
+        materialization_only=True,
+    )
+    if type(result) is not MarketApplicationMaterializationContext:
+        raise ProductionPreparationDeploymentError(
+            "production materialization returned a non-canonical context"
+        )
+    return result
+
+
 __all__ = [
     "PRODUCTION_PREPARATION_CONFIG_PATH",
     "ProductionPreparationDeploymentError",
     "installed_production_preparation_deployment",
     "production_preparation_configuration_bytes",
     "run_production_preparation",
+    "run_production_market_materialization",
 ]

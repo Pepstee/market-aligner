@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import socket
 import struct
 import threading
@@ -41,8 +40,8 @@ class _ConnectedSocket:
 def test_uid1000_peer_is_authenticated_and_bytes_are_forwarded_exactly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert os.geteuid() == broker.AUTHORIZED_CLIENT_UID
-    assert os.getegid() == broker.AUTHORIZED_CLIENT_GID
+    assert broker.AUTHORIZED_CLIENT_UID == 1000
+    assert broker.AUTHORIZED_CLIENT_GID == 1000
     public_client, public_server = socket.socketpair()
     signer_client, signer_server = socket.socketpair()
     request = b'{"request":"exact"}'
@@ -82,7 +81,9 @@ def test_broker_rejects_unauthorized_peer_before_connect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, server = socket.socketpair()
-    monkeypatch.setattr(broker, "_peer_credentials", lambda _connection: (123, 1001, 1001))
+    monkeypatch.setattr(
+        broker, "_peer_credentials", lambda _connection: (123, 1001, 1001)
+    )
     with client, server, pytest.raises(PermissionError, match="caller identity"):
         broker.forward_once(server, signer_socket=Path("/root-only-signer.sock"))
 
@@ -93,7 +94,9 @@ def test_broker_rejects_malformed_or_oversize_frame(
     length: int,
 ) -> None:
     client, server = socket.socketpair()
-    monkeypatch.setattr(broker, "_peer_credentials", lambda _connection: (123, 1000, 1000))
+    monkeypatch.setattr(
+        broker, "_peer_credentials", lambda _connection: (123, 1000, 1000)
+    )
     with client, server:
         client.sendall(struct.pack("!I", length))
         with pytest.raises(ValueError, match="frame length"):

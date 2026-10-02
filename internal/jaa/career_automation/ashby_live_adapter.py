@@ -13,6 +13,22 @@ The consequential ordering is fail-closed::
 There is no retry from any state after release consumption begins.  In
 particular, a process loss after ``click_started`` remains indeterminate rather
 than risking a duplicate application.
+
+The same owner also hosts the vacancy-generic, strictly non-release
+preparation path (:class:`AshbyNonReleasePreparator`).  It is bound to an
+exact existing :class:`CanarySelectionContract`: the selection's vacancy
+URL/identity/content-hash must equal the boundary route and the exact
+application source before any page access.  The applicant form inventory is
+scoped exactly to controls inside ``.ashby-application-form-field-entry``
+elements; anonymous out-of-entry upload plumbing is not applicant authority.
+Whole-page scans still refuse credential, payment, MFA and active CAPTCHA
+challenge boundaries before applicant data, while static CAPTCHA
+configuration signals are recorded as ``anti_bot_signals`` and never
+interacted with.  Every plan is compiled through the pure ATS
+answer-compilation seam, only those compiled entries are executed, and the
+result is the canonical :class:`AtsApplicationAuthority`.  That path never
+touches a submit control or a CAPTCHA control, never creates release
+authority and never transitions the one-use circuit.
 """
 
 from __future__ import annotations
@@ -22,17 +38,43 @@ import json
 import re
 import sqlite3
 import stat
-from dataclasses import dataclass, field
-from datetime import date, datetime
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, NoReturn
 from urllib.parse import urlsplit
 
 from playwright.sync_api import Page
 
-from .application_compiler import ApplicationSource, CandidateContact
+from .application_artifacts import (
+    PublishedArtifactReceipt,
+    verify_application_artifact_receipt,
+)
+from .application_compiler import (
+    ApplicationSource,
+    CandidateContact,
+    verify_application_source,
+)
+from .ats_application_authority import (
+    AtsAnswerEntry,
+    AtsApplicationAuthority,
+    AtsFieldOption,
+    AtsFieldPlan,
+    AtsFormInventory,
+    AtsObservedField,
+    build_ats_application_authority,
+    compile_ats_answer_entries,
+    is_ats_omitted_value_empty,
+)
 from .release_gate import ReleaseGateStore
-from .rendering import ApplicationArtifacts
+from .live_canary_authority import (
+    FROZEN_LIVE_CANARY_AUTHORITY,
+    CanarySelectionContract,
+)
+from .rendering import (
+    ApplicationArtifacts,
+    verify_application_artifacts,
+)
 
 
 ADAPTER_ID = "jaa11.vega-ashby-live"
@@ -1038,16 +1080,1143 @@ class AshbyLiveAdapter:
             raise
 
 
+class AshbyPreparationRefused(RuntimeError):
+    """Stable fail-closed refusal raised before any applicant data is used."""
+
+    def __init__(
+        self,
+        reason_codes: str | tuple[str, ...],
+        message: str | None = None,
+    ) -> None:
+        codes = (
+            (reason_codes,) if isinstance(reason_codes, str) else tuple(reason_codes)
+        )
+        if not codes or any(not isinstance(code, str) or not code for code in codes):
+            raise ValueError("refusal reason codes must be non-empty text")
+        self.reason_codes = tuple(sorted(codes))
+        joined = ",".join(self.reason_codes)
+        super().__init__(f"{joined}: {message}" if message else f"Ashby preparation refused: {joined}")
+
+
+def _refuse(
+    reason_codes: str | tuple[str, ...],
+    message: str | None = None,
+) -> NoReturn:
+    raise AshbyPreparationRefused(reason_codes, message)
+
+
+@dataclass(frozen=True)
+class AshbyApplicationBoundary:
+    """Closed typed route/title boundary for one public Ashby application.
+
+    The boundary is derived from an exact :class:`CanarySelectionContract`
+    plus the exact :class:`ApplicationSource` via
+    ``from_selection_contract``; preparation re-binds the boundary to that
+    same selection before any page access, so caller-authored arbitrary
+    routes cannot be substituted.  Any HTTPS host other than the public
+    Ashby jobs host is rejected.
+    """
+
+    application_url: str
+    page_title: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.application_url, str):
+            raise TypeError("boundary application URL must be text")
+        parsed = urlsplit(self.application_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != APPLICATION_HOST
+            or parsed.port is not None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or ASHBY_APPLICATION_ROUTE.fullmatch(parsed.path) is None
+        ):
+            raise ValueError(
+                "boundary URL must be an exact public HTTPS Ashby "
+                "job/application route"
+            )
+        _required(self.page_title, "boundary page title")
+
+    @classmethod
+    def from_selection_contract(
+        cls,
+        selection: CanarySelectionContract,
+        source: ApplicationSource,
+    ) -> AshbyApplicationBoundary:
+        if type(selection) is not CanarySelectionContract:
+            raise TypeError(
+                "boundary requires the exact CanarySelectionContract type"
+            )
+        if type(source) is not ApplicationSource:
+            raise TypeError(
+                "boundary requires the exact application source type"
+            )
+        if selection.vacancy_identity != source.vacancy_source_identity:
+            raise ValueError(
+                "selection vacancy identity differs from the application source"
+            )
+        if selection.vacancy_content_sha256 != source.vacancy_sha256:
+            raise ValueError(
+                "selection vacancy hash differs from the application source"
+            )
+        return cls(
+            application_url=selection.vacancy_url,
+            page_title=f"{source.role_title} @ {source.company_name}",
+        )
+
+
+ASHBY_APPLICATION_ROUTE = re.compile(
+    r"^/[A-Za-z0-9][A-Za-z0-9_-]{0,99}"
+    r"(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,149}){1,2}$"
+)
+
+_CAPTURE_SELECTOR = (
+    ".ashby-application-form-field-entry input, "
+    ".ashby-application-form-field-entry textarea, "
+    ".ashby-application-form-field-entry select"
+)
+_FILE_COUNT_SCRIPT = "el => el.files ? el.files.length : 0"
+_PDF_MIME_TYPE = "application/pdf"
+_UPLOAD_PAYLOAD_NAMES = {
+    "artifact.cv": "cv.pdf",
+    "artifact.cover_letter": "cover-letter.pdf",
+}
+_HONEYPOT_MARKER = re.compile(
+    r"honeypot|robot|bot[-_]?field|trap|hp[-_]", re.IGNORECASE
+)
+_CAPTCHA_SIGNAL_SELECTORS = frozenset(
+    {
+        'textarea[name*="captcha" i]',
+        'input[name*="captcha" i]',
+    }
+)
+# Generic-path credential/payment selectors.  CAPTCHA iframes are excluded:
+# static anchor configuration and challenge frames are distinguished by
+# exact frame inspection below.  A serialized site-key mount point is
+# static configuration and is recorded as a signal, not a blocker.
+_SITEKEY_SIGNAL_SELECTOR = "[data-sitekey]"
+_GENERIC_BOUNDARY_SELECTORS = tuple(
+    selector
+    for selector in FORBIDDEN_SELECTORS
+    if selector not in _CAPTCHA_SIGNAL_SELECTORS
+    and not selector.startswith("iframe[")
+    and selector != _SITEKEY_SIGNAL_SELECTOR
+)
+_IFRAME_SELECTOR = "iframe"
+_IFRAME_INVENTORY_SCRIPT = """() => Array.from(
+  document.querySelectorAll('iframe')
+).map((frame) => ({
+  src: (frame.getAttribute('src') || ''),
+  title: (frame.getAttribute('title') || ''),
+  visible: Boolean(
+    frame.offsetParent || frame.getClientRects().length
+  ),
+}))"""
+_CAPTCHA_FRAME_FAMILY = re.compile(
+    r"recaptcha|hcaptcha|turnstile|captcha", re.IGNORECASE
+)
+_ASHBY_CONTROL_KINDS = {
+    "text": "text",
+    "email": "email",
+    "tel": "tel",
+    "url": "url",
+    "number": "number",
+    "textarea": "textarea",
+    "select": "select",
+    "checkbox": "checkbox",
+    "radio": "radio",
+    "file": "file",
+    "hidden": "hidden",
+}
+_SOURCE_FIELD_BINDINGS = (
+    ("full name", frozenset({"text"}), "contact.full_name"),
+    ("email", frozenset({"email"}), "contact.email"),
+    ("email address", frozenset({"email"}), "contact.email"),
+    ("phone", frozenset({"tel"}), "contact.phone"),
+    ("phone number", frozenset({"tel"}), "contact.phone"),
+    ("location", frozenset({"text"}), "contact.city"),
+    ("city", frozenset({"text"}), "contact.city"),
+    ("cv", frozenset({"file"}), "artifact.cv"),
+    ("resume", frozenset({"file"}), "artifact.cv"),
+    ("cover letter", frozenset({"file"}), "artifact.cover_letter"),
+)
+
+_ASHBY_CAPTURE_SCRIPT = """() => Array.from(
+  document.querySelectorAll(
+    '.ashby-application-form-field-entry input, '
+    + '.ashby-application-form-field-entry textarea, '
+    + '.ashby-application-form-field-entry select'
+  )
+).map((control) => {
+  const tag = control.tagName.toLowerCase();
+  const inputType = tag === 'input'
+    ? (control.getAttribute('type') || 'text').toLowerCase()
+    : tag;
+  const entry = control.closest('.ashby-application-form-field-entry');
+  const title = entry
+    ? entry.querySelector('.ashby-application-form-question-title')
+    : null;
+  const buttons = entry
+    ? Array.from(entry.querySelectorAll('button')).map((button) => ({
+        label: (button.innerText || '').trim().replace(/\\s+/g, ' '),
+        visible: Boolean(
+          button.offsetParent || button.getClientRects().length
+        ),
+      }))
+    : [];
+  let options = [];
+  if (tag === 'select') {
+    options = Array.from(control.options).map((option) => ({
+      value: option.value,
+      label: (option.label || '').trim(),
+    }));
+  }
+  let currentValue = null;
+  if (inputType === 'checkbox') currentValue = control.checked;
+  else if (inputType === 'radio') {
+    currentValue = control.checked ? control.value : null;
+  } else if (inputType !== 'file') currentValue = control.value;
+  return {
+    input_type: inputType,
+    id: control.id || '',
+    name: control.getAttribute('name') || '',
+    field_path: entry
+      ? (entry.getAttribute('data-field-path') || '')
+      : '',
+    required: Boolean(control.required) || Boolean(
+      title && String(title.className).includes('required')
+    ),
+    visible: inputType === 'hidden'
+      ? false
+      : Boolean(control.offsetParent || control.getClientRects().length),
+    disabled: Boolean(control.disabled),
+    read_only: Boolean(control.readOnly),
+    multiple: Boolean(control.multiple),
+    value_attribute: control.value === undefined ? '' : String(
+      control.value
+    ),
+    options,
+    buttons,
+    current_value: currentValue,
+    role: (control.getAttribute('role') || ''),
+    aria_autocomplete: (control.getAttribute('aria-autocomplete') || ''),
+    label: title
+      ? (title.innerText || '').trim().replace(/\\s+/g, ' ')
+      : (control.getAttribute('aria-label') || '').trim(),
+    file_count: control.files ? control.files.length : 0,
+  };
+})"""
+
+
+def _utc_now_second() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _verify_selection_contract_identity(
+    selection: CanarySelectionContract,
+) -> None:
+    """Re-derive the exact contract hash so bypassed state fails closed."""
+    document = selection.document(include_hash=False)
+    if _content_hash(document) != selection.contract_sha256:
+        raise ValueError("selection contract hash is invalid")
+    if (
+        selection.authority_record_sha256
+        != FROZEN_LIVE_CANARY_AUTHORITY.record_sha256
+        or selection.operational_release != "withheld"
+        or selection.external_action_capability is not False
+        or selection.schema_version != "jaa11.live-canary-selection.v1"
+    ):
+        raise ValueError("selection contract scope differs from the frozen authority")
+
+
+@dataclass(frozen=True)
+class _ControlRecord:
+    kind: str
+    label: str
+    required: bool
+    visible: bool
+    disabled: bool
+    read_only: bool
+    multiple: bool
+    options: tuple[tuple[str, str], ...]
+    button_labels: tuple[str, ...]
+    buttons_visible: bool
+    current_value: object
+    value_attribute: str
+    file_count: int
+    identity: str
+    origin_kind: str
+    is_combobox: bool
+
+
+@dataclass(frozen=True)
+class _AshbyCapturedField:
+    field: AtsObservedField
+    selector_origin: tuple[str, str]
+    file_count: int
+    combobox: bool
+
+
+def _captured_text(row: Mapping[str, object], key: str) -> str:
+    value = row.get(key, "")
+    if not isinstance(value, str):
+        _refuse("unstable_field_identity", f"captured {key} is not text")
+    return value
+
+
+def _parse_control_row(row: Mapping[str, object]) -> _ControlRecord:
+    kind = _ASHBY_CONTROL_KINDS.get(_captured_text(row, "input_type"))
+    if kind is None:
+        _refuse(
+            "unsupported_control_kind",
+            f"unsupported control {_captured_text(row, 'input_type')!r}",
+        )
+    for key in ("required", "visible", "disabled", "read_only", "multiple"):
+        if not isinstance(row.get(key), bool):
+            _refuse("unsupported_control_state", f"captured {key} flag is invalid")
+    options_raw = row.get("options")
+    if not isinstance(options_raw, list):
+        _refuse("unsupported_control_state", "captured options are malformed")
+    options: list[tuple[str, str]] = []
+    for option in options_raw:
+        if not isinstance(option, dict) or not isinstance(
+            option.get("value"), str
+        ) or not isinstance(option.get("label"), str):
+            _refuse("unsupported_control_state", "captured option is malformed")
+        options.append((str(option["value"]), str(option["label"])))
+    buttons_raw = row.get("buttons")
+    if not isinstance(buttons_raw, list):
+        _refuse("unsupported_control_state", "captured buttons are malformed")
+    button_labels: list[str] = []
+    buttons_visible = False
+    for button in buttons_raw:
+        if not isinstance(button, dict) or not isinstance(
+            button.get("label"), str
+        ):
+            _refuse("unsupported_control_state", "captured button is malformed")
+        if button["label"]:
+            button_labels.append(str(button["label"]))
+        buttons_visible = buttons_visible or bool(button.get("visible"))
+    current_value = row.get("current_value")
+    if current_value is not None and not isinstance(
+        current_value, (str, bool, int)
+    ):
+        _refuse("unsupported_control_state", "captured value has an invalid type")
+    file_count = row.get("file_count")
+    if isinstance(file_count, bool) or not isinstance(file_count, int):
+        _refuse("unsupported_control_state", "captured file count is invalid")
+    path_attr = _captured_text(row, "field_path")
+    id_attr = _captured_text(row, "id")
+    name_attr = _captured_text(row, "name")
+    identity = path_attr or id_attr or name_attr
+    if not identity:
+        _refuse("unstable_field_identity", "a form control has no stable ID")
+    if any(character in identity for character in ('"', "\\", "\r", "\n", "\x00")):
+        _refuse(
+            "unstable_field_identity",
+            f"control identity {identity!r} is unsafe for stable selection",
+        )
+    origin_kind = "path" if path_attr else ("id" if id_attr else "name")
+    role_attribute = _captured_text(row, "role")
+    aria_autocomplete = _captured_text(row, "aria_autocomplete")
+    return _ControlRecord(
+        kind=kind,
+        label=_captured_text(row, "label"),
+        required=bool(row["required"]),
+        visible=bool(row["visible"]),
+        disabled=bool(row["disabled"]),
+        read_only=bool(row["read_only"]),
+        multiple=bool(row["multiple"]),
+        options=tuple(options),
+        button_labels=tuple(button_labels),
+        buttons_visible=buttons_visible,
+        current_value=current_value,
+        value_attribute=_captured_text(row, "value_attribute"),
+        file_count=int(file_count),
+        identity=identity,
+        origin_kind=origin_kind,
+        is_combobox=(
+            role_attribute == "combobox" or bool(aria_autocomplete)
+        ),
+    )
+
+
+def _dedupe(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(values))
+
+
+def _classify_captcha_frames(
+    rows: object,
+) -> tuple[set[str], set[str]]:
+    """Classify captured iframe elements into blockers and signals.
+
+    Every record's ``visible`` flag must be an exact boolean; anything else
+    refuses before inventory.  A static invisible reCAPTCHA anchor
+    (``/api2/anchor`` with ``size=invisible``) is configuration only: it
+    records the exact ``captcha_configuration_present`` signal regardless
+    of the visibility heuristic.  An actual challenge frame
+    (``api2/bframe`` or a title containing ``challenge``) and any other
+    CAPTCHA-family frame block pre-data only when reported visible;
+    hidden/preloaded occurrences are recorded as the same configuration
+    signal instead.
+    """
+    blockers: set[str] = set()
+    signals: set[str] = set()
+    if not isinstance(rows, list):
+        _refuse(
+            "captcha_frame_inspection_failed",
+            "frame inventory is malformed",
+        )
+    for row in rows:
+        if not isinstance(row, dict):
+            _refuse(
+                "captcha_frame_inspection_failed",
+                "frame record is malformed",
+            )
+        src = row.get("src")
+        title = row.get("title")
+        visible = row.get("visible")
+        if not isinstance(src, str) or not isinstance(title, str):
+            _refuse(
+                "captcha_frame_inspection_failed",
+                "frame src/title are malformed",
+            )
+        if type(visible) is not bool:
+            _refuse(
+                "captcha_frame_inspection_failed",
+                "frame visible flag must be an exact boolean",
+            )
+        src_text = src.casefold()
+        frame_text = f"{src} {title}".casefold()
+        if "api2/bframe" in src_text or "challenge" in frame_text:
+            if visible:
+                blockers.add("active_captcha_challenge_present")
+            else:
+                signals.add("captcha_configuration_present")
+        elif "/api2/anchor" in src_text and "size=invisible" in src_text:
+            signals.add("captcha_configuration_present")
+        elif _CAPTCHA_FRAME_FAMILY.search(frame_text):
+            if visible:
+                blockers.add("prohibited_control_present")
+            else:
+                signals.add("captcha_configuration_present")
+    return blockers, signals
+
+
+def _normalize_ashby_capture(rows: object) -> tuple[_AshbyCapturedField, ...]:
+    """Normalize raw capture rows into closed typed observed fields."""
+    if not isinstance(rows, list):
+        _refuse("unstable_field_identity", "form capture is not a control list")
+    groups: dict[str, list[_ControlRecord]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            _refuse("unstable_field_identity", "form capture row is malformed")
+        record = _parse_control_row(row)
+        groups.setdefault(record.identity, []).append(record)
+    captured: list[_AshbyCapturedField] = []
+    for identity, records in groups.items():
+        kinds = {record.kind for record in records}
+        if len(records) > 1 and (len(kinds) != 1 or not kinds <= {"radio", "checkbox"}):
+            _refuse(
+                "ambiguous_field_identity",
+                f"controls share the unstable identity {identity!r}",
+            )
+        kind = next(iter(kinds))
+        first = records[0]
+        label = next((record.label for record in records if record.label), "")
+        required = any(record.required for record in records)
+        visible = any(record.visible for record in records) or any(
+            record.buttons_visible for record in records
+        )
+        disabled = any(record.disabled for record in records)
+        read_only = any(record.read_only for record in records)
+        multiple = any(record.multiple for record in records)
+        button_labels = _dedupe(
+            tuple(
+                label_text
+                for record in records
+                for label_text in record.button_labels
+            )
+        )
+        file_count = sum(record.file_count for record in records)
+        current_value: object
+        option_pairs: tuple[tuple[str, str], ...] = ()
+        if kind == "hidden":
+            current_value = first.current_value
+        elif kind == "file":
+            current_value = None
+        elif kind == "checkbox":
+            if len(records) != 1:
+                _refuse(
+                    "unsupported_control_state",
+                    f"multi-checkbox group {identity!r} is unsupported",
+                )
+            # Exact DOM truth: an unchecked checkbox keeps its exact False
+            # state in observed and reviewed inventories; True must reject.
+            current_value = bool(first.current_value)
+            option_pairs = tuple((row, row) for row in button_labels)
+        elif kind == "radio":
+            checked = next(
+                (record for record in records if record.current_value), None
+            )
+            current_value = None if checked is None else checked.current_value
+            if button_labels:
+                option_pairs = tuple((row, row) for row in button_labels)
+            else:
+                values = _dedupe(
+                    tuple(record.value_attribute for record in records)
+                )
+                option_pairs = tuple((value, value) for value in values)
+        elif kind == "select":
+            current_value = first.current_value
+            option_pairs = first.options
+        else:
+            current_value = first.current_value
+        if (disabled or read_only) and kind != "hidden":
+            _refuse(
+                "unsupported_control_state",
+                f"non-actionable applicant control {identity!r}",
+            )
+        if kind == "hidden":
+            haystack = " ".join((identity, label)).casefold()
+            role = (
+                "honeypot"
+                if _HONEYPOT_MARKER.search(haystack)
+                else "provider_managed"
+            )
+        elif not visible:
+            role = "provider_managed"
+        else:
+            role = "applicant"
+        multiple = multiple and kind in {"file", "select", "checkbox"}
+        unique_options: dict[str, AtsFieldOption] = {}
+        for value, option_label in option_pairs:
+            if value in unique_options:
+                _refuse(
+                    "ambiguous_field_identity",
+                    f"duplicate option value on {identity!r}",
+                )
+            unique_options[value] = AtsFieldOption(value, option_label)
+        try:
+            observed = AtsObservedField(
+                field_id=identity,
+                control_kind=kind,
+                label=label,
+                required=required,
+                visible=visible,
+                automation_role=role,
+                disabled=disabled,
+                read_only=read_only,
+                multiple=multiple,
+                options=tuple(unique_options.values()),
+                current_value=current_value,
+            )
+        except (TypeError, ValueError) as exc:
+            _refuse(
+                "unsupported_control_state",
+                f"control {identity!r} cannot be represented exactly: {exc}",
+            )
+        captured.append(
+            _AshbyCapturedField(
+                field=observed,
+                selector_origin=(first.origin_kind, identity),
+                file_count=file_count,
+                combobox=any(record.is_combobox for record in records),
+            )
+        )
+    return tuple(captured)
+
+
+@dataclass(frozen=True)
+class AshbyNonReleasePreparation:
+    """Exact reviewed preparation with no release or submission capability."""
+
+    authority: AtsApplicationAuthority
+    observed_inventory: AtsFormInventory
+    reviewed_inventory: AtsFormInventory
+    answers: tuple[AtsAnswerEntry, ...]
+    filled_field_ids: tuple[str, ...]
+    uploaded_field_ids: tuple[str, ...]
+    uploaded_sha256s: tuple[str, ...]
+    anti_bot_signals: tuple[str, ...]
+    submit_clicks: int
+
+
+class AshbyNonReleasePreparator:
+    """Generic non-release Ashby preparation bound to the ATS authority.
+
+    The route is bound to an exact :class:`CanarySelectionContract` before
+    any page access.  Applicant inventory is scoped to Ashby field entries;
+    whole-page scans refuse credential/payment/MFA and active CAPTCHA
+    challenge boundaries before applicant data while static CAPTCHA
+    configuration is recorded as an ``anti_bot_signals`` observation that is
+    never interacted with.  Every plan is compiled through the pure
+    answer-compilation seam; only those compiled entries are executed; the
+    form is then re-captured, re-verified and bound into the canonical
+    non-release :class:`AtsApplicationAuthority`.
+    """
+
+    def __init__(self) -> None:
+        self.value_writes = 0
+        self.upload_writes = 0
+
+    @property
+    def submit_clicks(self) -> int:
+        return 0
+
+    def prepare(
+        self,
+        page: Page,
+        *,
+        boundary: AshbyApplicationBoundary,
+        selection: CanarySelectionContract,
+        candidate_authority_sha256: str,
+        source: ApplicationSource,
+        artifacts: ApplicationArtifacts,
+        publication_receipt: PublishedArtifactReceipt,
+    ) -> AshbyNonReleasePreparation:
+        self._validate_inputs(
+            boundary,
+            selection,
+            candidate_authority_sha256,
+            source,
+            artifacts,
+            publication_receipt,
+        )
+        # Route/title is the minimum boundary check and must precede every
+        # other page inspection: a URL mismatch performs no locator, body,
+        # content, frame, capture, screenshot, fill or upload access.
+        self._assert_page_boundary(page, boundary)
+        anti_bot_signals = self._pre_data_boundary(page)
+        observed_fields, observed_meta = self._capture_fields(page)
+        self._assert_required_label_boundary(observed_fields)
+        observed_inventory = self._build_inventory(
+            page, boundary, observed_fields
+        )
+        plans = self._compile_plans(observed_meta)
+        try:
+            entries = compile_ats_answer_entries(
+                inventory=observed_inventory,
+                plans=plans,
+                source=source,
+                artifacts=artifacts,
+            )
+        except (TypeError, ValueError) as exc:
+            _refuse("answer_compilation_refused", str(exc))
+        filled, uploaded = self._execute(
+            page, entries, observed_fields, observed_meta, artifacts
+        )
+        reviewed_fields, reviewed_meta = self._capture_fields(page)
+        if [row.field.shape_document() for row in reviewed_meta] != [
+            row.field.shape_document() for row in observed_meta
+        ]:
+            _refuse(
+                "schema_drift_after_fill",
+                "live form shape changed while filling",
+            )
+        reviewed_rows = self._reconcile_reviewed_fields(entries, reviewed_meta)
+        self._verify_reviewed_values_exact(
+            observed_fields, reviewed_rows, entries
+        )
+        reviewed_inventory = self._build_inventory(
+            page, boundary, tuple(reviewed_rows)
+        )
+        try:
+            authority = build_ats_application_authority(
+                reviewed_at=max(_utc_now_second(), reviewed_inventory.captured_at),
+                candidate_authority_sha256=candidate_authority_sha256,
+                source=source,
+                artifacts=artifacts,
+                publication_receipt=publication_receipt,
+                inventory=observed_inventory,
+                reviewed_inventory=reviewed_inventory,
+                plans=plans,
+            )
+        except (TypeError, ValueError) as exc:
+            _refuse("authority_build_refused", str(exc))
+        return AshbyNonReleasePreparation(
+            authority=authority,
+            observed_inventory=observed_inventory,
+            reviewed_inventory=reviewed_inventory,
+            answers=entries,
+            filled_field_ids=filled,
+            uploaded_field_ids=tuple(field_id for field_id, _ in uploaded),
+            uploaded_sha256s=tuple(digest for _, digest in uploaded),
+            anti_bot_signals=anti_bot_signals,
+            submit_clicks=self.submit_clicks,
+        )
+
+    @staticmethod
+    def _validate_inputs(
+        boundary: object,
+        selection: object,
+        candidate_authority_sha256: object,
+        source: object,
+        artifacts: object,
+        publication_receipt: object,
+    ) -> None:
+        if type(boundary) is not AshbyApplicationBoundary:
+            raise TypeError("preparation requires the exact Ashby boundary type")
+        if type(selection) is not CanarySelectionContract:
+            raise TypeError(
+                "preparation requires the exact CanarySelectionContract type"
+            )
+        if type(source) is not ApplicationSource:
+            raise TypeError("preparation requires the exact application source type")
+        if type(artifacts) is not ApplicationArtifacts:
+            raise TypeError("preparation requires the exact artifact set type")
+        if not isinstance(publication_receipt, PublishedArtifactReceipt):
+            raise TypeError("preparation requires a typed publication receipt")
+        try:
+            _verify_selection_contract_identity(selection)
+        except (TypeError, ValueError) as exc:
+            _refuse("selection_contract_unverified", str(exc))
+        if boundary.application_url != selection.vacancy_url:
+            _refuse(
+                "selection_boundary_mismatch",
+                "boundary route differs from the selected vacancy URL",
+            )
+        if (
+            selection.vacancy_identity != source.vacancy_source_identity
+            or selection.vacancy_content_sha256 != source.vacancy_sha256
+        ):
+            _refuse(
+                "selection_source_mismatch",
+                "selected vacancy identity/hash differs from the "
+                "application source",
+            )
+        if (
+            not isinstance(candidate_authority_sha256, str)
+            or HEX_64.fullmatch(candidate_authority_sha256) is None
+        ):
+            _refuse(
+                "candidate_authority_identity_invalid",
+                "candidate authority hash must be a lowercase SHA-256",
+            )
+        try:
+            verify_application_source(source)
+        except (TypeError, ValueError) as exc:
+            _refuse("application_source_unverified", str(exc))
+        try:
+            verify_application_artifacts(artifacts)
+        except (TypeError, ValueError) as exc:
+            _refuse("artifacts_unverified", str(exc))
+        try:
+            verify_application_artifact_receipt(source, artifacts, publication_receipt)
+        except (TypeError, ValueError) as exc:
+            _refuse("publication_receipt_unverified", str(exc))
+        expected_title = f"{source.role_title} @ {source.company_name}"
+        if boundary.page_title != expected_title:
+            _refuse(
+                "boundary_source_mismatch",
+                "boundary title differs from the exact application source identity",
+            )
+
+    @staticmethod
+    def _matches_boundary(actual: str, expected: str) -> bool:
+        left, right = urlsplit(actual), urlsplit(expected)
+        return (
+            left.scheme == "https"
+            and left.hostname == right.hostname
+            and left.port is None
+            and right.port is None
+            and left.username is None
+            and left.password is None
+            and left.path == right.path
+            and left.query == ""
+            and left.fragment == ""
+        )
+
+    @classmethod
+    def _assert_page_boundary(
+        cls,
+        page: Page,
+        boundary: AshbyApplicationBoundary,
+    ) -> None:
+        if not cls._matches_boundary(str(page.url), boundary.application_url):
+            _refuse(
+                "route_outside_approved_ashby_boundary",
+                "page is outside the exact approved Ashby application route",
+            )
+        if page.title() != boundary.page_title:
+            _refuse(
+                "page_title_boundary_mismatch",
+                "page title differs from the approved vacancy boundary",
+            )
+
+    @classmethod
+    def _pre_data_boundary(cls, page: Page) -> tuple[str, ...]:
+        """Refuse active boundaries; return recorded static CAPTCHA signals.
+
+        Credential, payment, MFA and actively rendered challenge boundaries
+        refuse before any applicant value or upload.  A hidden CAPTCHA
+        response element, serialized provider CAPTCHA configuration, a
+        serialized site-key mount point, and hidden/preloaded CAPTCHA
+        frames are signals only; a static invisible reCAPTCHA anchor iframe
+        is likewise configuration (``captcha_configuration_present``) while
+        a challenge frame (``api2/bframe``/challenge title) blocks only
+        when reported visible.  Signals are never interacted with.
+        """
+        blockers: set[str] = set()
+        signals: set[str] = set()
+        for selector in _GENERIC_BOUNDARY_SELECTORS:
+            if page.locator(selector).count() != 0:
+                blockers.add("prohibited_control_present")
+        for selector in _CAPTCHA_SIGNAL_SELECTORS:
+            if page.locator(selector).count() != 0:
+                signals.add("captcha_hidden_response_present")
+        if page.locator(_SITEKEY_SIGNAL_SELECTOR).count() != 0:
+            signals.add("captcha_configuration_present")
+        try:
+            frames = page.locator(_IFRAME_SELECTOR).evaluate_all(
+                _IFRAME_INVENTORY_SCRIPT
+            )
+        except Exception as exc:
+            _refuse("captcha_frame_inspection_failed", str(exc))
+        frame_blockers, frame_signals = _classify_captcha_frames(frames)
+        blockers |= frame_blockers
+        signals |= frame_signals
+        body = page.locator("body").inner_text().casefold()
+        if any(marker in body for marker in FORBIDDEN_VISIBLE_PHRASES):
+            blockers.add("prohibited_visible_boundary_present")
+        html = page.content().casefold().replace(" ", "")
+        if any(marker in html for marker in FORBIDDEN_HTML_MARKERS):
+            signals.add("captcha_configuration_present")
+        if blockers:
+            _refuse(
+                tuple(sorted(blockers)),
+                "active credential/payment/challenge boundary detected "
+                "before inventory",
+            )
+        return tuple(sorted(signals))
+
+    @staticmethod
+    def _assert_required_label_boundary(
+        fields: tuple[AtsObservedField, ...],
+    ) -> None:
+        joined = "\n".join(
+            row.label.casefold() for row in fields if row.required
+        )
+        if any(marker in joined for marker in FORBIDDEN_REQUIRED_LABEL_MARKERS):
+            _refuse(
+                "unapproved_legal_or_marketing_boundary_present",
+                "a required question cites an unapproved legal or marketing boundary",
+            )
+
+    @staticmethod
+    def _capture_fields(
+        page: Page,
+    ) -> tuple[tuple[AtsObservedField, ...], tuple[_AshbyCapturedField, ...]]:
+        try:
+            rows = page.locator(_CAPTURE_SELECTOR).evaluate_all(
+                _ASHBY_CAPTURE_SCRIPT
+            )
+        except Exception as exc:
+            _refuse("form_capture_failed", str(exc))
+        captured = _normalize_ashby_capture(rows)
+        if not captured:
+            _refuse("unsupported_form_shape", "no form controls were captured")
+        return (
+            tuple(row.field for row in captured),
+            captured,
+        )
+
+    @staticmethod
+    def _build_inventory(
+        page: Page,
+        boundary: AshbyApplicationBoundary,
+        fields: tuple[AtsObservedField, ...],
+    ) -> AtsFormInventory:
+        snapshot = hashlib.sha256(page.content().encode()).hexdigest()
+        screenshot = hashlib.sha256(
+            page.screenshot(full_page=True)
+        ).hexdigest()
+        try:
+            return AtsFormInventory(
+                provider="ashby",
+                application_url=boundary.application_url,
+                captured_at=_utc_now_second(),
+                page_snapshot_sha256=snapshot,
+                screenshot_sha256s=(screenshot,),
+                fields=fields,
+            )
+        except (TypeError, ValueError) as exc:
+            _refuse("unsupported_form_shape", str(exc))
+
+    @staticmethod
+    def _binding_for(field: AtsObservedField) -> str | None:
+        normalized = " ".join(field.label.split()).casefold()
+        matches = {
+            reference
+            for label, kinds, reference in _SOURCE_FIELD_BINDINGS
+            if normalized == label and field.control_kind in kinds
+        }
+        if len(matches) > 1:
+            _refuse(
+                "ambiguous_source_binding",
+                f"label {field.label!r} binds several canonical sources",
+            )
+        return next(iter(matches), None)
+
+    @classmethod
+    def _compile_plans(
+        cls,
+        meta: tuple[_AshbyCapturedField, ...],
+    ) -> tuple[AtsFieldPlan, ...]:
+        plans: list[AtsFieldPlan] = []
+        bound: dict[str, str] = {}
+        unsupported: list[str] = []
+        for row in meta:
+            observed = row.field
+            if row.combobox:
+                # An autocomplete combobox can never be claimed from a text
+                # fill: omit it untouched when optional, refuse when
+                # required, before any applicant data is used.
+                if observed.required:
+                    unsupported.append(observed.field_id)
+                else:
+                    plans.append(
+                        AtsFieldPlan(
+                            observed.field_id,
+                            "omit",
+                            "none",
+                            observed.current_value,
+                        )
+                    )
+                continue
+            actionable = (
+                observed.control_kind != "hidden"
+                and observed.automation_role == "applicant"
+            )
+            if not actionable:
+                plans.append(
+                    AtsFieldPlan(
+                        observed.field_id, "omit", "none", observed.current_value
+                    )
+                )
+                continue
+            reference = cls._binding_for(observed)
+            if reference is None:
+                if observed.required:
+                    unsupported.append(observed.field_id)
+                    continue
+                plans.append(
+                    AtsFieldPlan(
+                        observed.field_id, "omit", "none", observed.current_value
+                    )
+                )
+                continue
+            owner = bound.get(reference)
+            if owner is not None:
+                _refuse(
+                    "ambiguous_source_binding",
+                    f"{owner!r} and {observed.field_id!r} both bind {reference}",
+                )
+            bound[reference] = observed.field_id
+            action = (
+                "upload" if reference.startswith("artifact.") else "fill"
+            )
+            plans.append(
+                AtsFieldPlan(
+                    observed.field_id, action, reference, observed.current_value
+                )
+            )
+        if unsupported:
+            _refuse(
+                "unsupported_required_field",
+                "required ATS fields lack canonical source bindings "
+                "(autocomplete/choice fields are never inferred): "
+                + ", ".join(sorted(unsupported)),
+            )
+        return tuple(plans)
+
+    @staticmethod
+    def _selector_for(origin: tuple[str, str]) -> str:
+        kind, value = origin
+        return {
+            "path": f'[data-field-path="{value}"]',
+            "id": f'[id="{value}"]',
+            "name": f'[name="{value}"]',
+        }[kind]
+
+    @classmethod
+    def _unique_locator(cls, page: Page, origin: tuple[str, str]):
+        locator = page.locator(cls._selector_for(origin))
+        if locator.count() != 1:
+            _refuse(
+                "ambiguous_field_identity",
+                f"mapped control {origin[1]!r} is not unique",
+            )
+        return locator
+
+    def _execute(
+        self,
+        page: Page,
+        entries: tuple[AtsAnswerEntry, ...],
+        fields: tuple[AtsObservedField, ...],
+        meta: tuple[_AshbyCapturedField, ...],
+        artifacts: ApplicationArtifacts,
+    ) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+        filled: list[str] = []
+        uploaded: list[tuple[str, str]] = []
+        for entry, observed, row in zip(entries, fields, meta, strict=True):
+            if entry.action == "omit":
+                continue
+            locator = self._unique_locator(page, row.selector_origin)
+            if entry.action == "fill":
+                if observed.control_kind == "select":
+                    value = str(entry.final_value)
+                    locator.select_option(value)
+                    if locator.input_value() != value:
+                        _refuse(
+                            "fill_not_retained",
+                            f"provider did not retain the exact value for "
+                            f"{observed.field_id!r}",
+                        )
+                elif observed.control_kind in {"radio", "checkbox"}:
+                    wanted = str(entry.final_value)
+                    option = next(
+                        (
+                            item
+                            for item in observed.options
+                            if item.value == wanted
+                        ),
+                        None,
+                    )
+                    if option is None:
+                        _refuse(
+                            "answer_compilation_refused",
+                            f"{observed.field_id!r} lacks the exact option",
+                        )
+                    button = locator.get_by_role(
+                        "button", name=option.label, exact=True
+                    )
+                    if button.count() != 1:
+                        _refuse(
+                            "unsupported_choice_control",
+                            f"{observed.field_id!r} choice control is not exact",
+                        )
+                    button.click()
+                else:
+                    if not isinstance(entry.final_value, str):
+                        _refuse(
+                            "answer_compilation_refused",
+                            f"{observed.field_id!r} lacks an exact text value",
+                        )
+                    locator.fill(entry.final_value)
+                    if locator.input_value() != entry.final_value:
+                        _refuse(
+                            "fill_not_retained",
+                            f"provider did not retain the exact value for "
+                            f"{observed.field_id!r}",
+                        )
+                self.value_writes += 1
+                filled.append(observed.field_id)
+            elif entry.action == "upload":
+                pdf = (
+                    artifacts.cv_pdf
+                    if entry.source_reference == "artifact.cv"
+                    else artifacts.cover_letter_pdf
+                )
+                if entry.final_value != pdf.pdf_sha256:
+                    _refuse(
+                        "upload_binding_mismatch",
+                        f"upload for {observed.field_id!r} differs from its "
+                        "exact artifact bytes",
+                    )
+                locator.set_input_files(
+                    [
+                        {
+                            "name": _UPLOAD_PAYLOAD_NAMES[
+                                entry.source_reference
+                            ],
+                            "mimeType": _PDF_MIME_TYPE,
+                            "buffer": pdf.pdf_bytes,
+                        }
+                    ]
+                )
+                if locator.evaluate(_FILE_COUNT_SCRIPT) != 1:
+                    _refuse(
+                        "upload_binding_failed",
+                        f"upload for {observed.field_id!r} did not bind one file",
+                    )
+                self.upload_writes += 1
+                uploaded.append((observed.field_id, pdf.pdf_sha256))
+            else:
+                _refuse(
+                    "answer_compilation_refused",
+                    f"unsupported compiled action for {observed.field_id!r}",
+                )
+        return tuple(filled), tuple(uploaded)
+
+    @staticmethod
+    def _reconcile_reviewed_fields(
+        entries: tuple[AtsAnswerEntry, ...],
+        meta: tuple[_AshbyCapturedField, ...],
+    ) -> list[AtsObservedField]:
+        reviewed: list[AtsObservedField] = []
+        for entry, row in zip(entries, meta, strict=True):
+            if entry.action == "upload":
+                if row.file_count != 1:
+                    _refuse(
+                        "reviewed_value_drift",
+                        f"upload {row.field.field_id!r} lost its bound file",
+                    )
+                reviewed.append(
+                    replace(row.field, current_value=entry.final_value)
+                )
+            else:
+                reviewed.append(row.field)
+        return reviewed
+
+    @staticmethod
+    def _verify_reviewed_values_exact(
+        observed: tuple[AtsObservedField, ...],
+        reviewed: list[AtsObservedField],
+        entries: tuple[AtsAnswerEntry, ...],
+    ) -> None:
+        for initial, final, entry in zip(observed, reviewed, entries, strict=True):
+            if initial.automation_role == "provider_managed":
+                drift = final.current_value != initial.current_value
+                detail = "provider-managed state changed"
+            elif initial.automation_role == "honeypot":
+                drift = final.current_value not in (None, "")
+                detail = "honeypot changed"
+            elif entry.action in {"fill", "upload"}:
+                drift = final.current_value != entry.final_value
+                detail = "reviewed value differs from exact authority"
+            elif not is_ats_omitted_value_empty(
+                initial.control_kind, final.current_value
+            ):
+                drift = True
+                detail = "omitted field holds an unapproved value"
+            else:
+                drift = False
+                detail = ""
+            if drift:
+                _refuse(
+                    "reviewed_value_drift",
+                    f"{initial.field_id}: {detail}",
+                )
+
+
 __all__ = [
     "ADAPTER_ID",
     "ADAPTER_VERSION",
     "APPLICATION_URL",
     "AshbyApplication",
+    "AshbyApplicationBoundary",
     "AshbyBoundaryError",
     "AshbyCircuitError",
     "AshbyLiveAdapter",
+    "AshbyNonReleasePreparation",
+    "AshbyNonReleasePreparator",
     "AshbyOneUseCircuit",
     "AshbyPreflightReview",
+    "AshbyPreparationRefused",
     "AshbySchemaError",
     "AshbySubmissionIndeterminateError",
     "CompensationBinding",

@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parents[1]
 CERTIFIER = "scripts/certify_jaa04_increment_a.py"
 SUITES = (
     "test_jaa04_increment_a_authority_canaries.py",
@@ -29,9 +30,13 @@ def _run(directory: Path, *argv: str, timeout: int = 240) -> subprocess.Complete
 
 
 def _clone(tmp_path: Path) -> Path:
-    clone = tmp_path / "repository"
-    copied = _run(ROOT, "git", "clone", "--no-local", str(ROOT), str(clone), timeout=120)
+    repository = tmp_path / "repository"
+    copied = _run(
+        REPOSITORY_ROOT, "git", "clone", "--no-local", "--single-branch", "--depth", "1",
+        str(REPOSITORY_ROOT), str(repository), timeout=120,
+    )
     assert copied.returncode == 0, copied.stderr
+    clone = repository / "internal" / "jaa"
     configured = _run(clone, "git", "config", "user.email", "tester@example.invalid")
     assert configured.returncode == 0, configured.stderr
     configured = _run(clone, "git", "config", "user.name", "Independent tester")
@@ -133,4 +138,3 @@ def test_existing_receipt_tampering_fails_closed(tmp_path: Path) -> None:
     assert "JAA-04 Increment A certification: ERROR:" in rejected.stderr
     assert receipt.read_bytes() == tampered
     assert receipt.name != f"sha256-{hashlib.sha256(tampered).hexdigest()}.json"
-

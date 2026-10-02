@@ -6,6 +6,8 @@ import inspect
 import json
 import socket
 import sqlite3
+import sys
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +28,7 @@ from career_automation.network_witnessed_fixture import (
     WORKER_INVENTORY_DOMAIN,
     NetworkWitnessedFixtureError,
     NetworkWitnessedFixtureObservationReceipt,
+    _ChromiumNetworkAudit,
     _canonical_json,
     _document_inventory,
     _domain_hash,
@@ -37,6 +40,77 @@ from test_jaa10_independent_acceptance import _observation
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _request_event(
+    request_id: str,
+    url: str,
+    *,
+    method: str = "GET",
+    resource_type: str = "Document",
+) -> dict[str, object]:
+    return {
+        "requestId": request_id,
+        "request": {"url": url, "method": method},
+        "type": resource_type,
+        "initiator": {"type": "other"},
+    }
+
+
+def test_chromium_request_audit_binds_exact_terminal_sequence() -> None:
+    audit = _ChromiumNetworkAudit()
+    expected = (
+        ("GET", "http://127.0.0.1:41001/applications/fixture", "Document"),
+        (
+            "POST",
+            "http://127.0.0.1:41001/applications/fixture/review",
+            "Document",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:41001/applications/fixture/submit",
+            "Document",
+        ),
+    )
+    for index, (method, url, resource_type) in enumerate(expected):
+        request_id = f"request-{index}"
+        audit.observe_request(
+            _request_event(
+                request_id,
+                url,
+                method=method,
+                resource_type=resource_type,
+            )
+        )
+        audit.observe_finished({"requestId": request_id})
+
+    audit.assert_exact(expected)
+    document = audit.document()
+    assert document["listener_mode"] == "cdp_read_only"
+    assert document["protocol_errors"] == []
+    assert [row["terminal"] for row in document["records"]] == [
+        "finished",
+        "finished",
+        "finished",
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("unaccounted", "unexpected", "malformed_terminal"),
+)
+def test_chromium_request_audit_fails_closed(mutation: str) -> None:
+    audit = _ChromiumNetworkAudit()
+    expected = (("GET", "http://127.0.0.1:41001/applications/fixture", "Document"),)
+    audit.observe_request(_request_event("request-1", expected[0][1]))
+    if mutation == "unexpected":
+        audit.observe_finished({"requestId": "request-1"})
+        expected = (("GET", expected[0][1] + "/other", "Document"),)
+    elif mutation == "malformed_terminal":
+        audit.observe_finished({"requestId": 1})
+
+    with pytest.raises(NetworkWitnessedFixtureError):
+        audit.assert_exact(expected)
 
 
 def _request() -> dict[str, object]:
@@ -89,20 +163,46 @@ def _valid_result(output_root: Path) -> tuple[dict[str, object], dict[str, objec
     artifact = output_root / "artifact.txt"
     artifact.write_bytes(b"bounded synthetic artifact")
     artifact.chmod(0o444)
-    inventory = [
-        {
-            "relative_path": "artifact.txt",
-            "mode": "0444",
-            "size": artifact.stat().st_size,
-            "sha256": __import__("hashlib").sha256(
-                artifact.read_bytes()
-            ).hexdigest(),
-        }
-    ]
     observation = _observation(
         "negative-control",
         datetime(2030, 1, 2, tzinfo=timezone.utc),
     ).document()
+    application_id = observation["fixture_receipt"]["application_id"]
+    base = f"http://127.0.0.1:41001/applications/{application_id}"
+    expected = (
+        ("GET", base, "Document"),
+        ("POST", base + "/review", "Document"),
+        ("POST", base + "/submit", "Document"),
+    )
+    audit_document = {
+        "schema_version": "jaa10.chromium-request-lifecycle-audit.v1",
+        "listener_mode": "cdp_read_only",
+        "records": [
+            {
+                "initiator_type": "other",
+                "method": method,
+                "request_id": f"request-{index}",
+                "resource_type": resource_type,
+                "terminal": "finished",
+                "url": url,
+            }
+            for index, (method, url, resource_type) in enumerate(expected)
+        ],
+        "protocol_errors": [],
+        "expected_requests": [
+            {"method": method, "url": url, "resource_type": resource_type}
+            for method, url, resource_type in expected
+        ],
+        "inert_favicon_href": "data:image/x-icon;base64,AA==",
+        "exact_sequence_verified": True,
+    }
+    audit = output_root / "chromium-request-audit.json"
+    audit.write_bytes(_canonical_json(audit_document))
+    audit.chmod(0o444)
+    inventory, inventory_sha256 = _document_inventory(
+        output_root,
+        domain=WORKER_INVENTORY_DOMAIN,
+    )
     argv = ["/pinned/chromium", *REQUIRED_CHROMIUM_FLAGS]
     result: dict[str, object] = {
         "schema_version": RESULT_SCHEMA_VERSION,
@@ -138,10 +238,7 @@ def _valid_result(output_root: Path) -> tuple[dict[str, object], dict[str, objec
         "submission_proof": observation["submission_proof"],
         "observation": observation,
         "artifact_inventory": inventory,
-        "worker_artifact_inventory_sha256": _domain_hash(
-            WORKER_INVENTORY_DOMAIN,
-            _canonical_json({"files": inventory}),
-        ),
+        "worker_artifact_inventory_sha256": inventory_sha256,
         "evidence_kind": "synthetic_shadow",
         "execution_claim": "structural_lineage_only",
         "external_actions": 0,
@@ -266,6 +363,49 @@ def test_worker_artifact_tamper_fails_independent_reconstruction(
     (tmp_path / "artifact.txt").write_bytes(b"changed after result")
     (tmp_path / "artifact.txt").chmod(0o444)
     with pytest.raises(NetworkWitnessedFixtureError, match="inventory"):
+        validate_worker_result(
+            result,
+            request=request,
+            request_bytes=request_bytes,
+            output_root=tmp_path,
+        )
+
+
+def test_rehashed_chromium_request_audit_route_tamper_fails(
+    tmp_path: Path,
+) -> None:
+    result, request, request_bytes = _valid_result(tmp_path)
+    path = tmp_path / "chromium-request-audit.json"
+    document = json.loads(path.read_bytes())
+    wrong = str(document["records"][2]["url"]).replace(
+        "/submit",
+        "/side-effect",
+    )
+    document["records"][2]["url"] = wrong
+    document["expected_requests"][2]["url"] = wrong
+    path.chmod(0o600)
+    path.write_bytes(_canonical_json(document))
+    path.chmod(0o444)
+    inventory, inventory_sha256 = _document_inventory(
+        tmp_path,
+        domain=WORKER_INVENTORY_DOMAIN,
+    )
+    result["artifact_inventory"] = inventory
+    result["worker_artifact_inventory_sha256"] = inventory_sha256
+
+    with pytest.raises(NetworkWitnessedFixtureError, match="route differs"):
+        validate_worker_result(
+            result,
+            request=request,
+            request_bytes=request_bytes,
+            output_root=tmp_path,
+        )
+
+
+def test_missing_chromium_request_audit_fails_closed(tmp_path: Path) -> None:
+    result, request, request_bytes = _valid_result(tmp_path)
+    (tmp_path / "chromium-request-audit.json").unlink()
+    with pytest.raises(NetworkWitnessedFixtureError, match="unavailable"):
         validate_worker_result(
             result,
             request=request,
@@ -404,6 +544,7 @@ def test_preexisting_runtime_tmp_object_fails_before_browser(
         "b" * 40,
         "sha256:" + ("c" * 64),
     )
+    monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", str(tmp_path.resolve()))
     anchor = tmp_path_factory.getbasetemp()
     monkeypatch.setattr(
         witness_module,
@@ -435,8 +576,8 @@ def test_preexisting_runtime_tmp_object_fails_before_browser(
             run_network_witnessed_fixture(
                 repository_root=ROOT,
                 execution_root=execution_root,
-                python_executable=Path("/usr/bin/python3"),
-                chromium_executable=Path("/bin/true"),
+                python_executable=Path(sys.executable),
+                chromium_executable=Path(shutil.which("true")),
             )
     finally:
         if endpoint is not None:
@@ -453,7 +594,7 @@ def test_runtime_tmp_contract_literals_and_schema_versions_are_pinned() -> None:
     ).read_text(encoding="utf-8")
 
     assert (
-        'os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", str(Path.home()))'
+        'os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", "/tmp")'
         in witness_source
     )
     assert 'RUNTIME_TMP_HOME_ANCHOR = Path("/home/gutua")' not in witness_source
@@ -532,3 +673,289 @@ def test_worker_inventory_sidecar_exclusion_is_root_exact(
     assert "workflow.sqlite3-wal" not in relative_paths
     assert "workflow.sqlite3-shm" not in relative_paths
     assert "sub/workflow.sqlite3-wal" in relative_paths
+
+
+@pytest.mark.parametrize("mutation", ["valid", "alias", "hash", "size", "mode", "missing", "malformed"])
+def test_worker_revalidates_python_identity_before_corpus(tmp_path, monkeypatch, mutation):
+    import os
+
+    root = tmp_path.resolve()
+    monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", str(root))
+    output = root / "worker-output"
+    output.mkdir()
+    executable = root / "python-real"
+    executable.write_bytes(b"synthetic-python")
+    launcher = root / "python"
+    launcher.symlink_to(executable)
+    chromium = root / "chromium"
+    chromium.write_bytes(b"synthetic-chromium")
+    driver = root / "node"
+    driver.write_bytes(b"synthetic-driver")
+    identity = fixture_module._path_identity(launcher)
+    runtime = {
+        "python": identity,
+        "chromium": fixture_module._path_identity(chromium),
+        "node_driver": fixture_module._path_identity(driver),
+    }
+    if mutation == "hash":
+        identity["sha256"] = "0" * 64
+    elif mutation == "size":
+        identity["size"] += 1
+    elif mutation == "mode":
+        identity["mode"] = "0000"
+    elif mutation == "missing":
+        chromium.unlink()
+    elif mutation == "malformed":
+        del identity["path"]
+    active = executable if mutation == "alias" else launcher
+    monkeypatch.setattr(fixture_module.sys, "executable", str(active))
+    request = {"runtime_identities": runtime, "environment": dict(os.environ)}
+    monkeypatch.setattr(fixture_module, "_read_canonical", lambda *a, **k: (request, b"{}"))
+    monkeypatch.setattr(fixture_module, "_validate_request", lambda *a, **k: (None, "nonce", root))
+    calls = []
+
+    class ReachedAuthority(Exception):
+        pass
+
+    def sentinel(*args):
+        calls.append(True)
+        raise ReachedAuthority()
+
+    monkeypatch.setattr(fixture_module, "verify_graphcore_corpus", sentinel)
+    if mutation == "valid":
+        with pytest.raises(ReachedAuthority):
+            fixture_module._execute_worker(root / "request.json", output, root)
+        assert calls == [True]
+    else:
+        with pytest.raises(NetworkWitnessedFixtureError, match="runtime executable changed"):
+            fixture_module._execute_worker(root / "request.json", output, root)
+        assert calls == []
+
+
+@pytest.mark.parametrize("case", ["valid", "missing", "relative", "file", "symlink", "parent"])
+def test_explicit_corpus_root_validation(tmp_path, monkeypatch, case):
+    root = tmp_path.resolve()
+    corpus = root / "synthetic-corpus"
+    corpus.mkdir()
+    file = root / "file"
+    file.write_text("synthetic")
+    alias = root / "alias"
+    alias.symlink_to(corpus, target_is_directory=True)
+    values = {"valid": str(corpus), "relative": "synthetic-corpus", "file": str(file),
+              "symlink": str(alias), "parent": str(corpus / ".." / "synthetic-corpus")}
+    monkeypatch.delitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", raising=False)
+    if case != "missing":
+        monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", values[case])
+    if case == "valid":
+        assert fixture_module._certified_corpus_root() == corpus
+    else:
+        with pytest.raises(NetworkWitnessedFixtureError, match="certified corpus root"):
+            fixture_module._certified_corpus_root()
+
+
+def test_corpus_configuration_survives_fixed_child_environment(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+
+    root = tmp_path.resolve()
+    key = "JAA_CERTIFIED_CORPUS_ROOT"
+    monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, key, str(root))
+    monkeypatch.setenv("UNRELATED_PRIVATE_SETTING", "must-not-propagate")
+    monkeypatch.setattr(fixture_module, "_playwright_runtime_identity", lambda *a: {})
+    source = SourceIdentity("a" * 40, "b" * 40, "sha256:" + "c" * 64)
+    request = fixture_module._request_document(
+        source=source, execution_root=Path("/tmp/synthetic-attempt"),
+        python_executable=Path(sys.executable), chromium_executable=Path("/synthetic"),
+        integration_nonce=b"x" * 32,
+    )
+    environment = request["environment"]
+    assert environment[key] == str(root)
+    assert "UNRELATED_PRIVATE_SETTING" not in environment
+    assert request["environment_sha256"] == _domain_hash(ENVIRONMENT_DOMAIN, _canonical_json(environment))
+    program = (
+        "import sys; sys.path.insert(0, " + repr(str(ROOT)) + "); "
+        "from career_automation.network_witnessed_fixture import _certified_corpus_root; "
+        "print(_certified_corpus_root())"
+    )
+    completed = subprocess.run([sys.executable, "-c", program], env=environment,
+                               capture_output=True, text=True, timeout=20)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == str(root)
+
+
+def _sealed_projection(source):
+    return {
+        "schema_version": fixture_module.BINDING_SCHEMA_VERSION,
+        "corpus_identity": fixture_module.CORPUS_IDENTITY,
+        "environment": fixture_module.PROTECTED_CORPUS_ENVIRONMENT,
+        "issuer_id": fixture_module.PROTECTED_CORPUS_ISSUER_ID,
+        "trust_root_id": fixture_module.PROTECTED_CORPUS_TRUST_ROOT_ID,
+        "source_head": source.git_revision,
+        "source_tree": source.tree,
+        **{key: "a" * 64 for key in (
+            "binding_sha256", "tree_sha256", "installed_manifest_sha256",
+            "verifier_public_key_sha256",
+        )},
+    }
+
+
+@pytest.mark.parametrize("mode", ["explicit", "sealed", "tampered", "downgraded", "worker"])
+def test_corpus_request_modes_revalidate_exact_authority(tmp_path, monkeypatch, mode):
+    import tempfile
+    import os
+    import sys
+
+    root = tmp_path.resolve()
+    source = SourceIdentity("a" * 40, "b" * 40, "sha256:" + "c" * 64)
+    projection = _sealed_projection(source)
+    for key in fixture_module.FORBIDDEN_RUNTIME_LOCATORS:
+        monkeypatch.delenv(key, raising=False)
+        monkeypatch.delitem(fixture_module.COMMAND_ENVIRONMENT, key, raising=False)
+    calls = []
+
+    def installed(repository):
+        calls.append(repository)
+        return root, projection
+
+    monkeypatch.setattr(fixture_module, "load_installed_protected_corpus_binding", installed)
+    monkeypatch.setattr(fixture_module, "_source_identity", lambda _: source)
+    monkeypatch.setattr(fixture_module, "_playwright_runtime_identity", lambda *a: {})
+    if mode == "worker":
+        chromium = root / "chromium"
+        driver = root / "node"
+        chromium.write_bytes(b"synthetic-chromium")
+        driver.write_bytes(b"synthetic-node")
+        runtime = {"python": fixture_module._path_identity(Path(sys.executable)),
+                   "chromium": fixture_module._path_identity(chromium),
+                   "node_driver": fixture_module._path_identity(driver)}
+        monkeypatch.setattr(fixture_module, "_playwright_runtime_identity", lambda *a: runtime)
+    if mode == "explicit":
+        monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", str(root))
+    with tempfile.TemporaryDirectory(dir=Path("/tmp").resolve(), prefix="ms") as temp:
+        monkeypatch.setattr(witness_module, "RUNTIME_TMP_HOME_ANCHOR", Path(temp))
+        request = fixture_module._request_document(
+            source=source, execution_root=root, python_executable=Path("/unused"),
+            chromium_executable=Path("/unused"), integration_nonce=b"x" * 32,
+            protected_corpus_binding=None if mode == "explicit" else projection,
+        )
+        Path(request["runtime_tmp_root"]).mkdir(mode=0o700)
+        if mode == "explicit":
+            assert request["schema_version"] == fixture_module.REQUEST_SCHEMA_VERSION
+            assert "protected_corpus_binding" not in request
+        else:
+            assert request["schema_version"] == fixture_module.SEALED_REQUEST_SCHEMA_VERSION
+            assert "JAA_CERTIFIED_CORPUS_ROOT" not in request["environment"]
+        if mode == "tampered":
+            request["protected_corpus_binding"]["binding_sha256"] = "f" * 64
+        if mode == "downgraded":
+            request["schema_version"] = fixture_module.REQUEST_SCHEMA_VERSION
+        if mode in ("tampered", "downgraded"):
+            with pytest.raises(NetworkWitnessedFixtureError):
+                fixture_module._validate_request(request, request_path=root / "request.json", repository=root)
+        else:
+            result = fixture_module._validate_request(request, request_path=root / "request.json", repository=root)
+            assert result == (source, b"x" * 32, root)
+            assert len(calls) == (0 if mode == "explicit" else 1)
+
+        if mode == "worker":
+            request_path = root / "integration-request.json"
+            request_path.write_bytes(_canonical_json(request))
+            output = root / "worker-output"
+            output.mkdir(mode=0o700)
+            root.chmod(0o700)
+            request_path.chmod(0o444)
+            expectation = witness_module.CooperativeBrowserExpectation(
+                execution_root=root, request_path=request_path,
+                request_sha256=_domain_hash(REQUEST_DOMAIN, _canonical_json(request)),
+                result_path=output / "worker-result.json",
+                integration_nonce_sha256=request["integration_nonce_sha256"],
+                cooperative_policy_sha256=request["cooperative_policy_sha256"],
+                expected_source=source, runtime_tmp_root=Path(request["runtime_tmp_root"]),
+                runtime_tmp_root_derivation=request["runtime_tmp_root_derivation"],
+                socket_budget=request["socket_budget"],
+            )
+            identities = witness_module._cooperative_preflight(expectation, source, root / "network-evidence")
+            assert set(identities) == {"execution_root", "worker_output", "runtime_tmp_root"}
+            for key in list(os.environ):
+                monkeypatch.delenv(key, raising=False)
+            for key, value in request["environment"].items():
+                monkeypatch.setenv(key, value)
+            reached = []
+
+            class ReachedValidatedCorpus(Exception):
+                pass
+
+            def corpus_sentinel(corpus, seed):
+                reached.append((corpus, seed))
+                raise ReachedValidatedCorpus()
+
+            monkeypatch.setattr(fixture_module, "verify_graphcore_corpus", corpus_sentinel)
+            with pytest.raises(ReachedValidatedCorpus):
+                fixture_module._execute_worker(request_path, output, root)
+            assert reached == [(root, root / fixture_module.TRACKED_SEED_RELATIVE)]
+            assert len(calls) == 2
+
+
+@pytest.mark.parametrize("case", ["locator", "missing_binding"])
+def test_sealed_coordinator_failure_never_falls_back(tmp_path, monkeypatch, case):
+    import shutil
+    import sys
+
+    source = SourceIdentity("a" * 40, "b" * 40, "sha256:" + "c" * 64)
+    for key in fixture_module.FORBIDDEN_RUNTIME_LOCATORS:
+        monkeypatch.delenv(key, raising=False)
+        monkeypatch.delitem(fixture_module.COMMAND_ENVIRONMENT, key, raising=False)
+    monkeypatch.setattr(fixture_module, "_source_identity", lambda _: source)
+
+    def fail_binding(_):
+        raise fixture_module.ProtectedCorpusBindingError("synthetic_missing", "synthetic fixture")
+
+    def forbidden_fallback():
+        raise AssertionError("sealed failure attempted explicit fallback")
+
+    monkeypatch.setattr(fixture_module, "load_installed_protected_corpus_binding", fail_binding)
+    monkeypatch.setattr(fixture_module, "_certified_corpus_root", forbidden_fallback)
+    if case == "locator":
+        monkeypatch.setenv("JAA_CERTIFIED_CORPUS_ROOT", str(tmp_path))
+    output = tmp_path.resolve() / "output"
+    with pytest.raises(NetworkWitnessedFixtureError):
+        run_network_witnessed_fixture(
+            repository_root=tmp_path, execution_root=output,
+            python_executable=sys.executable, chromium_executable=shutil.which("true"),
+            corpus_authority="sealed",
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("launcher_case", ["active", "base", "alias", "relative", "nonlexical", "missing"])
+def test_coordinator_pins_active_environment_before_output(tmp_path, monkeypatch, launcher_case):
+    active = Path(sys.executable).absolute()
+    alias = tmp_path / "other-python"
+    alias.symlink_to(active.resolve(strict=True))
+    choices = {
+        "active": active,
+        "base": active.resolve(strict=True),
+        "alias": alias,
+        "relative": Path("python"),
+        "nonlexical": active.parent / ".." / active.parent.name / active.name,
+        "missing": tmp_path / "missing-python",
+    }
+    selected = choices[launcher_case]
+    if launcher_case == "base" and selected == active:
+        pytest.skip("active interpreter is already its resolved base")
+    monkeypatch.setitem(fixture_module.COMMAND_ENVIRONMENT, "JAA_CERTIFIED_CORPUS_ROOT", str(tmp_path.resolve()))
+    output = tmp_path / "output"
+    class SourceBoundaryReached(Exception):
+        pass
+    def source_boundary(_):
+        assert not output.exists()
+        raise SourceBoundaryReached
+    monkeypatch.setattr(fixture_module, "_source_identity", source_boundary)
+    expected = SourceBoundaryReached if launcher_case == "active" else NetworkWitnessedFixtureError
+    with pytest.raises(expected):
+        run_network_witnessed_fixture(
+            repository_root=tmp_path, execution_root=output,
+            python_executable=selected, chromium_executable=shutil.which("true"),
+        )
+    assert not output.exists()

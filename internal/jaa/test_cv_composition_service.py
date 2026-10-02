@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 from career_automation.adversarial_recruiter import (
-    RESULT_SCHEMA_VERSION,
     RecruiterAssessmentReceipt,
     assess_application_as_recruiter,
 )
@@ -25,6 +24,9 @@ from career_automation.market_aligner_preparation import (
 from career_automation.production_recruiter_assessor import (
     ProductionDetachedRecruiterAssessor,
     ProductionRecruiterAssessorError,
+)
+from career_automation.testing_adversarial_recruiter import (
+    fixture_recruiter_result,
 )
 from career_automation.candidate_contact_authority import CandidateContactAuthority
 from career_automation.evidence_matching import content_hash
@@ -84,21 +86,14 @@ class _InjectedAssessor:
 
 
 def _recruiter_result() -> dict[str, object]:
-    reaction = {
-        "progression_probability_percent": 54,
-        "verdict": "borderline",
-        "reasons": ["The evidence is relevant but compact."],
-    }
-    return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "calibration_status": "uncalibrated",
-        "fit_percent": 53,
-        "fit_range_percent": {"low": 40, "high": 65},
-        "overall_verdict": "plausible_fit",
-        "ats_reaction": reaction,
-        "human_reaction": reaction,
+    value = fixture_recruiter_result(fit_percent=53)
+    value.update({
         "strengths": [
-            {"location": "cv:summary", "assessment": "Reliable delivery evidence."}
+            {
+                "location": "cv:summary",
+                "assessment": "Reliable delivery evidence.",
+                "outward_evidence_refs": ["cv:char:0:1"],
+            }
         ],
         "risks": [
             {
@@ -106,18 +101,25 @@ def _recruiter_result() -> dict[str, object]:
                 "severity": "medium",
                 "location": "cv",
                 "assessment": "The application has limited production scale detail.",
+                "outward_evidence_refs": ["cv:char:0:1"],
             }
         ],
         "application_improvements": [
             {
+                "rank": 1,
                 "target": "positioning",
                 "recommendation": "Keep the reliable delivery evidence prominent.",
                 "expected_effect": "Preserves the clearest role match.",
+                "support_required": False,
+                "outward_evidence_refs": ["cv:char:0:1"],
             },
             {
+                "rank": 2,
                 "target": "cv",
                 "recommendation": "Add unsupported Kubernetes ownership.",
                 "expected_effect": "Would address an unstated platform gap.",
+                "support_required": True,
+                "outward_evidence_refs": ["job_listing:char:0:1"],
             },
         ],
         "profile_improvements": [
@@ -128,7 +130,8 @@ def _recruiter_result() -> dict[str, object]:
                 "expected_effect": "Would strengthen production-depth evidence.",
             }
         ],
-    }
+    })
+    return value
 
 
 def _claim(claim_id: str, category: str) -> ApprovedCVClaim:

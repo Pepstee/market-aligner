@@ -26,10 +26,12 @@ full = ["matplotlib==3.10.5", "jsonschema==4.25.0"]
 # Market Aligner owns its own CLI. JAA exposes only JAA-owned commands.
 jaa-baseline = "baseline_adoption.cli:main"
 jaa-lifecycle = "career_automation.cli:main"
+jaa-handoff = "career_automation.handoff_cli:main"
 jaa-official-cohort = "career_automation.official_cohort:main"
 jaa-document-assurance = "career_automation.external_document_assurance:main"
 
 [tool.setuptools]
+py-modules = ["tracked_source_revision"]
 packages = [
     "baseline_adoption",
     "career_automation",
@@ -45,6 +47,7 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-skeleton = ["config.yaml"]
+skeleton = ["config.yaml", "config.additional.yaml", "config.lever.yaml", "config.overnight.yaml", "fixtures/jobs_20.jsonl"]
+scraper = ["fixtures/*.json", "fixtures/*/*.json"]
 llm = ["prompts/*.txt", "schemas/*.json"]
-career_automation = ["fixtures/*.json", "fixtures/provider-observation-capture-objects/*.json"]
+career_automation = ["fixtures/*.json", "fixtures/provider-observation-capture-objects/*.json", "fixtures/jaa04_authority_canaries/ashby.json", "fixtures/jaa04_authority_canaries/greenhouse.json", "fixtures/jaa04_authority_canaries/workable.json"]

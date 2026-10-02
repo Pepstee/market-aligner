@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pickle
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,21 +18,329 @@ from career_automation.application_compiler import CandidateContact
 from career_automation.candidate_application_factory import CandidateApplicationPackage
 from career_automation.production_queue import LiveVacancy
 from career_automation.production_attempt import GreenhouseAttemptRecorder
+from career_automation.production_ats_executor import ProductionSubmissionReceipt
 from career_automation.production_runner import (
     GeneratedRevisionSink,
     GreenhouseProductionRunner,
     ProductionRunCandidate,
+    ReviewOnlyCompletion,
 )
 
 
 ROOT = Path(__file__).resolve().parent
-AUTHORITY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/candidate-authorities/"
-    "85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json"
+
+
+def test_cli_help_bootstraps_from_unrelated_working_directory(tmp_path: Path) -> None:
+    script = ROOT / "scripts" / "run_greenhouse_production.py"
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "--execute-live" in completed.stdout
+    assert "--review-only" in completed.stdout
+
+
+@pytest.mark.parametrize("terminal_pending", [False, "event", "summary"])
+def test_review_only_runner_completes_without_release_and_does_not_reenter(tmp_path, monkeypatch, terminal_pending):
+    from test_application_archive import _review_preparation
+    from career_automation.production_runner import ReviewOnlyCompletion
+
+    recorder, prepared = _review_preparation(tmp_path)
+    if terminal_pending:
+        def interrupted(**kwargs):
+            raise RuntimeError("synthetic interruption before terminal manifest")
+
+        with monkeypatch.context() as patch:
+            if terminal_pending == "summary":
+                import career_automation.application_archive as archive_module
+                atomic_create = archive_module._atomic_create
+
+                def interrupt_manifest(path, value, **kwargs):
+                    if path.name == "terminal-manifest.json":
+                        interrupted()
+                    return atomic_create(path, value, **kwargs)
+
+                patch.setattr(archive_module, "_atomic_create", interrupt_manifest)
+            else:
+                patch.setattr(recorder.attempt, "finalize_terminal", interrupted)
+            with pytest.raises(RuntimeError, match="synthetic interruption"):
+                recorder.finalize_review_only(prepared)
+    prior_summary = ((recorder.attempt.path / "terminal-summary.txt").read_bytes()
+                     if terminal_pending == "summary" else None)
+    original_events = recorder.attempt._events()
+    original_objects = tuple((row, recorder.attempt.read_artifact(row))
+                             for row in recorder.attempt._objects(original_events))
+    candidate = ProductionRunCandidate(
+        vacancy=LiveVacancy.create(
+            vacancy=recorder.attempt.vacancy, provider="greenhouse", fit_score="0.2",
+            live=True, eligible=True, duplicate=False,
+            live_verified_at=datetime.now(timezone.utc).isoformat(),
+            scoring_inputs_sha256=_digest("review-score"),
+        ),
+        complete_vacancy=b"vacancy", structured_vacancy={}, assessment={},
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("release or submission authority reached")
+
+    monkeypatch.setattr(runner_module, "CertifiedGreenhouseSubmitExecutor", forbidden)
+    monkeypatch.setattr(runner_module, "CandidateReleaseExecutionAuthority", forbidden)
+    monkeypatch.setattr(GreenhouseAttemptRecorder, "finalize_release", forbidden)
+    monkeypatch.setattr(GreenhouseAttemptRecorder, "create", forbidden)
+    validated = []
+    monkeypatch.setattr(GreenhouseProductionRunner, "_validate_generation_inventory",
+                        staticmethod(lambda result, sink: validated.append(result)))
+    runner = GreenhouseProductionRunner(repository_root=recorder.attempt.archive.repository_root,
+                                       archive_root=recorder.attempt.archive.root, review_only=True)
+    routes = []
+    page = SimpleNamespace(on=lambda *args: None, route=lambda pattern, handler: routes.append(handler))
+    completed = runner.execute_all(page, candidates=(candidate,),
+                                   open_vacancy=forbidden if terminal_pending else lambda *args: {"method": "GET", "status": 200, "url": candidate.vacancy.vacancy.source_url},
+                                   prepare_review=forbidden if terminal_pending else lambda *args: prepared)
+    assert len(completed) == 1 and type(completed[0]) is ReviewOnlyCompletion
+    assert completed[0].attempt_id == recorder.attempt.attempt_id
+    assert recorder.attempt._events()[:len(original_events)] == original_events
+    assert sum(row.role == "review.intent" for row in recorder.attempt._objects(recorder.attempt._events())) == 1
+    for row, raw in original_objects:
+        assert recorder.attempt.read_artifact(row) == raw
+    assert validated == ([] if terminal_pending else [prepared])
+    assert runner._queue((candidate,)).next_action is None
+    if terminal_pending:
+        assert recorder.attempt._events() == original_events
+        assert routes == []
+        if prior_summary is not None:
+            assert (recorder.attempt.path / "terminal-summary.txt").read_bytes() == prior_summary
+        return
+    actions = []
+    routes[0](SimpleNamespace(request=SimpleNamespace(method="POST"),
+                              abort=lambda: actions.append("abort"),
+                              continue_=forbidden))
+    assert actions == ["abort"]
+
+
+def test_review_only_runner_rejects_incomplete_release_before_browser_access(tmp_path, monkeypatch):
+    candidate = _candidate()
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=tmp_path / "archive", repository_root=ROOT,
+        vacancy=candidate.vacancy.vacancy, complete_vacancy=b"vacancy",
+        structured_vacancy={}, assessment={},
+    )
+    recorder._add("browser.prefill_snapshot", b"{}", "application/json")
+    original = recorder.attempt._events()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("review recovery reached browser or release authority")
+
+    monkeypatch.setattr(runner_module, "CertifiedGreenhouseSubmitExecutor", forbidden)
+    monkeypatch.setattr(runner_module, "CandidateReleaseExecutionAuthority", forbidden)
+    runner = GreenhouseProductionRunner(repository_root=ROOT, archive_root=tmp_path / "archive", review_only=True)
+    with pytest.raises(ValueError, match="no review-only intent"):
+        runner.execute_next(None, candidates=(candidate,), open_vacancy=forbidden, prepare_review=forbidden)
+    assert recorder.attempt._events() == original
+
+
+def test_review_only_runner_never_constructs_submit_executor(tmp_path, monkeypatch):
+    def forbidden(**kwargs):
+        raise AssertionError("submit executor reached")
+
+    monkeypatch.setattr(runner_module, "CertifiedGreenhouseSubmitExecutor", forbidden)
+    runner = GreenhouseProductionRunner(repository_root=ROOT, archive_root=tmp_path / "archive", review_only=True)
+    assert runner.executor is None
+    with pytest.raises(ValueError, match="only a review"):
+        runner.execute_next(None, candidates=(), open_vacancy=None, prepare_release=lambda *args: None)
+    with pytest.raises(ValueError, match="one terminal"):
+        runner.execute_all(None, candidates=(), open_vacancy=None, prepare_review=lambda *args: None, max_terminal_attempts=2)
+
+
+@pytest.mark.parametrize("flags", [[], ["--review-only", "--execute-live"], ["--review-only", "--max-terminal-attempts", "2"]])
+def test_review_only_cli_selection_is_explicit_and_bounded(tmp_path, monkeypatch, flags):
+    def forbidden(*args):
+        raise AssertionError("session factory must not run")
+
+    monkeypatch.setattr(runner_module, "_load_factory", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        runner_module.main(["--repository-root", str(ROOT), "--archive-root", str(tmp_path), *flags])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("attempt_limit", [None, 2])
+def test_live_runner_requires_exactly_one_terminal_attempt(tmp_path, attempt_limit):
+    runner = GreenhouseProductionRunner(repository_root=ROOT, archive_root=tmp_path / "archive")
+    with pytest.raises(ValueError, match="exactly one terminal"):
+        runner.execute_all(
+            None, candidates=(), open_vacancy=lambda *args: None,
+            prepare_release=lambda *args: None, max_terminal_attempts=attempt_limit,
+        )
+
+
+@pytest.mark.parametrize("flags", [["--execute-live"], ["--execute-live", "--max-terminal-attempts", "2"]])
+def test_live_cli_requires_exactly_one_terminal_attempt(tmp_path, monkeypatch, flags):
+    def forbidden(*args):
+        raise AssertionError("session factory must not run")
+
+    monkeypatch.setattr(runner_module, "_load_factory", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        runner_module.main(["--repository-root", str(ROOT), "--archive-root", str(tmp_path), *flags])
+    assert exc.value.code == 2
+
+
+def test_live_cli_accepts_one_terminal_attempt(tmp_path, monkeypatch):
+    def reached_factory(*args):
+        raise AssertionError("valid canary arguments reached the session factory")
+
+    monkeypatch.setattr(runner_module, "_load_factory", reached_factory)
+    with pytest.raises(AssertionError, match="valid canary arguments"):
+        runner_module.main([
+            "--repository-root", str(ROOT), "--archive-root", str(tmp_path),
+            "--execute-live", "--max-terminal-attempts", "1",
+        ])
+
+
+def _submission_receipt(*, job_key: str, vacancy_sha256: str) -> ProductionSubmissionReceipt:
+    document = {
+        "schema_version": "jaa.production-submission-receipt.v1",
+        "attempt_id": "jaa-20260928T000000Z-0123456789abcdef",
+        "provider": "greenhouse",
+        "job_key": job_key,
+        "vacancy_sha256": vacancy_sha256,
+        "confirmation_url": "https://job-boards.greenhouse.io/example/confirmation",
+        "page_title": "Application received",
+        "visible_text_sha256": "1" * 64,
+        "post_submit_screenshot_sha256": "2" * 64,
+        "submitted_at": "2026-09-28T00:00:00Z",
+        "provider_application_id": None,
+        "confirmation_email_checked": False,
+    }
+    receipt_sha256 = hashlib.sha256(
+        (runner_module.canonical_json(document) + "\n").encode()
+    ).hexdigest()
+    return ProductionSubmissionReceipt(
+        **document,
+        receipt_sha256=receipt_sha256,
+    )
+
+
+def _run_cli_with_terminal_result(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    outcomes: tuple[object, ...],
+    mode: tuple[str, ...],
+) -> tuple[int, SimpleNamespace]:
+    candidate = _candidate()
+    closed: list[bool] = []
+    session = SimpleNamespace(
+        page=object(),
+        candidates=(candidate,),
+        open_vacancy=lambda *_args: None,
+        prepare_release=lambda *_args: None,
+        prepare_review=lambda *_args: None,
+        gmail_confirmation_checker=None,
+        close=lambda: closed.append(True),
+    )
+
+    class FakeRunner:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def execute_all(self, *_args, **_kwargs):
+            return outcomes
+
+    monkeypatch.setattr(runner_module, "_load_factory", lambda _reference: lambda _args: session)
+    monkeypatch.setattr(runner_module, "GreenhouseProductionRunner", FakeRunner)
+    args = [
+        "--repository-root", str(ROOT),
+        "--archive-root", str(ROOT / ".test-archive-placeholder"),
+        *mode,
+    ]
+    return runner_module.main(args), SimpleNamespace(session=session, candidate=candidate, closed=closed)
+
+
+def test_live_cli_returns_success_only_with_matching_submission_receipt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    candidate = _candidate()
+    source = candidate.vacancy.vacancy
+    receipt = _submission_receipt(
+        job_key=source.job_key,
+        vacancy_sha256=source.vacancy_sha256,
+    )
+    code, result = _run_cli_with_terminal_result(
+        monkeypatch,
+        outcomes=(receipt,),
+        mode=("--execute-live", "--max-terminal-attempts", "1"),
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert output["outcome"] == "submitted_success"
+    assert output["submission_receipt"]["receipt_sha256"] == receipt.receipt_sha256
+    assert result.closed == [True]
+
+
+def test_live_cli_exits_nonzero_when_no_terminal_submission_receipt_exists(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, result = _run_cli_with_terminal_result(
+        monkeypatch,
+        outcomes=(),
+        mode=("--execute-live", "--max-terminal-attempts", "1"),
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert code == 2
+    assert error["outcome"] == "no_terminal_attempt"
+    assert error["submission_receipt"] is None
+    assert result.closed == [True]
+
+
+def test_live_cli_rejects_receipt_for_a_different_vacancy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    receipt = _submission_receipt(job_key="other-job", vacancy_sha256="3" * 64)
+    code, result = _run_cli_with_terminal_result(
+        monkeypatch,
+        outcomes=(receipt,),
+        mode=("--execute-live", "--max-terminal-attempts", "1"),
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert code == 2
+    assert error["outcome"] == "submission_receipt_candidate_mismatch"
+    assert result.closed == [True]
+
+
+def test_review_cli_labels_review_only_without_claiming_submission(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    review = ReviewOnlyCompletion(
+        attempt_id="jaa-20260928T000000Z-0123456789abcdef",
+        terminal_manifest_sha256="4" * 64,
+    )
+    code, result = _run_cli_with_terminal_result(
+        monkeypatch,
+        outcomes=(review,),
+        mode=("--review-only",),
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert output["outcome"] == "review_only"
+    assert "submission_receipt" not in output
+    assert result.closed == [True]
+PRIVATE_AUTHORITY_ROOT = ROOT.parents[1] / ".market-aligner-data" / "authority-inputs"
+AUTHORITY_PATH = (
+    PRIVATE_AUTHORITY_ROOT
+    / "candidate-authorities"
+    / ("85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json")
 )
-DISCOVERY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/objects/39/"
-    "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
+DISCOVERY_PATH = (
+    PRIVATE_AUTHORITY_ROOT
+    / "objects"
+    / "39"
+    / ("39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47")
 )
 
 
@@ -88,6 +399,12 @@ def _package(
 def _generate_owned(
     sink: GeneratedRevisionSink,
 ) -> CandidateApplicationPackage:
+    if not AUTHORITY_PATH.is_file() or not DISCOVERY_PATH.is_file():
+        pytest.skip(
+            "requires the exact private Gigabyte candidate-authority and "
+            "discovery artifacts; synthetic substitution would not test the "
+            "certified binding"
+        )
     authority = json.loads(AUTHORITY_PATH.read_bytes())
     discovery = json.loads(DISCOVERY_PATH.read_bytes())
     decision = next(
@@ -153,6 +470,12 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
     class FakeRecorder:
         attempt = FakeAttempt()
 
+        def attach_page_evidence(self, _page):
+            calls.append("attach_evidence")
+
+        def record_navigation(self, _navigation):
+            calls.append("record_navigation")
+
         def record_prefill(self, _page):
             calls.append("record_prefill")
 
@@ -205,6 +528,9 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
         questions=None,
         document_assurance_receipts=object(),
         sanity_review_receipt=object(),
+        ats_application_authority=object(),
+        quality_input=object(),
+        quality_review=object(),
         production_identity=object(),
         attached_roles=("cv",),
         upload_field_names=(("cv", "resume"),),
@@ -222,6 +548,7 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
         jurisdiction="GB",
         contract_type="employee",
         consumed_at=datetime.now(timezone.utc),
+        vacancy_review_material=object(),
         vacancy_requirements=("essential: requirement",),
         submit_button_name="Submit Application",
         timeout_ms=1000,
@@ -240,8 +567,10 @@ def test_runner_wires_queue_recorder_release_authority_and_executor(
     )
     assert result is receipt
     assert calls == [
-        "open_vacancy",
         "create_attempt",
+        "attach_evidence",
+        "open_vacancy",
+        "record_navigation",
         "record_prefill",
         "prepare_release",
         "validate_generation",
@@ -370,6 +699,16 @@ def test_runner_archives_returned_revisions_before_inventory_rejection(
 
     monkeypatch.setattr(
         GreenhouseAttemptRecorder, "record_prefill", lambda self, _page: None
+    )
+    monkeypatch.setattr(
+        GreenhouseAttemptRecorder,
+        "attach_page_evidence",
+        lambda self, _page: None,
+    )
+    monkeypatch.setattr(
+        GreenhouseAttemptRecorder,
+        "record_navigation",
+        lambda self, _navigation: None,
     )
     monkeypatch.setattr(
         GreenhouseAttemptRecorder,
@@ -614,6 +953,12 @@ def test_runner_terminalizes_after_sink_archives_generator_crash(
     class FakeRecorder:
         attempt = FakeAttempt()
 
+        def attach_page_evidence(self, _page):
+            return None
+
+        def record_navigation(self, _navigation):
+            return None
+
         def record_prefill(self, _page):
             return None
 
@@ -674,6 +1019,12 @@ def test_runner_terminalizes_observed_provider_boundary_before_preparation(
     class FakeRecorder:
         attempt = FakeAttempt()
 
+        def attach_page_evidence(self, _page):
+            return None
+
+        def record_navigation(self, _navigation):
+            return None
+
         def finalize_provider_boundary(self, _page, **kwargs):
             calls.append("terminal_boundary")
             assert kwargs["signals"] == ("recaptcha",)
@@ -707,3 +1058,144 @@ def test_runner_terminalizes_observed_provider_boundary_before_preparation(
     )
     assert result is None
     assert calls == ["create_attempt", "terminal_boundary"]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_private_worker_channel_archives_real_child_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: bool,
+) -> None:
+    """Real child/pipe/archive, synthetic generator only; no candidate corpus."""
+    import base64
+    import os
+    import subprocess
+    import sys
+
+    sink, _recorder = _durable_sink(tmp_path)
+    monkeypatch.setattr(sink, "_generator_source_identity", lambda: ("a" * 40, {}))
+    original_popen = subprocess.Popen
+    observed = {}
+    sentinel = "SYNTHETIC-PRIVATE-REVISION-AND-ERROR"
+    script = '''
+import sys
+from types import SimpleNamespace
+from career_automation import candidate_generation_worker as worker
+from career_automation.candidate_application_factory import CandidateApplicationPackage
+
+def generate(**arguments):
+    for role in ("generation.inputs", "document.source_inputs", "document.cv.constraints",
+                 "document.cv.source", "document.cv.final_pdf", "document.cover_letter.source",
+                 "document.cover_letter.final_pdf", "form.answers"):
+        arguments["revision_writer"](role=role, value=SENTINEL.encode(), media_type="text/plain")
+        if FAIL:
+            print("synthetic private worker diagnostic", file=sys.stderr)
+            raise ValueError(SENTINEL)
+    return CandidateApplicationPackage(source=SimpleNamespace(), artifacts=SimpleNamespace(),
+                                       vacancy_requirements=())
+worker.build_candidate_application_package = generate
+raise SystemExit(worker.main())
+'''.replace("SENTINEL", repr(sentinel)).replace("FAIL", repr(failure))
+
+    def launch(command, **kwargs):
+        if command == [sys.executable, "-m", "career_automation.candidate_generation_worker"]:
+            # Keep the real parent transport, substitute only the corpus-dependent
+            # generator inside the child. Paths are explicit since parent changes cwd.
+            kwargs["env"]["PYTHONPATH"] = os.pathsep.join(
+                [str(ROOT), str(ROOT.parents[1] / "src")]
+            )
+            observed["stdout"] = os.dup(kwargs["stdout"].fileno())
+            observed["stderr"] = os.dup(kwargs["stderr"].fileno())
+            return original_popen([sys.executable, "-c", script], **kwargs)
+        return original_popen(command, **kwargs)
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", launch)
+    arguments = dict(
+        decision_receipt={}, candidate_projection={}, job_key="synthetic", vacancy_sha256="a" * 64,
+        source_url="https://example.test/job", role_title="Synthetic", company_name="Example",
+        contact=CandidateContact(full_name="Alex Example", email="alex@example.test", phone=None,
+                                city="London", record_id="synthetic", record_version=1,
+                                provenance_sha256="a" * 64),
+    )
+    try:
+        if failure:
+            with pytest.raises(RuntimeError, match="^isolated candidate generator failed$"):
+                sink.generate_candidate_application(**arguments)
+            assert sink.authority is None
+        else:
+            assert type(sink.generate_candidate_application(**arguments)) is CandidateApplicationPackage
+            assert sink.authority is not None
+        durable = sink._verified_durable_revisions()
+        assert len(durable) == (1 if failure else 9)
+        assert durable[0].value == sentinel.encode()
+        if failure:
+            diagnostic_rows = [
+                row
+                for row in _recorder.attempt._objects(_recorder.attempt._events())
+                if row.role == "generation.worker.stderr"
+            ]
+            assert len(diagnostic_rows) == 1
+            diagnostic = _recorder.attempt.read_artifact(diagnostic_rows[0])
+            assert b"synthetic private worker diagnostic" in diagnostic
+            assert sentinel.encode() in diagnostic
+        for channel, descriptor in observed.items():
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            data = os.read(descriptor, 65536)
+            assert base64.b64encode(sentinel.encode()) not in data
+            if channel == "stderr":
+                assert (sentinel.encode() in data) is failure
+            else:
+                assert sentinel.encode() not in data
+                message = json.loads(data)
+                assert message["kind"] == ("failure" if failure else "result")
+    finally:
+        for descriptor in observed.values():
+            os.close(descriptor)
+
+
+def test_private_worker_diagnostic_is_hash_only_when_archive_safety_rejects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    from career_automation.application_archive import ApplicationArchiveError
+
+    sink, recorder = _durable_sink(tmp_path)
+    diagnostic = b"synthetic diagnostic rejected by the archive safety scanner"
+
+    def reject_diagnostic(_value: bytes, _media_type: str) -> None:
+        raise ApplicationArchiveError("secret-like value cannot be archived")
+
+    monkeypatch.setattr(runner_module, "_scan_secret_bytes", reject_diagnostic)
+    sink._archive_worker_diagnostics(io.BytesIO(diagnostic), exit_code=2)
+
+    rows = recorder.attempt._objects(recorder.attempt._events())
+    assert not any(row.role == "generation.worker.stderr" for row in rows)
+    receipts = [
+        row for row in rows if row.role == "generation.worker.stderr_receipt"
+    ]
+    assert len(receipts) == 1
+    receipt = json.loads(recorder.attempt.read_artifact(receipts[0]))
+    assert receipt["content_state"] == "withheld_secret_like"
+    assert receipt["byte_length"] == len(diagnostic)
+    assert receipt["content_sha256"] == hashlib.sha256(diagnostic).hexdigest()
+    assert diagnostic.decode() not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("binding", [None, "1", "invalid", "9" * 5000])
+def test_private_worker_rejects_absent_or_invalid_channel_without_traceback(binding) -> None:
+    import os
+    import subprocess
+    import sys
+
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join([str(ROOT), str(ROOT.parents[1] / "src")])
+    environment.pop("JAA_GENERATION_OUTPUT_FD", None)
+    if binding is not None:
+        environment["JAA_GENERATION_OUTPUT_FD"] = binding
+    result = subprocess.run(
+        [sys.executable, "-m", "career_automation.candidate_generation_worker"],
+        input="{}", text=True, capture_output=True, env=environment,
+    )
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert json.loads(result.stdout)["kind"] == "failure"

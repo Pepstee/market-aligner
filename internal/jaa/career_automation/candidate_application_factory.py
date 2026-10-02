@@ -4,21 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 from datetime import date, datetime
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, Sequence
 
 from .application_compiler import (
     ApplicationSource,
+    ApprovedEvidenceSourceContext,
     CandidateContact,
     DocumentSection,
+    EXACT_OUTWARD_PROFILE_REWRITES as OUTWARD_PROFILE_REWRITES,
     FactAuthority,
     FactualSentence,
     ProfileFactAuthority,
     StyleSlot,
     VacancyFactAuthority,
+    approved_candidate_outward_text,
     compile_application_source,
+    resolve_authenticated_outward_rewrite,
 )
 from .application_strategy import (
     CandidateSupport,
@@ -52,6 +56,7 @@ from .rendering import (
 from cv_generation.constraints import (
     CVConstraintReceipt,
     CandidateSourcePolicyReceipt,
+    capability_line_eligible,
     validate_candidate_source_policy,
     validate_generated_cv,
 )
@@ -76,66 +81,38 @@ PROFILE_LETTER_EVIDENCE_PRIORITY = (
     "E-011",
     "E-002",
 )
+PROFILE_CV_GENERIC_SECTION_BY_PROOF_CLASS = {
+    "verified_claim": "Highlights",
+    "work_artifact": "Projects",
+    "test_result": "Results",
+    "external_outcome": "Outcomes",
+    "employment_record": "Experience",
+    "credential": "Education",
+    "portfolio_artifact": "Projects",
+}
+PROFILE_CV_SECTION_ORDER = (
+    "Professional Summary",
+    "Core Capabilities",
+    "Projects",
+    "Education",
+    "Experience",
+    "Skills",
+    "Highlights",
+    "Results",
+    "Outcomes",
+)
+_CAPABILITY_EVIDENCE_PROOF_CLASSES = frozenset(
+    {"portfolio_artifact", "work_artifact", "test_result", "employment_record"}
+)
+_PROFILE_CV_LEGACY_SECTION_BY_EVIDENCE_ID = {
+    evidence_id: heading
+    for heading, evidence_ids in PROFILE_CV_SECTIONS
+    for evidence_id in evidence_ids
+}
 MINIMUM_CV_FACTS = 8
 MINIMUM_CV_WORDS = 110
 MINIMUM_LETTER_CANDIDATE_FACTS = 2
 MINIMUM_LETTER_WORDS = 90
-OUTWARD_PROFILE_REWRITES: Mapping[str, str] = {
-    "E-001": (
-        "First-Class BSc (Hons) Computer Science, Birmingham Newman "
-        "University, July 2026."
-    ),
-    "E-002": (
-        "Dissertation: SCAFAD: A Seven-Layer, Privacy-Preserving, Explainable "
-        "Anomaly-Detection Pipeline for Serverless Workloads."
-    ),
-    "E-011": (
-        "I led the end-to-end development of Market Aligner, covering its "
-        "collectors, validation, caching, SQLite persistence, retries and resumability."
-    ),
-    "E-013": (
-        "My GitHub portfolio is available under the username Pepstee, with work "
-        "covering orchestration, SCAFAD and delivered software projects."
-    ),
-    "E-012": (
-        "I architect and operate a multi-agent orchestration platform, owning "
-        "requirements, system architecture, evaluation gates and acceptance decisions."
-    ),
-    "E-014": (
-        "I provided product direction and validated the working Dubbing Studio MVP."
-    ),
-    "E-015": (
-        "Dubbing Studio has 709 passing automated tests and a real command-line "
-        "synthesis check that produced a timeline-correct WAV."
-    ),
-    "E-016": (
-        "Built Learning Accelerator, a tested system for LLM-assisted question "
-        "generation, spaced repetition, review sessions, persistence and analytics."
-    ),
-    "E-017": (
-        "The public scafad-delta repository contains the SCAFAD implementation."
-    ),
-    "E-018": (
-        "An earlier public orchestrator repository documents the development of "
-        "my orchestration architecture."
-    ),
-}
-OUTWARD_LETTER_REWRITES: Mapping[str, str] = {
-    "E-011": (
-        "In Market Aligner, I led work on collectors, validation, caching, "
-        "SQLite persistence, retries and resumability."
-    ),
-}
-OUTWARD_REWRITE_POLICY_SHA256 = content_hash(
-    {
-        "schema_version": "jaa.candidate-outward-rewrite-policy.v1",
-        "mode": "exact_allowlist",
-        "rewrites": dict(OUTWARD_PROFILE_REWRITES),
-        "letter_rewrites": dict(OUTWARD_LETTER_REWRITES),
-    }
-)
-
-
 @dataclass(frozen=True)
 class CandidateApplicationPackage:
     source: ApplicationSource
@@ -782,10 +759,70 @@ class GenerationRevisionWriter(Protocol):
     ) -> object: ...
 
 
-def _approved_statements(path: Path) -> dict[str, dict[str, object]]:
+def _projection_evidence_sha256(
+    candidate_projection: Mapping[str, object],
+    decision_receipt: Mapping[str, object],
+) -> str:
+    claimed = candidate_projection.get("projection_sha256")
+    if (
+        not isinstance(claimed, str)
+        or len(claimed) != 64
+        or any(character not in "0123456789abcdef" for character in claimed)
+        or decision_receipt.get("candidate_projection_sha256") != claimed
+    ):
+        raise ValueError("application factory candidate projection binding differs")
+    projection_body = {
+        key: value
+        for key, value in candidate_projection.items()
+        if key != "projection_sha256"
+    }
+    try:
+        computed = _sha256((canonical_json(projection_body) + "\n").encode("utf-8"))
+    except (TypeError, ValueError):
+        raise ValueError("application factory candidate projection is malformed") from None
+    if computed != claimed:
+        raise ValueError("application factory candidate projection content differs")
+    source_hashes = candidate_projection.get("source_hashes")
+    expected = (
+        source_hashes.get("approved_evidence")
+        if isinstance(source_hashes, Mapping)
+        else None
+    )
+    if (
+        not isinstance(expected, str)
+        or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise ValueError("application factory candidate evidence digest is malformed")
+    return expected
+
+
+def _approved_statements(
+    path: Path,
+    *,
+    expected_evidence_sha256: str | None = None,
+) -> dict[str, dict[str, object]]:
+    statements, _source_context = _load_approved_statements(
+        path,
+        expected_evidence_sha256=expected_evidence_sha256,
+    )
+    return statements
+
+
+def _load_approved_statements(
+    path: Path,
+    *,
+    expected_evidence_sha256: str | None = None,
+) -> tuple[dict[str, dict[str, object]], ApprovedEvidenceSourceContext]:
     value = path.read_bytes()
-    if _sha256(value) != APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]:
+    expected = (
+        APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
+        if expected_evidence_sha256 is None
+        else expected_evidence_sha256
+    )
+    if _sha256(value) != expected:
         raise ValueError("application factory candidate evidence hash differs")
+    source_context = ApprovedEvidenceSourceContext(value, expected)
     document = json.loads(value)
     rows = document.get("statements")
     if not isinstance(rows, list):
@@ -793,7 +830,26 @@ def _approved_statements(path: Path) -> dict[str, dict[str, object]]:
     result = {str(row["id"]): dict(row) for row in rows if isinstance(row, Mapping)}
     if len(result) != len(rows):
         raise ValueError("application factory candidate evidence is ambiguous")
-    return result
+    for row in result.values():
+        _evidence_document_targets(row)
+    return result, source_context
+
+
+_DOCUMENT_TARGETS = frozenset({"cv", "cover_letter"})
+
+
+def _evidence_document_targets(evidence: Mapping[str, object]) -> frozenset[str]:
+    if "document_targets" not in evidence:
+        return _DOCUMENT_TARGETS
+    raw = evidence["document_targets"]
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or any(not isinstance(value, str) or value not in _DOCUMENT_TARGETS for value in raw)
+        or len(set(raw)) != len(raw)
+    ):
+        raise ValueError("candidate evidence document targets are malformed")
+    return frozenset(raw)
 
 
 def _sha256(value: bytes) -> str:
@@ -822,9 +878,11 @@ def _outward_profile_text(
     document_kind: str | None = None,
 ) -> str:
     evidence_id = str(evidence["id"])
-    if document_kind == "cover_letter" and evidence_id in OUTWARD_LETTER_REWRITES:
-        return OUTWARD_LETTER_REWRITES[evidence_id]
-    return OUTWARD_PROFILE_REWRITES.get(evidence_id, str(evidence["statement"]))
+    return approved_candidate_outward_text(
+        evidence_id,
+        str(evidence["statement"]),
+        document_kind=document_kind or "cv",
+    )
 
 
 def _employer_document(
@@ -919,11 +977,25 @@ def _profile_sentence(
     candidate_profile_hash: str,
     statement_sha256: str,
     document_kind: str,
+    approved_evidence_source: ApprovedEvidenceSourceContext | None = None,
 ) -> FactualSentence:
     evidence_id = str(evidence["id"])
     approved_source_text = str(evidence["statement"])
     text = _outward_profile_text(evidence, document_kind=document_kind)
     rewritten = text != approved_source_text
+    rewrite_authority = (
+        resolve_authenticated_outward_rewrite(
+            candidate_evidence_id=evidence_id,
+            candidate_evidence_version=1,
+            approved_source_text=approved_source_text,
+            outward_text=text,
+            document_kind=document_kind,
+            approved_evidence_source=approved_evidence_source,
+            candidate_profile_hash=candidate_profile_hash,
+        )
+        if rewritten
+        else None
+    )
     authority = ProfileFactAuthority(
         candidate_profile_hash=candidate_profile_hash,
         candidate_claim_id=f"approved-claim:{evidence_id}",
@@ -932,10 +1004,7 @@ def _profile_sentence(
         candidate_evidence_version=1,
         candidate_evidence_sha256=statement_sha256,
         proof_class=str(evidence["proof_class"]),
-        outward_text_sha256=_sha256(text.encode()) if rewritten else None,
-        rewrite_policy_sha256=(
-            OUTWARD_REWRITE_POLICY_SHA256 if rewritten else None
-        ),
+        rewrite_authority=rewrite_authority,
     )
     return FactualSentence(
         content_hash(
@@ -971,7 +1040,71 @@ def _slot(document_kind: str, purpose: str, text: str) -> StyleSlot:
     )
 
 
-def _assert_package_quality(source: ApplicationSource) -> None:
+def _profile_cv_section_for_evidence(
+    evidence_id: str,
+    proof_class: str,
+    *,
+    legacy_profile: bool,
+) -> str:
+    legacy_heading = (
+        _PROFILE_CV_LEGACY_SECTION_BY_EVIDENCE_ID.get(evidence_id)
+        if legacy_profile
+        else None
+    )
+    if legacy_heading is not None:
+        return legacy_heading
+    heading = PROFILE_CV_GENERIC_SECTION_BY_PROOF_CLASS.get(proof_class)
+    if heading is None:
+        raise ValueError("candidate CV evidence kind has no truthful section")
+    return heading
+
+
+def _profile_cv_section_for_fact(
+    fact: FactualSentence,
+    evidence_kinds: Mapping[str, str],
+    *,
+    legacy_profile: bool,
+) -> str:
+    evidence_id = getattr(fact.authority, "candidate_evidence_id", None)
+    if fact.fact_kind != "candidate" or not isinstance(evidence_id, str):
+        raise ValueError("candidate CV fact lacks bound profile authority")
+    proof_class = evidence_kinds.get(evidence_id)
+    if not isinstance(proof_class, str):
+        raise ValueError("candidate CV fact lacks bound evidence kind")
+    return _profile_cv_section_for_evidence(
+        evidence_id,
+        proof_class,
+        legacy_profile=legacy_profile,
+    )
+
+
+def _select_profile_capability_fact(
+    sections: Mapping[str, Sequence[FactualSentence]],
+    evidence_kinds: Mapping[str, str],
+) -> FactualSentence | None:
+    for heading in PROFILE_CV_SECTION_ORDER:
+        if heading in {"Professional Summary", "Core Capabilities"}:
+            continue
+        for fact in sections.get(heading, ()):
+            evidence_id = getattr(fact.authority, "candidate_evidence_id", None)
+            if (
+                fact.fact_kind != "candidate"
+                or not isinstance(evidence_id, str)
+                or evidence_kinds.get(evidence_id)
+                not in _CAPABILITY_EVIDENCE_PROOF_CLASSES
+                or not capability_line_eligible(fact.text)
+            ):
+                continue
+            return fact
+    return None
+
+
+def _assert_package_quality(
+    source: ApplicationSource,
+    *,
+    evidence_kinds: Mapping[str, str],
+    legacy_profile: bool,
+) -> None:
     facts = {row.sentence_id: row for row in source.facts}
     cv_rows = [
         facts[sentence_id]
@@ -998,10 +1131,92 @@ def _assert_package_quality(source: ApplicationSource) -> None:
         raise ValueError("candidate CV is too sparse for employer submission")
     if len(cv_texts) != len(set(cv_texts)):
         raise ValueError("candidate CV repeats factual content")
-    if tuple(section.heading for section in source.cv_sections) != tuple(
-        heading for heading, _ in PROFILE_CV_SECTIONS
+    overview_section_names = {"Professional Summary", "Core Capabilities"}
+    overview_sentence_ids = {
+        sentence_id
+        for section in source.cv_sections
+        if section.heading in overview_section_names
+        for sentence_id in section.sentence_ids
+    }
+    expected_headings = {
+        _profile_cv_section_for_fact(
+            row,
+            evidence_kinds,
+            legacy_profile=legacy_profile,
+        )
+        for row in cv_rows
+        if row.sentence_id not in overview_sentence_ids
+    }
+    actual_heading_order = tuple(section.heading for section in source.cv_sections)
+    summary_section = next(
+        (
+            section
+            for section in source.cv_sections
+            if section.heading == "Professional Summary"
+        ),
+        None,
+    )
+    if summary_section is not None:
+        expected_headings.add("Professional Summary")
+    capability_sections = [
+        section
+        for section in source.cv_sections
+        if section.heading == "Core Capabilities"
+    ]
+    if len(capability_sections) > 1:
+        raise ValueError("candidate CV has ambiguous capability sections")
+    if capability_sections:
+        capability_section = capability_sections[0]
+        if not capability_section.sentence_ids:
+            raise ValueError("candidate CV capability section is empty")
+        expected_headings.add("Core Capabilities")
+        if not legacy_profile:
+            if len(capability_section.sentence_ids) != 1:
+                raise ValueError("candidate CV capability section is not a single relocation")
+            capability_sentence_id = capability_section.sentence_ids[0]
+            capability_fact = facts.get(capability_sentence_id)
+            evidence_id = (
+                getattr(capability_fact.authority, "candidate_evidence_id", None)
+                if capability_fact is not None
+                else None
+            )
+            if (
+                capability_fact is None
+                or capability_fact.fact_kind != "candidate"
+                or sum(row.sentence_id == capability_sentence_id for row in cv_rows) != 1
+                or not isinstance(evidence_id, str)
+                or evidence_kinds.get(evidence_id)
+                not in _CAPABILITY_EVIDENCE_PROOF_CLASSES
+                or not capability_line_eligible(capability_fact.text)
+            ):
+                raise ValueError("candidate CV capability section lacks verified evidence")
+    expected_heading_order = tuple(
+        heading
+        for heading in PROFILE_CV_SECTION_ORDER
+        if heading in expected_headings
+    )
+    if (
+        actual_heading_order != expected_heading_order
+        or len(actual_heading_order) != len(set(actual_heading_order))
+        or any(
+            _profile_cv_section_for_fact(
+                facts[sentence_id],
+                evidence_kinds,
+                legacy_profile=legacy_profile,
+            )
+            != section.heading
+            for section in source.cv_sections
+            if section.heading != "Professional Summary"
+            and not (section.heading == "Core Capabilities" and not legacy_profile)
+            for sentence_id in section.sentence_ids
+        )
+        or (
+            summary_section is not None
+            and not legacy_profile
+            and len(summary_section.sentence_ids) != 1
+        )
     ):
-        raise ValueError("candidate CV lacks the complete graduate profile structure")
+        raise ValueError("candidate CV sections differ from bound evidence kinds")
     candidate_letter = [row for row in letter_rows if row.fact_kind == "candidate"]
     employer_letter = [row for row in letter_rows if row.fact_kind == "employer"]
     if (
@@ -1061,10 +1276,12 @@ def _build_candidate_application_source(
         or decision_receipt.get("company_name") != company_name
         or decision_receipt.get("vacancy_sha256") != vacancy_sha256
         or decision_receipt.get("source_url") != source_url
-        or decision_receipt.get("candidate_projection_sha256")
-        != candidate_projection.get("projection_sha256")
     ):
         raise ValueError("application factory decision authority differs")
+    expected_evidence_sha256 = _projection_evidence_sha256(
+        candidate_projection,
+        decision_receipt,
+    )
     matrix = decision_receipt.get("evidence_matrix")
     if not isinstance(matrix, list) or not matrix:
         raise ValueError("application factory requires an evidence matrix")
@@ -1083,7 +1300,10 @@ def _build_candidate_application_source(
         all_requirements.append(f"{row['requirement_id']}: {row['requirement_text']}")
         if row.get("status") == "matched":
             matched_rows.append(row)
-    statements = _approved_statements(approved_evidence_path)
+    statements, approved_evidence_source = _load_approved_statements(
+        approved_evidence_path,
+        expected_evidence_sha256=expected_evidence_sha256,
+    )
     projection_rows = candidate_projection.get("approved_evidence")
     if not isinstance(projection_rows, list):
         raise ValueError("candidate projection evidence is malformed")
@@ -1094,16 +1314,23 @@ def _build_candidate_application_source(
     }
     if len(projection_by_id) != len(projection_rows):
         raise ValueError("candidate projection evidence is ambiguous")
+    legacy_profile = (
+        expected_evidence_sha256
+        == APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
+    )
+    verified_evidence_kinds: dict[str, str] = {}
     requirements: list[Requirement] = []
     matches: list[MatchResult] = []
     supports: list[CandidateSupport] = []
     selected_rows: list[Mapping[str, object]] = []
+    eligible_matched_rows: list[tuple[Mapping[str, object], tuple[str, ...]]] = []
+    matched_document_targets: dict[str, frozenset[str]] = {}
     source_identity = f"vacancy:{job_key}:{vacancy_sha256}"
     for row in matched_rows:
         evidence_ids = row.get("evidence_ids")
         if not isinstance(evidence_ids, list) or not evidence_ids:
             raise ValueError("matched requirement lacks approved evidence")
-        evidence_id = ""
+        eligible_evidence_ids: list[str] = []
         for candidate_id in sorted(str(value) for value in evidence_ids):
             candidate = statements.get(candidate_id)
             if candidate is None or candidate_id in OUTWARD_PROFILE_REWRITES:
@@ -1119,23 +1346,68 @@ def _build_candidate_application_source(
                     )
             except ExternalDocumentAssuranceError:
                 continue
-            evidence_id = candidate_id
-            break
-        if not evidence_id:
+            projected = projection_by_id.get(candidate_id)
+            if (
+                projected is None
+                or candidate.get("proof_class") != candidate.get("kind")
+                or (
+                    "kind" in projected
+                    and projected.get("kind") != candidate.get("kind")
+                )
+                or (
+                    "proof_class" in projected
+                    and projected.get("proof_class") != candidate.get("proof_class")
+                )
+                or _sha256(str(candidate["statement"]).encode())
+                != projected.get("statement_sha256")
+            ):
+                raise ValueError("matched evidence differs from candidate projection")
+            eligible_evidence_ids.append(candidate_id)
+        if not eligible_evidence_ids:
             continue
-        evidence = statements.get(evidence_id)
-        projected = projection_by_id.get(evidence_id)
-        if (
-            evidence is None
-            or projected is None
-            or evidence.get("proof_class") != evidence.get("kind")
-            or _sha256(str(evidence["statement"]).encode())
-            != projected.get("statement_sha256")
-        ):
-            raise ValueError("matched evidence differs from candidate projection")
+        eligible_evidence_ids = list(dict.fromkeys(eligible_evidence_ids))
+        eligible_matched_rows.append((row, tuple(eligible_evidence_ids)))
+        for evidence_id in eligible_evidence_ids:
+            matched_document_targets[evidence_id] = _evidence_document_targets(
+                statements[evidence_id]
+            )
+    use_document_scoped_support = any(
+        targets != _DOCUMENT_TARGETS
+        for targets in matched_document_targets.values()
+    )
+    candidate_document_targets = (
+        {
+            evidence_id: tuple(sorted(targets))
+            for evidence_id, targets in matched_document_targets.items()
+        }
+        if use_document_scoped_support
+        else None
+    )
+    for row, eligible_evidence_ids in eligible_matched_rows:
+        selected_evidence_ids = (
+            eligible_evidence_ids
+            if use_document_scoped_support
+            else eligible_evidence_ids[:1]
+        )
+        for evidence_id in selected_evidence_ids:
+            verified_evidence_kinds[evidence_id] = str(
+                statements[evidence_id]["proof_class"]
+            )
         requirement_id = str(row["requirement_id"])
-        claim_id = f"approved-claim:{evidence_id}"
+        claim_id = (
+            f"approved-claim:{requirement_id}"
+            if use_document_scoped_support
+            else f"approved-claim:{selected_evidence_ids[0]}"
+        )
         requirement_text = str(row["requirement_text"])
+        accepted_proof_classes = tuple(
+            sorted(
+                {
+                    str(statements[evidence_id]["proof_class"])
+                    for evidence_id in selected_evidence_ids
+                }
+            )
+        )
         requirement = Requirement(
             requirement_id,
             claim_id,
@@ -1143,7 +1415,7 @@ def _build_candidate_application_source(
             row.get("classification") == "essential",
             "evidence",
             "build_evidence",
-            (str(evidence["proof_class"]),),
+            accepted_proof_classes,
             10_000,
             source_identity,
             (0, len(requirement_text)),
@@ -1153,21 +1425,21 @@ def _build_candidate_application_source(
             MatchResult(
                 requirement_id,
                 "matched",
-                (evidence_id,),
+                selected_evidence_ids,
                 10_000,
                 "Exact operator-approved evidence matched by candidate authority.",
                 str(candidate_projection["policy_sha256"]),
                 None,
             )
         )
-        supports.append(
+        supports.extend(
             CandidateSupport(
                 requirement_id,
                 claim_id,
                 1,
                 evidence_id,
                 1,
-                str(evidence["proof_class"]),
+                str(statements[evidence_id]["proof_class"]),
                 "approved",
                 "evidence",
                 "approved",
@@ -1175,6 +1447,7 @@ def _build_candidate_application_source(
                 "approved",
                 None,
             )
+            for evidence_id in selected_evidence_ids
         )
         selected_rows.append(row)
     selected_requirement_ids = {
@@ -1252,6 +1525,7 @@ def _build_candidate_application_source(
         candidate_support=supports,
         employer_facts=employer_facts,
         as_of=as_of,
+        candidate_document_targets=candidate_document_targets,
         permit_eligible_gap_application=True,
     )
     employer_by_id = {str(document["id"]): document for document in employer_documents}
@@ -1262,6 +1536,10 @@ def _build_candidate_application_source(
         if element.kind in {"cv_emphasis", "cover_letter_argument"}:
             document_kind = "cv" if element.kind == "cv_emphasis" else "cover_letter"
             evidence = statements[element.candidate_evidence_id]
+            if document_kind not in _evidence_document_targets(evidence):
+                raise ValueError(
+                    "strategy evidence contradicts its candidate document scope"
+                )
             sentence = _sentence(
                 element,
                 text=str(evidence["statement"]),
@@ -1310,62 +1588,52 @@ def _build_candidate_application_source(
             )
         )
 
-    opening_document = _employer_document(
-        f"vacancy-role-identity:{job_key}",
-        f"The {role_title} position is at {company_name}.",
-        source_identity=source_identity,
-    )
-    opening_fact_sha256 = content_hash(opening_document)
-    opening_text = str(opening_document["text"])
-    opening_employer = FactualSentence(
-        content_hash(
-            {
-                "contract": "jaa07.vacancy-role-factual-sentence.v1",
-                "employer_fact_sha256": opening_fact_sha256,
-                "text": opening_text,
-                "vacancy_sha256": vacancy_sha256,
-                "vacancy_source_identity": source_identity,
-            }
-        ),
-        opening_text,
-        opening_text,
-        "employer",
-        "cover_letter",
-        VacancyFactAuthority(
-            vacancy_source_identity=source_identity,
-            vacancy_sha256=vacancy_sha256,
-            employer_research_claim_id=str(opening_document["id"]),
-            employer_fact_sha256=opening_fact_sha256,
-        ),
-        canonical_json(opening_document),
-    )
-
-    def profile_fact(evidence_id: str, document_kind: str) -> FactualSentence:
+    def profile_fact(
+        evidence_id: str,
+        document_kind: str,
+    ) -> FactualSentence | None:
         evidence = statements.get(evidence_id)
         projected = projection_by_id.get(evidence_id)
-        outward_text = (
-            _outward_profile_text(evidence, document_kind=document_kind)
-            if evidence is not None
-            else ""
-        )
+        statement = evidence.get("statement") if evidence is not None else None
         if (
             evidence is None
             or projected is None
+            or not isinstance(statement, str)
             or evidence.get("proof_class") != evidence.get("kind")
-            or not _candidate_statement_is_outward_safe(outward_text)
-            or _sha256(str(evidence.get("statement", "")).encode())
+            or (
+                "kind" in projected
+                and projected.get("kind") != evidence.get("kind")
+            )
+            or (
+                "proof_class" in projected
+                and projected.get("proof_class") != evidence.get("proof_class")
+            )
+            or _sha256(statement.encode())
             != projected.get("statement_sha256")
         ):
             raise ValueError("profile evidence differs from candidate authority")
-        assert_employer_facing_text(
-            outward_text,
-            document_kind=document_kind,
-        )
+        if document_kind not in _evidence_document_targets(evidence):
+            return None
+        verified_evidence_kinds[evidence_id] = str(evidence["proof_class"])
+        try:
+            outward_text = _outward_profile_text(
+                evidence,
+                document_kind=document_kind,
+            )
+            if not _candidate_statement_is_outward_safe(outward_text):
+                return None
+            assert_employer_facing_text(
+                outward_text,
+                document_kind=document_kind,
+            )
+        except ExternalDocumentAssuranceError:
+            return None
         return _profile_sentence(
             evidence=evidence,
             candidate_profile_hash=str(candidate_projection["projection_sha256"]),
             statement_sha256=str(projected["statement_sha256"]),
             document_kind=document_kind,
+            approved_evidence_source=approved_evidence_source,
         )
 
     strategy_cv_by_evidence: dict[str, list[FactualSentence]] = {}
@@ -1373,97 +1641,294 @@ def _build_candidate_application_source(
         strategy_cv_by_evidence.setdefault(
             fact.authority.candidate_evidence_id, []
         ).append(fact)
-    cv_sections_by_heading: dict[str, list[FactualSentence]] = {
-        heading: [] for heading, _ in PROFILE_CV_SECTIONS
-    }
+    cv_sections_by_heading: dict[str, list[FactualSentence]] = (
+        {heading: [] for heading, _ in PROFILE_CV_SECTIONS}
+        if legacy_profile
+        else {}
+    )
     used_strategy_ids: set[str] = set()
-    for heading, evidence_ids in PROFILE_CV_SECTIONS:
+    placed_cv_evidence_ids: set[str] = set()
+    for heading, evidence_ids in (
+        PROFILE_CV_SECTIONS if legacy_profile else ()
+    ):
         for evidence_id in evidence_ids:
             matched = strategy_cv_by_evidence.get(evidence_id, [])
             if matched:
                 cv_sections_by_heading[heading].extend(matched)
                 used_strategy_ids.update(row.sentence_id for row in matched)
+                placed_cv_evidence_ids.add(evidence_id)
                 # Strategy atoms must remain verbatim to preserve requirement
                 # coverage.  Candidate-ratified education presentation is an
                 # additional exact-authority projection, never a mutation of
                 # that strategy atom.
                 if evidence_id in {"E-001", "E-002"}:
                     projected_fact = profile_fact(evidence_id, "cv")
-                    if all(row.text != projected_fact.text for row in matched):
+                    if projected_fact is not None and all(
+                        row.text != projected_fact.text for row in matched
+                    ):
                         cv_sections_by_heading[heading].append(projected_fact)
-            else:
-                cv_sections_by_heading[heading].append(profile_fact(evidence_id, "cv"))
+                        placed_cv_evidence_ids.add(evidence_id)
+            elif evidence_id in projection_by_id:
+                projected_fact = profile_fact(evidence_id, "cv")
+                if projected_fact is not None:
+                    cv_sections_by_heading[heading].append(projected_fact)
+                    placed_cv_evidence_ids.add(evidence_id)
     for fact in strategy_cv:
         if fact.sentence_id in used_strategy_ids:
             continue
-        evidence = statements[fact.authority.candidate_evidence_id]
-        if evidence["kind"] == "credential":
-            heading = "Education"
-        elif evidence["kind"] == "employment_record":
-            heading = "Experience"
-        else:
-            heading = "Projects"
-        cv_sections_by_heading[heading].append(fact)
+        evidence_id = fact.authority.candidate_evidence_id
+        evidence = statements[evidence_id]
+        heading = _profile_cv_section_for_evidence(
+            evidence_id,
+            str(evidence["proof_class"]),
+            legacy_profile=legacy_profile,
+        )
+        cv_sections_by_heading.setdefault(heading, []).append(fact)
+        placed_cv_evidence_ids.add(evidence_id)
+
+    for row in projection_rows:
+        evidence_id = str(row["id"])
+        if evidence_id in placed_cv_evidence_ids:
+            continue
+        projected_fact = profile_fact(evidence_id, "cv")
+        if projected_fact is None:
+            continue
+        evidence = statements[evidence_id]
+        heading = _profile_cv_section_for_evidence(
+            evidence_id,
+            str(evidence["proof_class"]),
+            legacy_profile=legacy_profile,
+        )
+        cv_sections_by_heading.setdefault(heading, []).append(projected_fact)
+        placed_cv_evidence_ids.add(evidence_id)
+
+    if not cv_sections_by_heading.get("Professional Summary"):
+        summary_fact = next(
+            (
+                fact
+                for heading in PROFILE_CV_SECTION_ORDER
+                if heading != "Professional Summary"
+                for fact in cv_sections_by_heading.get(heading, ())
+            ),
+            None,
+        )
+        if summary_fact is not None:
+            for heading, rows in cv_sections_by_heading.items():
+                if heading != "Professional Summary":
+                    cv_sections_by_heading[heading] = [
+                        row
+                        for row in rows
+                        if row.sentence_id != summary_fact.sentence_id
+                    ]
+            cv_sections_by_heading.setdefault("Professional Summary", []).append(
+                summary_fact
+            )
+
+    if not legacy_profile and not cv_sections_by_heading.get("Core Capabilities"):
+        capability_fact = _select_profile_capability_fact(
+            cv_sections_by_heading,
+            verified_evidence_kinds,
+        )
+        if capability_fact is not None:
+            capability_sentence_id = capability_fact.sentence_id
+            occurrences = sum(
+                row.sentence_id == capability_sentence_id
+                for rows in cv_sections_by_heading.values()
+                for row in rows
+            )
+            if occurrences != 1:
+                raise ValueError("candidate CV capability fact is ambiguous")
+            relocated_sections: dict[str, list[FactualSentence]] = {}
+            for heading, rows in cv_sections_by_heading.items():
+                if heading in {"Professional Summary", "Core Capabilities"}:
+                    relocated_sections[heading] = list(rows)
+                    continue
+                remaining = [
+                    row for row in rows if row.sentence_id != capability_sentence_id
+                ]
+                if remaining:
+                    relocated_sections[heading] = remaining
+            if any(
+                rows
+                for heading, rows in relocated_sections.items()
+                if heading not in {"Professional Summary", "Core Capabilities"}
+            ):
+                cv_sections_by_heading.clear()
+                cv_sections_by_heading.update(relocated_sections)
+                cv_sections_by_heading["Core Capabilities"] = [capability_fact]
 
     letter_candidate = list(strategy_letter)
     letter_evidence_ids = {
         row.authority.candidate_evidence_id for row in letter_candidate
     }
-    for evidence_id in PROFILE_LETTER_EVIDENCE_PRIORITY:
-        if evidence_id in letter_evidence_ids:
-            continue
-        letter_candidate.append(profile_fact(evidence_id, "cover_letter"))
-        letter_evidence_ids.add(evidence_id)
-        if len(letter_candidate) >= 2:
-            break
+    letter_candidate_texts = {
+        row.text.casefold().strip() for row in letter_candidate
+    }
+    letter_opening_text = "Dear Hiring Manager,"
+    letter_close_text = (
+        "I would welcome the opportunity to discuss this work in more detail and "
+        "how I could contribute to the team."
+    )
 
-    letter_open = _slot("cover_letter", "salutation", "Dear Hiring Manager,")
-    letter_intent = _slot(
-        "cover_letter",
-        "opening-intent",
+    def letter_has_content_floor() -> bool:
+        factual_text = " ".join(
+            (
+                letter_opening_text,
+                *(row.text for row in (*letter_candidate, *letter_employer)),
+                letter_close_text,
+            )
+        )
+        return (
+            len(letter_candidate) >= MINIMUM_LETTER_CANDIDATE_FACTS
+            and len(letter_evidence_ids) >= MINIMUM_LETTER_CANDIDATE_FACTS
+            and len(factual_text.split()) >= MINIMUM_LETTER_WORDS
+        )
+
+    letter_profile_evidence_ids = tuple(str(row["id"]) for row in projection_rows)
+    legacy_letter_priority = (
+        PROFILE_LETTER_EVIDENCE_PRIORITY if legacy_profile else ()
+    )
+    for evidence_id in letter_profile_evidence_ids:
+        if (
+            evidence_id in letter_evidence_ids
+            or evidence_id not in projection_by_id
+            or evidence_id not in statements
+            or _evidence_document_targets(statements[evidence_id])
+            != {"cover_letter"}
+        ):
+            continue
+        projected_fact = profile_fact(evidence_id, "cover_letter")
+        if projected_fact is None:
+            continue
+        if projected_fact.text.casefold().strip() in letter_candidate_texts:
+            continue
+        letter_candidate.append(projected_fact)
+        letter_evidence_ids.add(evidence_id)
+        letter_candidate_texts.add(projected_fact.text.casefold().strip())
+
+    for evidence_id in (
+        *legacy_letter_priority,
+        *letter_profile_evidence_ids,
+    ):
+        if letter_has_content_floor():
+            break
+        if evidence_id in letter_evidence_ids or evidence_id not in projection_by_id:
+            continue
+        projected_fact = profile_fact(evidence_id, "cover_letter")
+        if projected_fact is None:
+            continue
+        if projected_fact.text.casefold().strip() in letter_candidate_texts:
+            continue
+        letter_candidate.append(projected_fact)
+        letter_evidence_ids.add(evidence_id)
+        letter_candidate_texts.add(projected_fact.text.casefold().strip())
+
+    def strategy_sibling_key(fact: FactualSentence) -> tuple[object, ...] | None:
+        authority = fact.authority
+        if not isinstance(authority, FactAuthority):
+            return None
+        return (
+            authority.requirement_id,
+            authority.candidate_claim_id,
+            authority.candidate_claim_version,
+            authority.candidate_evidence_id,
+            authority.candidate_evidence_version,
+            authority.employer_research_claim_id,
+            authority.employer_fact_sha256,
+        )
+
+    candidates_by_sibling: dict[tuple[object, ...], list[FactualSentence]] = {}
+    for fact in letter_candidate:
+        sibling = strategy_sibling_key(fact)
+        if sibling is not None:
+            candidates_by_sibling.setdefault(sibling, []).append(fact)
+    employers_by_sibling: dict[tuple[object, ...], list[FactualSentence]] = {}
+    unbound_employer_facts: list[FactualSentence] = []
+    for fact in letter_employer:
+        sibling = strategy_sibling_key(fact)
+        if sibling is None:
+            unbound_employer_facts.append(fact)
+        else:
+            employers_by_sibling.setdefault(sibling, []).append(fact)
+            if sibling not in candidates_by_sibling:
+                raise ValueError(
+                    "cover letter employer fact lacks an exact candidate sibling"
+                )
+    sibling_order = tuple(employers_by_sibling)
+    paired_groups = tuple(
         (
-            f"I am applying for the {role_title} position at {company_name}. "
-            "I want to build and operate dependable software systems, and this "
-            "opportunity is closely aligned with that direction."
-        ),
+            *candidates_by_sibling[sibling],
+            *employers_by_sibling[sibling],
+        )
+        for sibling in sibling_order
     )
-    letter_evidence_lead = _slot(
-        "cover_letter",
-        "evidence-lead",
-        "My strongest relevant work comes from systems I have built and evaluated.",
-    )
-    letter_company_lead = _slot(
-        "cover_letter",
-        "company-lead",
-        (
-            "The closest direct overlap with the role is the requirement below."
-            if selected_rows
-            else "The role description gives clear context for my application."
-        ),
-    )
+    paired_candidate_ids = {
+        fact.sentence_id
+        for sibling in sibling_order
+        for fact in candidates_by_sibling[sibling]
+    }
+    letter_only_facts = [
+        fact
+        for fact in letter_candidate
+        if fact.sentence_id not in paired_candidate_ids
+        and _evidence_document_targets(
+            statements[fact.authority.candidate_evidence_id]
+        )
+        == {"cover_letter"}
+    ]
+    letter_only_ids = {fact.sentence_id for fact in letter_only_facts}
+    if letter_only_facts:
+        opening_facts = (letter_only_facts[0],)
+        evidence_match_facts = [
+            fact for group in paired_groups for fact in group
+        ]
+        evidence_match_facts.extend(
+            fact
+            for fact in letter_candidate
+            if fact.sentence_id not in paired_candidate_ids
+            and fact.sentence_id not in letter_only_ids
+        )
+        evidence_match_facts.extend(letter_only_facts[1:])
+    elif paired_groups:
+        opening_facts = paired_groups[0]
+        evidence_match_facts = [
+            fact for group in paired_groups[1:] for fact in group
+        ]
+        evidence_match_facts.extend(
+            fact
+            for fact in letter_candidate
+            if fact.sentence_id not in paired_candidate_ids
+        )
+    else:
+        opening_facts = (letter_candidate[0],)
+        evidence_match_facts = [
+            fact
+            for fact in letter_candidate
+            if fact.sentence_id != opening_facts[0].sentence_id
+        ]
+    evidence_match_facts.extend(unbound_employer_facts)
+
+    letter_open = _slot("cover_letter", "salutation", letter_opening_text)
     letter_close = _slot(
         "cover_letter",
         "close",
-        "I would welcome the opportunity to discuss this work in more detail and "
-        "how I could contribute to the team.",
-    )
-    letter_signoff = _slot("cover_letter", "signoff", "Kind regards")
-    letter_signature = _slot(
-        "cover_letter",
-        "signature",
-        contact.full_name,
+        letter_close_text,
     )
     cv_sections = tuple(
         DocumentSection(
             heading,
             tuple(row.sentence_id for row in cv_sections_by_heading[heading]),
         )
-        for heading, _ in PROFILE_CV_SECTIONS
+        for heading in PROFILE_CV_SECTION_ORDER
+        if cv_sections_by_heading.get(heading)
     )
     facts = [
-        *(row for section in cv_sections_by_heading.values() for row in section),
+        *(
+            row
+            for section in cv_sections
+            for row in cv_sections_by_heading[section.heading]
+        ),
         *letter_candidate,
-        opening_employer,
         *letter_employer,
     ]
     source = compile_application_source(
@@ -1477,43 +1942,32 @@ def _build_candidate_application_source(
         facts=facts,
         style_slots=(
             letter_open,
-            letter_intent,
-            letter_evidence_lead,
-            letter_company_lead,
             letter_close,
-            letter_signoff,
-            letter_signature,
         ),
         cv_sections=cv_sections,
         letter_sections=(
             DocumentSection(
                 "Opening",
-                (opening_employer.sentence_id,),
-                (letter_open.slot_id, letter_intent.slot_id),
+                tuple(row.sentence_id for row in opening_facts),
+                (letter_open.slot_id,),
             ),
             DocumentSection(
                 "Evidence Match",
-                tuple(row.sentence_id for row in letter_candidate),
-                (letter_evidence_lead.slot_id,),
-            ),
-            DocumentSection(
-                "Company Fit",
-                tuple(row.sentence_id for row in letter_employer),
-                (letter_company_lead.slot_id,),
+                tuple(row.sentence_id for row in evidence_match_facts),
             ),
             DocumentSection(
                 "Close",
                 (),
-                (
-                    letter_close.slot_id,
-                    letter_signoff.slot_id,
-                    letter_signature.slot_id,
-                ),
+                (letter_close.slot_id,),
             ),
         ),
         answers=(),
     )
-    _assert_package_quality(source)
+    _assert_package_quality(
+        source,
+        evidence_kinds=verified_evidence_kinds,
+        legacy_profile=legacy_profile,
+    )
     if revision_writer is not None:
         revision_writer(
             role="document.source_inputs",
@@ -1674,7 +2128,12 @@ def _fact_binding(
     *,
     approved_statements: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
-    authority = asdict(fact.authority)
+    authority = {}
+    for authority_field in fields(fact.authority):
+        value = getattr(fact.authority, authority_field.name)
+        if authority_field.name == "rewrite_authority" and value is not None:
+            value = value.document()
+        authority[authority_field.name] = value
     evidence_ids: tuple[str, ...]
     approved_evidence_statement_sha256: str | None = None
     if fact.fact_kind == "candidate":

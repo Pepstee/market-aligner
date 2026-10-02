@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "job_extract",
+  "description": "Structured extraction of one raw posting. Fields mirror skeleton.contracts.JobRow. Provenance (board/job_id/url/posted_at/scraped_at) and dedup_key are attached by the caller, NOT the LLM. Axis ratings live in axis_ratings.json (a separate call).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "job_title",
+    "company",
+    "mapped_career",
+    "entry_level",
+    "required_software",
+    "remote_flag",
+    "site_intensity",
+    "why_it_fits",
+    "skills_to_learn",
+    "extraction_confidence"
+  ],
+  "properties": {
+    "job_title": {
+      "type": "string",
+      "description": "Raw job title as posted (keep original language)."
+    },
+    "company": {
+      "type": "string",
+      "description": "Raw company / employer name."
+    },
+    "mapped_career": {
+      "type": "string",
+      "description": "Best of the 10 careers, or 'other'.",
+      "enum": [
+        "UX_UI",
+        "Spatial_VMD",
+        "Exhibition",
+        "Brand_Space",
+        "ArchViz",
+        "3D_Generalist",
+        "Environment_Art",
+        "XR_Spatial",
+        "Technical_Artist",
+        "Motion_Graphic",
+        "other"
+      ]
+    },
+    "entry_level": {
+      "type": ["boolean", "null"],
+      "description": "True if entry-level (신입 / 경력무관 / 인턴), False if experienced (경력), null if unclear."
+    },
+    "required_software": {
+      "type": "array",
+      "description": "CANONICAL tool ids only (see normalise_skill / config.skill_aliases). Lowercase snake ids like 'blender', 'unreal', 'figma'.",
+      "items": { "type": "string" }
+    },
+    "remote_flag": {
+      "type": ["boolean", "null"],
+      "description": "True if the posting offers remote/hybrid work (재택 / 재택근무 / 원격 / 원격근무 / 하이브리드 / remote). False if it explicitly requires full-time office presence. Null if not stated."
+    },
+    "site_intensity": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 10,
+      "description": "0-10 estimate of physical site-work demand: 0 = pure desk work, 3 = occasional visits (실측/미팅), 7+ = regular 현장/시공/설치/감리/출장/매장 presence, 10 = constant site labour. Null if the posting gives no signal."
+    },
+    "why_it_fits": {
+      "type": "string",
+      "description": "1-2 sentence summary of why this posting fits (or does not fit) a spatial/3D/design career switcher."
+    },
+    "skills_to_learn": {
+      "type": "array",
+      "description": "Tools/skills the posting demands. The scraper filters against candidate preferences downstream.",
+      "items": { "type": "string" }
+    },
+    "extraction_confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "0-1 confidence in this parse; lets the pipeline drop low-quality rows (e.g. < 0.4)."
+    }
+  }
+}

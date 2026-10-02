@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import date
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -20,6 +20,7 @@ from career_automation.engine import OpportunityGate, scored_job_from_payload
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parents[1]
 
 
 def _job(job_id: str):
@@ -51,7 +52,7 @@ class _CapturedRetriever:
             b"<p>In 2026 Example reported operational revenue and profit performance.</p>"
         )
         digest, reference = self.cache.store(body)
-        timestamp = date.today().isoformat() + "T00:00:00+00:00"
+        timestamp = datetime.now(timezone.utc).date().isoformat() + "T00:00:00+00:00"
         return Citation(source_id, "https://8.8.8.8/public", timestamp, timestamp,
                         digest, reference, 200)
 
@@ -107,10 +108,12 @@ def test_coordinator_advances_only_after_real_worker_completion_and_never_after_
 
 
 def test_missing_external_authority_cannot_emit_a_jaa04_receipt(tmp_path: Path) -> None:
-    clone = tmp_path / "clone"
-    copied = subprocess.run(("git", "clone", "--no-local", str(ROOT), str(clone)), text=True,
+    repository = tmp_path / "clone"
+    copied = subprocess.run(("git", "clone", "--no-local", "--single-branch", "--depth", "1",
+                             str(REPOSITORY_ROOT), str(repository)), text=True,
                             capture_output=True, check=False)
     assert copied.returncode == 0, copied.stderr
+    clone = repository / "internal" / "jaa"
     receipt = tmp_path / "receipt"
     completed = subprocess.run(
         (sys.executable, "scripts/accept_jaa_04.py", "--receipt", str(receipt)),

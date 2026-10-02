@@ -21,7 +21,7 @@ class MigrationLedgerTests(unittest.TestCase):
         entry_ids = [entry["entry_id"] for entry in entries]
         self.assertEqual(len(entry_ids), len(set(entry_ids)))
 
-        allowed = {"adopted", "deferred", "archived", "tombstone-pending"}
+        allowed = {"adopted", "deferred", "archived", "tombstone-pending", "deleted"}
         for entry in entries:
             self.assertIn(entry["disposition"], allowed)
             self.assertEqual(entry["status"], entry["disposition"])
@@ -34,15 +34,18 @@ class MigrationLedgerTests(unittest.TestCase):
                 self.assertTrue(provenance)
                 self.assertNotIn("pending", provenance.lower())
 
-    def test_no_source_is_marked_tombstoned_or_deleted(self) -> None:
+    def test_only_operator_authorized_mac_source_roots_are_marked_deleted(self) -> None:
         entries = [
             json.loads(line)
             for line in LEDGER_PATH.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
 
+        deleted = [entry for entry in entries if entry["disposition"] == "deleted"]
+        self.assertEqual(["ma-0296"], [entry["entry_id"] for entry in deleted])
+        self.assertEqual("deleted", deleted[0]["status"])
+        self.assertEqual("/Users/admin/Projects/market-aligner", deleted[0]["target"])
         self.assertNotIn("tombstoned", {entry["disposition"] for entry in entries})
-        self.assertNotIn("deleted", {entry["disposition"] for entry in entries})
 
 
 if __name__ == "__main__":

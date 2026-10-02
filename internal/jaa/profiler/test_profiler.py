@@ -136,3 +136,38 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_synthetic_entrypoints_and_round_trip(tmp_path):
+    """Both supported CLI forms must work without a caller-provided import hack."""
+    import os
+    import subprocess
+
+    answers = tmp_path / "answers.yaml"
+    answers.write_text("answers: {}\n", encoding="utf-8")
+    env = dict(os.environ, PYTHONPATH=str(_ROOT))
+    env.pop("CANDIDATE_ANSWERS_PATH", None)
+    env.pop("CANDIDATE_PREFERENCES_PATH", None)
+    outputs = []
+    for command in (["-m", "profiler.score_profile"],
+                    [str(_ROOT / "profiler" / "score_profile.py")]):
+        output = tmp_path / f"preferences-{len(outputs)}.yaml"
+        result = subprocess.run(
+            [sys.executable, *command, "--answers", str(answers), "--output", str(output)],
+            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        doc = yaml.safe_load(output.read_text())
+        reloaded = CandidatePreferenceProfile.from_config(doc)
+        assert tuple(reloaded.fields) == CAREERS
+        outputs.append(doc)
+        # Existing calibrated output must survive a refused overwrite.
+        output.write_text("meta: {version: calibrated}\n")
+        original = output.read_bytes()
+        refused = subprocess.run(
+            [sys.executable, *command, "--answers", str(answers), "--output", str(output)],
+            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20,
+        )
+        assert refused.returncode != 0
+        assert output.read_bytes() == original
+    assert outputs[0] == outputs[1]

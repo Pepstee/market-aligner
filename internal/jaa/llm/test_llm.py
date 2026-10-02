@@ -33,7 +33,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from llm.client import (  # noqa: E402
+    BackendProcessFailure,
     ClaudeCliBackend,
+    CodexCliBackend,
     LLMClient,
     LLMError,
     MockBackend,
@@ -241,3 +243,424 @@ def run() -> int:
 
 if __name__ == "__main__":
     sys.exit(run())
+
+
+def test_extract_job_preserves_positional_client_and_profile_calls(tmp_path):
+    import pytest
+    client, backend = _fresh_client(tmp_path)
+    positional = caps.extract_job(FIXTURE_RAW, client)
+    keyword = caps.extract_job(FIXTURE_RAW, client=client)
+    with_profile = caps.extract_job(FIXTURE_RAW, {"tracks": {}}, client=client)
+    assert positional == keyword == with_profile
+    validate_json(positional, load_schema("job_extract"))
+    with pytest.raises(TypeError, match="client twice"):
+        caps.extract_job(FIXTURE_RAW, client, client=client)
+
+
+def test_creative_extraction_and_ratings_use_separate_validated_contracts(tmp_path):
+    client, backend = _fresh_client(tmp_path)
+    raw = {"board": "fixture", "job_id": "creative", "url": "https://example.test/creative",
+           "raw_json": {"title": "신입 UX 디자이너", "company": "Example"},
+           "raw_text": "신입 UX UI 디자이너 Figma 피그마 Blender 원격 현장 설치"}
+    row = caps.extract_job(raw, client=client, mode="creative")
+    validate_json(row, load_schema("creative_job_extract"))
+    assert row["mapped_career"] == "UX_UI"
+    assert row["entry_level"] is True
+    assert row["required_software"] == ["blender", "figma"]
+    assert row["remote_flag"] is True
+    assert row["site_intensity"] > 0
+    axes = caps.rate_axes(row, {}, client=client, mode="creative")
+    validate_json(axes, load_schema("creative_axis_ratings"))
+    assert set(axes) == {"visualization", "spatial_relevance", "cs_usefulness", "english_usefulness",
+                         "freelance_potential", "market_demand", "barrier_to_entry"}
+    assert caps.extract_job(FIXTURE_RAW, client=client)["mapped_career"] == "AI_Automation_Engineer"
+
+
+def test_creative_portfolio_assessment_preserves_advisory_fields(tmp_path):
+    client, backend = _fresh_client(tmp_path)
+    result = caps.assess_portfolio([{"title": "UX UI exhibition", "description": "Figma Blender prototype"}],
+                                   client=client, mode="creative")
+    validate_json(result, load_schema("creative_portfolio_assess"))
+    assert {r["career"] for r in result["per_field"]} == {"UX_UI", "Exhibition"}
+    assert result["detected_skills"] == ["blender", "figma"]
+    assert caps.assess_portfolio([], client=client, mode="creative")["per_field"] == []
+    import pytest
+    with pytest.raises(ValueError, match="portfolio mode"):
+        caps.assess_portfolio([], client=client, mode="unknown")
+
+
+def test_codex_cli_backend_uses_ephemeral_session(monkeypatch):
+    from types import SimpleNamespace
+
+    from llm import client as client_module
+
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        output_path = Path(command[command.index("--output-last-message") + 1])
+        output_path.write_text("synthetic sanity result", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex"))
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+
+    response = CodexCliBackend(model="gpt-6-luna").complete("synthetic system", "synthetic user", 0.0)
+
+    assert response.text == "synthetic sanity result"
+    assert commands[0][:4] == ["/test/codex", "exec", "--json", "--ephemeral"]
+    assert "-s" in commands[0]
+    assert commands[0][commands[0].index("-s") + 1] == "read-only"
+
+
+def test_codex_cli_structured_output_uses_private_schema_and_cleans_temps(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from llm import client as client_module
+
+    schema = {
+        "type": "object",
+        "properties": {"verdict": {"type": "string"}},
+        "required": ["verdict"],
+        "additionalProperties": False,
+    }
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        schema_path = Path(command[command.index("--output-schema") + 1])
+        output_path = Path(command[command.index("--output-last-message") + 1])
+        captured["schema_path"] = schema_path
+        captured["output_path"] = output_path
+        captured["schema_mode"] = stat.S_IMODE(schema_path.stat().st_mode)
+        captured["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+        output_path.write_text('{"verdict":"pass"}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex")
+    )
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+
+    response = CodexCliBackend(model="gpt-6-luna").complete_structured(
+        "synthetic system",
+        "synthetic user",
+        0.0,
+        schema=schema,
+        task="synthetic-review",
+    )
+
+    schema_path = captured["schema_path"]
+    output_path = captured["output_path"]
+    assert response.text == '{"verdict":"pass"}'
+    assert captured["schema"] == schema
+    assert captured["schema_mode"] == 0o600
+    assert not schema_path.exists()
+    assert not output_path.exists()
+
+
+def test_codex_cli_structured_output_cleans_schema_when_launch_fails(monkeypatch):
+    import pytest
+
+    from llm import client as client_module
+
+    paths: list[Path] = []
+
+    def fake_run(command, **kwargs):
+        paths.extend(
+            [
+                Path(command[command.index("--output-schema") + 1]),
+                Path(command[command.index("--output-last-message") + 1]),
+                *(
+                    Path(command[index + 1])
+                    for index, value in enumerate(command)
+                    if value == "--image"
+                ),
+            ]
+        )
+        raise OSError("synthetic launch failure")
+
+    monkeypatch.setattr(
+        CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex")
+    )
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+
+    with pytest.raises(LLMError, match="failed to launch codex CLI"):
+        CodexCliBackend(model="synthetic-model").complete_structured(
+            "synthetic system",
+            "synthetic user",
+            0.0,
+            schema={"type": "object"},
+            image_bytes=(b"\x89PNG\r\n\x1a\nsynthetic-page",),
+        )
+
+    assert len(paths) == 3
+    assert all(not path.exists() for path in paths)
+
+
+def test_codex_cli_structured_review_images_are_private_and_cleaned(monkeypatch):
+    import json
+    import stat
+    from types import SimpleNamespace
+
+    from llm import client as client_module
+
+    captured: dict[str, object] = {}
+    images = (
+        b"\x89PNG\r\n\x1a\nsynthetic-cv-page",
+        b"\x89PNG\r\n\x1a\nsynthetic-letter-page",
+    )
+
+    def fake_run(command, **kwargs):
+        image_paths = [
+            Path(command[index + 1])
+            for index, value in enumerate(command)
+            if value == "--image"
+        ]
+        output_path = Path(command[command.index("--output-last-message") + 1])
+        schema_path = Path(command[command.index("--output-schema") + 1])
+        captured["image_paths"] = image_paths
+        captured["image_modes"] = tuple(
+            stat.S_IMODE(path.stat().st_mode) for path in image_paths
+        )
+        captured["image_contents"] = tuple(path.read_bytes() for path in image_paths)
+        captured["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+        output_path.write_text('{"verdict":"pass"}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex")
+    )
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+    response = CodexCliBackend(model="synthetic-model").complete_structured(
+        "synthetic system",
+        "synthetic user",
+        0.0,
+        schema={"type": "object"},
+        image_bytes=images,
+    )
+
+    assert response.text == '{"verdict":"pass"}'
+    assert captured["image_contents"] == images
+    assert captured["image_modes"] == (0o600, 0o600)
+    assert captured["schema"] == {"type": "object"}
+    assert all(not path.exists() for path in captured["image_paths"])
+
+
+def test_structured_codex_backend_preserves_process_failure_metadata(
+    monkeypatch, tmp_path
+):
+    import pytest
+    from types import SimpleNamespace
+
+    from llm import client as client_module
+
+    paths: list[Path] = []
+
+    def fake_run(command, **kwargs):
+        paths.extend(
+            (
+                Path(command[command.index("--output-schema") + 1]),
+                Path(command[command.index("--output-last-message") + 1]),
+            )
+        )
+        return SimpleNamespace(
+            returncode=73,
+            stdout="",
+            stderr="synthetic permission error",
+        )
+
+    monkeypatch.setattr(
+        CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex")
+    )
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+    client = LLMClient(
+        backend=CodexCliBackend(model="synthetic-model"),
+        model="synthetic-model",
+        temperature=0,
+        max_retries=1,
+        cache_enabled=False,
+        cache_dir=tmp_path / "cache",
+        usage_log=tmp_path / "usage.jsonl",
+    )
+
+    with pytest.raises(LLMError) as captured:
+        client.complete_json_with_response(
+            "synthetic system",
+            "synthetic user",
+            schema={"type": "object"},
+            task="synthetic-review",
+            json_attempts=1,
+        )
+
+    assert captured.value.backend_failure is not None
+    assert captured.value.backend_failure["exit_code"] == 73
+    assert len(paths) == 2
+    assert all(not path.exists() for path in paths)
+
+
+def test_codex_cli_backend_redacts_structured_stdout_failure(monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+
+    from llm import client as client_module
+
+    command = []
+    diagnostic = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "reason": "sandbox_runtime_denied",
+                "operation": "open",
+                "errno": "EACCES",
+                "path": "/tmp/synthetic private/profile.json",
+                "api_key": "synthetic-secret-value",
+                "details": "synthetic unknown payload",
+            },
+        }
+    )
+
+    def fake_run(args, **kwargs):
+        command.extend(args)
+        return SimpleNamespace(
+            returncode=17,
+            stdout=diagnostic,
+            stderr="synthetic unstructured stderr",
+        )
+
+    monkeypatch.setattr(CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex"))
+    monkeypatch.setattr(client_module.subprocess, "run", fake_run)
+
+    try:
+        CodexCliBackend(model="gpt-6-luna").complete(
+            "synthetic system", "synthetic user", 0.0
+        )
+    except BackendProcessFailure as error:
+        failure = error.backend_failure
+    else:
+        raise AssertionError("nonzero Codex CLI result should fail closed")
+
+    assert "--json" in command
+    assert failure == {
+        "error_category": "sandbox_runtime_denied",
+        "exit_code": 17,
+        "operation": "open",
+        "path_class": "tmp",
+        "errno": "EACCES",
+        "diagnostic_sha256": hashlib.sha256(
+            (diagnostic + "\nsynthetic unstructured stderr").encode("utf-8")
+        ).hexdigest(),
+        "stderr_diagnosis": (
+            "sandbox_runtime_denied operation=open errno=EACCES path=[PATH]"
+        ),
+        "private_capture_status": "not_requested",
+        "private_capture_sha256": None,
+        "private_capture_errno": None,
+    }
+    assert "synthetic-secret-value" not in str(failure)
+    assert "/tmp/synthetic private/profile.json" not in str(failure)
+    assert "synthetic unknown payload" not in str(failure)
+    assert "synthetic unstructured stderr" not in str(failure)
+
+
+def test_backend_failure_capture_is_bounded_and_classifies_read_only_path():
+    import hashlib
+
+    diagnostic = (
+        "x" * 24000
+        + ' fatal error: read-only file system errno=EROFS operation="write" '
+        + 'path="/run/synthetic directory/state.sock" token=synthetic-secret'
+    )
+    failure = BackendProcessFailure(
+        "Codex CLI", exit_code=1, stdout=diagnostic, stderr=""
+    )
+
+    assert failure.backend_failure["error_category"] == "filesystem_read_only"
+    assert failure.backend_failure["operation"] == "write"
+    assert failure.backend_failure["path_class"] == "run"
+    assert failure.backend_failure["errno"] == "EROFS"
+    assert failure.backend_failure["diagnostic_sha256"] == hashlib.sha256(
+        (diagnostic + "\n").encode("utf-8")
+    ).hexdigest()
+    assert "x" * 100 not in str(failure)
+    assert "synthetic-secret" not in str(failure)
+    assert "/run/synthetic directory/state.sock" not in str(failure)
+
+
+def test_backend_failure_does_not_promote_path_alias_warning():
+    failure = BackendProcessFailure(
+        "Codex CLI",
+        exit_code=1,
+        stderr="warning: failed to configure path aliases: read-only file system (os error 30)",
+    )
+
+    assert failure.backend_failure["error_category"] == "process_exit"
+    assert failure.backend_failure["errno"] is None
+
+
+def test_backend_failure_keeps_distinct_fatal_error_after_path_alias_warning():
+    failure = BackendProcessFailure(
+        "Codex CLI",
+        exit_code=1,
+        stderr=(
+            "warning: failed to configure path aliases: read-only file system (os error 30)\n"
+            'fatal: permission denied operation="open" '
+            'path="/tmp/synthetic file" errno=EACCES'
+        ),
+    )
+
+    assert failure.backend_failure["error_category"] == "permission_denied"
+    assert failure.backend_failure["operation"] == "open"
+    assert failure.backend_failure["path_class"] == "tmp"
+    assert failure.backend_failure["errno"] == "EACCES"
+
+
+def test_codex_cli_backend_writes_bounded_failure_output_privately(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    import pytest
+    from types import SimpleNamespace
+
+    import llm.client as client_module
+
+    diagnostic_dir = tmp_path / "diagnostics"
+    diagnostic_dir.mkdir(mode=0o700)
+    diagnostic_dir.chmod(0o700)
+    monkeypatch.setenv("JAA_LLM_DIAGNOSTIC_CAPTURE_DIR", str(diagnostic_dir))
+    child_stdout = (
+        'fatal: permission denied operation="open" '
+        'path="/tmp/synthetic private file" errno=EACCES private-token'
+    )
+    child_stderr = "synthetic child stderr credential"
+
+    monkeypatch.setattr(
+        CodexCliBackend, "resolve_binary", staticmethod(lambda: "/test/codex")
+    )
+    monkeypatch.setattr(
+        client_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout=child_stdout, stderr=child_stderr
+        ),
+    )
+
+    with pytest.raises(BackendProcessFailure) as caught:
+        CodexCliBackend(model="synthetic-model").complete(
+            "synthetic system", "synthetic user", 0.0
+        )
+
+    failure = caught.value.backend_failure
+    artifact_path = diagnostic_dir / "child-process-output.json"
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert stat.S_IMODE(diagnostic_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(artifact_path.stat().st_mode) == 0o600
+    assert artifact["stdout_excerpt"] == child_stdout
+    assert artifact["stderr_excerpt"] == child_stderr
+    assert failure["private_capture_status"] == "written"
+    assert failure["private_capture_sha256"] == hashlib.sha256(
+        artifact_path.read_bytes()
+    ).hexdigest()
+    assert failure["private_capture_errno"] is None
+    assert "private-token" not in str(failure)
+    assert "synthetic child stderr credential" not in str(failure)

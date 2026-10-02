@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from dataclasses import replace
+
+import pytest
+import career_automation.network_witnessed_fixture as fixture_module
 from datetime import datetime, timedelta, timezone
 
 from career_automation.ats_fixture import FixtureReceipt
@@ -39,6 +43,49 @@ from career_automation.shadow_mutation_runtime import (
 REVISION = "1" * 40
 TREE = "2" * 40
 SOURCE_CONTENT = "sha256:" + "3" * 64
+
+
+def test_fixture_answer_mapping_uses_exact_question_identity_and_fact():
+    from types import SimpleNamespace
+
+    from career_automation.application_compiler import StructuredAnswer
+
+    question = "Describe the delivery outcome."
+    other_question = "Which design tradeoff did you make?"
+    source = SimpleNamespace(
+        answers=(
+            StructuredAnswer("question-one", question, ("fact-one",)),
+            StructuredAnswer("question-two", other_question, ("fact-two",)),
+        ),
+        facts=(
+            SimpleNamespace(sentence_id="fact-one", text="Approved delivery fact."),
+            SimpleNamespace(sentence_id="fact-two", text="Approved tradeoff fact."),
+        ),
+        style_slots=(),
+    )
+    questions = {
+        "requirement-one": ("question-one", question),
+        "requirement-two": ("question-two", other_question),
+    }
+    form_answers = (
+        ("question-one", question, "Approved delivery fact."),
+        ("question-two", other_question, "Approved tradeoff fact."),
+    )
+
+    assert fixture_module._fixture_answer_for_question(
+        source, questions, form_answers, question
+    ) == ("question-one", question, "Approved delivery fact.")
+    with pytest.raises(ValueError, match="does not identify exactly one"):
+        fixture_module._fixture_answer_for_question(
+            source, questions, form_answers, question + " "
+        )
+    with pytest.raises(ValueError, match="rendered form answers differ"):
+        fixture_module._fixture_answer_for_question(
+            source,
+            questions,
+            (("question-one", "Altered question.", "Approved delivery fact."),),
+            question,
+        )
 
 
 def _state() -> dict[str, object]:
@@ -238,3 +285,528 @@ def test_production_cohort_has_no_test_module_imports() -> None:
     assert "from test_" not in source
     assert "import test_" not in source
     assert tuple(MUTATION_TEST_NODES) == REQUIRED_MUTATION_CONTROLS
+
+
+def _network_fit_inputs(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from career_automation import shadow_full_submit_cohort as cohort
+    from career_automation.jaa04_corpus_authority import RawRequirementAnchor
+    from test_jaa06_independent_acceptance import (
+        SYNTHETIC_PRODUCT_SOURCE,
+        _CapturedResearch,
+    )
+
+    body = SYNTHETIC_PRODUCT_SOURCE
+    digest = hashlib.sha256(body).hexdigest()
+    anchors = tuple(
+        RawRequirementAnchor(text, body.index(text.encode()), len(text), digest)
+        for text in ("product service", "reliable engineering", "technology")
+    )
+    frozen = SimpleNamespace(
+        synthetic_fixture_id=fixture_module.SYNTHETIC_FIXTURE_ID,
+        candidate_profile_id=fixture_module.SYNTHETIC_PROFILE_ID,
+        job_key=fixture_module.GRAPHCORE_JOB_KEY,
+        title="Synthetic Engineer",
+        company="Example",
+        vacancy_url="https://jobs.example.test/synthetic",
+        opportunity_score_bp=9000,
+        queue_payload={},
+        raw_response_bytes=body,
+        raw_response_sha256=digest,
+        inventory_sha256=digest,
+        inventory_files_sha256=digest,
+        dossier_sha256=digest,
+        queue_body_content_sha256=digest,
+        admitted_queue_payload_sha256=digest,
+        tracked_seed_payload_sha256=digest,
+        requirement_anchors=anchors,
+        dossier={"sources": [{"captured_at": datetime.now(timezone.utc).isoformat()}]},
+    )
+    with monkeypatch.context() as synthetic_research:
+        synthetic_research.setattr(
+            fixture_module,
+            "_FrozenCorpusResearch",
+            lambda cache, authority: _CapturedResearch(cache),
+        )
+        synthetic_research.setattr(fixture_module, "RAW_RESPONSE_SHA256", digest)
+        return fixture_module._issued_release_inputs(tmp_path, cohort.ROOT, frozen)
+
+
+def test_network_fit_documents_synthetic_facts_without_wrappers_or_duplicate_research(
+    tmp_path, monkeypatch
+):
+    from career_automation.application_compiler import (
+        verify_application_source,
+    )
+    from career_automation.rendering import render_editable_text
+
+    inputs = _network_fit_inputs(tmp_path, monkeypatch)
+    database, source = inputs[0], inputs[4]
+    verify_application_source(source)
+    rendered = render_editable_text(source)
+    candidate_facts = {
+        row.text for row in source.facts if row.fact_kind == "candidate"
+    }
+    assert candidate_facts == {
+        claim_statement
+        for _evidence_statement, claim_statement, _claim_type
+        in fixture_module.SYNTHETIC_CANDIDATE_FACTS
+    }
+    assert all(fixture_module.DISCLOSURE not in row.text for row in source.facts)
+    assert all("Fixture claim" not in row.text for row in source.facts)
+    assert "not a real person" not in rendered.cv_text
+    assert "not a real person" not in rendered.cover_letter_text
+    employer_facts = [row for row in source.facts if row.fact_kind == "employer"]
+    assert len(employer_facts) == 1
+    assert rendered.cover_letter_text.count(employer_facts[0].text) == 1
+    assert employer_facts[0].text == (
+        "Example: Example's product service platform provides reliable engineering "
+        "and technology for customer workflows."
+    )
+    with database.connection() as connection:
+        provenance = connection.execute(
+            """SELECT evidence.source_identity,decision.reason
+               FROM candidate_evidence evidence
+               JOIN candidate_verification_decisions decision
+                 ON decision.target_kind='evidence'
+                AND decision.target_id=evidence.evidence_id
+                AND decision.target_version=evidence.version
+               WHERE evidence.source_identity LIKE 'fixture:candidate-evidence:%'
+               ORDER BY evidence.evidence_id"""
+        ).fetchall()
+    assert len(provenance) == len(fixture_module.SYNTHETIC_CANDIDATE_FACTS)
+    assert all(row[0].startswith("fixture:candidate-evidence:") for row in provenance)
+    assert all(row[1] == fixture_module.DISCLOSURE for row in provenance)
+
+
+def test_network_fit_rejects_mismatched_synthetic_profile_anchors(tmp_path):
+    from types import SimpleNamespace
+
+    from career_automation.jaa04_corpus_authority import RawRequirementAnchor
+
+    digest = hashlib.sha256(b"synthetic vacancy").hexdigest()
+    authority = SimpleNamespace(
+        synthetic_fixture_id=fixture_module.SYNTHETIC_FIXTURE_ID,
+        candidate_profile_id=fixture_module.SYNTHETIC_PROFILE_ID,
+        job_key=fixture_module.GRAPHCORE_JOB_KEY,
+        raw_response_sha256=digest,
+        requirement_anchors=tuple(
+            RawRequirementAnchor(text, 0, len(text), digest)
+            for text in (
+                "product service",
+                "unrelated requirement",
+                "technology",
+            )
+        ),
+    )
+    with pytest.raises(
+        fixture_module.NetworkWitnessedFixtureError,
+        match="declared vacancy anchor identity",
+    ):
+        fixture_module._fit_database(
+            tmp_path,
+            authority,
+            candidate_profile_id=fixture_module.SYNTHETIC_PROFILE_ID,
+        )
+    assert not (tmp_path / "workflow.sqlite3").exists()
+
+
+def test_distinct_employer_facts_from_one_source_are_retained_by_hash():
+    from career_automation.application_compiler import (
+        _employer_fact_is_new,
+        content_hash,
+    )
+
+    source_ids = ["fixture:official-product"]
+    fact_hashes = tuple(
+        content_hash({
+            "classification": "fact",
+            "id": claim_id,
+            "source_ids": source_ids,
+            "text": text,
+        })
+        for claim_id, text in (
+            ("product-service", "Example offers a service platform."),
+            ("product-technology", "Example serves users with technology."),
+        )
+    )
+    seen_hashes: set[str] = set()
+    assert _employer_fact_is_new(fact_hashes[0], seen_hashes)
+    assert _employer_fact_is_new(fact_hashes[1], seen_hashes)
+    assert not _employer_fact_is_new(fact_hashes[0], seen_hashes)
+
+
+@pytest.mark.parametrize("release_builder", ["acceptance_fixture", "cohort", "cohort_fit", "network_fit", "network_live_review"])
+def test_cohort_browser_inputs_execute_synthetic_release(tmp_path, monkeypatch, release_builder):
+    """Run the canonical cohort browser builder with an actual synthetic release."""
+    from playwright.sync_api import sync_playwright
+    from career_automation import shadow_full_submit_cohort as cohort
+    from career_automation import network_witnessed_fixture as network
+    from career_automation.ats_fixture import FixtureVacancy, LocalATSFixture
+    from career_automation.browser_executor import LocalBrowserExecutor
+    from career_automation.browser_workflows import BrowserWorkflowStore
+    from career_automation.application_archive import selected_archive_object_bytes
+    from career_automation.application_sanity_review import (
+        package_from_application,
+        verify_sanity_review_receipt,
+    )
+    from career_automation.form_answers import form_answer_bindings_bytes
+    from test_jaa08_independent_acceptance import _issued_release_inputs
+
+    if release_builder == "acceptance_fixture":
+        rows = _issued_release_inputs(tmp_path)
+        database, _, contact, questions, source, artifacts, artifact_root, publication, _, gate, _, issued = rows
+        inputs = (database, contact, questions, source, artifacts, artifact_root, publication, gate, issued)
+    elif release_builder in ("cohort_fit", "network_fit", "network_live_review"):
+        from types import SimpleNamespace
+        from test_jaa06_independent_acceptance import (
+            SYNTHETIC_PRODUCT_SOURCE,
+            _CapturedResearch,
+        )
+        from career_automation.jaa04_corpus_authority import RawRequirementAnchor
+        builder = network if release_builder in ("network_fit", "network_live_review") else cohort
+        body = SYNTHETIC_PRODUCT_SOURCE
+        digest = hashlib.sha256(body).hexdigest()
+        anchors = tuple(RawRequirementAnchor(text, body.index(text.encode()), len(text), digest)
+                        for text in ("product service", "reliable engineering", "technology"))
+        frozen = SimpleNamespace(
+            synthetic_fixture_id=network.SYNTHETIC_FIXTURE_ID,
+            candidate_profile_id=network.SYNTHETIC_PROFILE_ID,
+            job_key=cohort.GRAPHCORE_JOB_KEY, title="Synthetic Engineer", company="Example",
+            vacancy_url="https://jobs.example.test/synthetic", opportunity_score_bp=9000,
+            queue_payload={}, raw_response_bytes=body, raw_response_sha256=digest,
+            inventory_sha256=digest, inventory_files_sha256=digest, dossier_sha256=digest,
+            queue_body_content_sha256=digest, admitted_queue_payload_sha256=digest,
+            tracked_seed_payload_sha256=digest, requirement_anchors=anchors,
+            dossier={"sources": [{"captured_at": datetime.now(timezone.utc).isoformat()}]},
+        )
+        # Only captured research and its expected digest are synthetic. The canonical
+        # fit builder, SQLite transitions, compiler, release gate and browser all run.
+        with monkeypatch.context() as synthetic_research:
+            synthetic_research.setattr(builder, "_FrozenCorpusResearch", lambda cache, authority: _CapturedResearch(cache))
+            synthetic_research.setattr(builder, "RAW_RESPONSE_SHA256", digest)
+            inputs = (network._issued_release_inputs(tmp_path, cohort.ROOT, frozen)
+                      if release_builder in ("network_fit", "network_live_review") else cohort._release_inputs(tmp_path, frozen))
+        source = inputs[4] if release_builder in ("network_fit", "network_live_review") else inputs[3]
+    else:
+        # Substitute only frozen-corpus ingestion with a real synthetic fit database.
+        # Compilation, PDFs, publication, release issuance and browser execution are real.
+        from types import SimpleNamespace
+        from test_jaa06_independent_acceptance import _fit_database
+        from career_automation.gap_optimizer import FitAssessmentStore
+        captured = []
+        assess = FitAssessmentStore.assess
+
+        def record_requirements(self, **kwargs):
+            captured.extend(kwargs["requirements"])
+            return assess(self, **kwargs)
+
+        with monkeypatch.context() as capture:
+            capture.setattr(FitAssessmentStore, "assess", record_requirements)
+            database, fit, _ = _fit_database(tmp_path, matched=True, claims=(
+                ("capability", "Build reliable services.", "capability"),
+                ("project", "Deliver tested projects.", "project"),
+                ("education", "Study software engineering.", "education"),
+            ))
+        with database.connection() as connection:
+            job = connection.execute("SELECT job_key,title,company FROM pipeline_jobs").fetchone()
+        frozen = SimpleNamespace(job_key=job["job_key"], title=job["title"], company=job["company"])
+        with monkeypatch.context() as synthetic_ingestion:
+            synthetic_ingestion.setattr(cohort, "_fit_database", lambda root, authority: (database, fit, tuple(captured)))
+            inputs = cohort._release_inputs(tmp_path, frozen)
+        source = inputs[3]
+    vacancy = FixtureVacancy("synthetic-cohort", source.job_key, source.role_title,
+                             source.company_name, source.answers[0].question)
+    review_receipts = []
+    reviewed_packages = []
+    network_review_options = {
+        "review_mode": network.SanityReviewMode.OFFLINE,
+    }
+    if release_builder == "network_live_review":
+        from llm.client import LLMClient
+        from career_automation.application_sanity_review import review_application_package
+        from career_automation.testing_sanity_review import FixturePassBackend
+
+        def live_reviewer(review_package):
+            reviewed_packages.append(review_package)
+            receipt = review_application_package(
+                review_package,
+                client=LLMClient(
+                    backend=FixturePassBackend(),
+                    model="scripted-fixture-v1",
+                    temperature=0,
+                    max_retries=1,
+                    cache_enabled=False,
+                    cache_dir=tmp_path / "review-cache",
+                    usage_log=tmp_path / "review-usage.jsonl",
+                ),
+            )
+            review_receipts.append(receipt)
+            return receipt
+
+        network_review_options = {
+            "review_mode": network.SanityReviewMode.LIVE,
+            "live_reviewer": live_reviewer,
+        }
+    with LocalATSFixture(vacancy, nonce=lambda: cohort.NONCE, form_token=cohort.FORM_TOKEN) as fixture:
+        if release_builder in ("network_fit", "network_live_review"):
+            database, workflow, approvals, values, authority, issued = network._browser_inputs(
+                fixture, inputs, cohort.ROOT, **network_review_options
+            )
+        else:
+            database, workflow, approvals, values, authority, issued = cohort._browser_inputs(
+                fixture, tmp_path, inputs
+            )
+        selected_answer = fixture_module._fixture_answer_for_question(
+            authority.source,
+            authority.questions,
+            authority.artifacts.editable.form_answers,
+            fixture.state.vacancy.question,
+        )
+        expected_answer_binding = (("cover_note", selected_answer[0]),)
+        reviewed_package = authority.sanity_review_package()
+        preview_package = package_from_application(
+            source=authority.source,
+            artifacts=authority.artifacts,
+            questions=authority.questions,
+        )
+        assert preview_package.form_fields == tuple(
+            (question_id, question, answer)
+            for question_id, question, answer
+            in authority.artifacts.editable.form_answers
+        )
+        assert preview_package.form_answer_bindings == tuple(
+            (question_id, question_id)
+            for question_id, _question, _answer
+            in authority.artifacts.editable.form_answers
+        )
+        assert authority.answer_field_bindings == expected_answer_binding
+        assert reviewed_package.form_answer_bindings == expected_answer_binding
+        assert reviewed_package.form_fields == (
+            ("cover_note", selected_answer[1], selected_answer[2]),
+        )
+        verify_sanity_review_receipt(authority.sanity_review_receipt, reviewed_package)
+        if release_builder == "network_live_review":
+            assert reviewed_packages == [reviewed_package]
+        with pytest.raises(ValueError):
+            verify_sanity_review_receipt(
+                authority.sanity_review_receipt,
+                replace(
+                    reviewed_package,
+                    form_answer_bindings=(("cover_note", "wrong-question-id"),),
+                ),
+            )
+        with pytest.raises(ValueError, match="field IDs must be unique"):
+            replace(
+                authority,
+                form_answer_bindings=(
+                    expected_answer_binding[0],
+                    expected_answer_binding[0],
+                ),
+            )
+        cover_note_materializations = tuple(
+            item.value
+            for item in values.values()
+            if item.reference.reference_id == "EV_COVER_NOTE"
+        )
+        assert cover_note_materializations == (selected_answer[2],)
+        assert selected_archive_object_bytes(
+            authority.archive_receipt,
+            "form.approved_field_mapping",
+            root=authority.archive_root,
+            repository_root=authority.repository_root,
+        ) == form_answer_bindings_bytes(
+            authority.source, authority.questions, expected_answer_binding
+        )
+        if release_builder == "network_live_review":
+            assert len(review_receipts) == 1
+            assert authority.sanity_review_receipt is review_receipts[0]
+        store = BrowserWorkflowStore(database.path)
+        run_id = store.create_run(workflow)
+        assert store.claim_run("cohort_worker", run_id=run_id) is not None
+        store.authorize_release(run_id, token=issued.release_token,
+                                authorization_reference=f"JAA08:{issued.manifest.release_manifest_sha256}",
+                                idempotency_key=issued.manifest.release_manifest_sha256)
+        executor = LocalBrowserExecutor(store, repository_root=cohort.ROOT,
+                                        clock=lambda: authority.consumed_at)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page()
+                for action in workflow.actions:
+                    assert executor.execute_next(page, run_id=run_id, worker_id="cohort_worker",
+                                                 approved_values=approvals, materialized_values=values,
+                                                 release_authority=authority) is not None
+                assert page.get_by_role("heading", name="Application received").is_visible()
+            finally:
+                browser.close()
+        assert fixture.receipt is not None
+        assert fixture.receipt.payload_sha256 == executor._expected_fixture_payload_sha256(
+            authority
+        )
+        assert store.run_snapshot(run_id)["status"] == "completed"
+        assert store.submit_dispatch(run_id)["state"] == "receipt_recorded"
+        assert authority.sanity_review_receipt is not None
+        assert authority.archive_receipt is not None
+
+
+def _fixture_review(package, tmp_path):
+    from llm.client import LLMClient
+    from career_automation.application_sanity_review import review_application_package
+    from career_automation.testing_sanity_review import FixturePassBackend
+
+    return review_application_package(
+        package,
+        client=LLMClient(
+            backend=FixturePassBackend(),
+            model="scripted-fixture-v1",
+            temperature=0,
+            max_retries=1,
+            cache_enabled=False,
+            cache_dir=tmp_path / "review-cache",
+            usage_log=tmp_path / "review-usage.jsonl",
+        ),
+    )
+
+
+def test_live_review_resolver_invokes_once_and_returns_bound_receipt(tmp_path):
+    from test_application_sanity_review import package as build_package
+
+    reviewed_package = build_package()
+    calls = []
+    receipts = []
+    offline_calls = []
+
+    def live_reviewer(package):
+        calls.append(package)
+        receipt = _fixture_review(package, tmp_path)
+        receipts.append(receipt)
+        return receipt
+
+    def offline_reviewer(package):
+        offline_calls.append(package)
+        return _fixture_review(package, tmp_path)
+
+    result = fixture_module._resolve_sanity_review_receipt(
+        reviewed_package,
+        mode=fixture_module.SanityReviewMode.LIVE,
+        live_reviewer=live_reviewer,
+        offline_reviewer=offline_reviewer,
+    )
+
+    assert calls == [reviewed_package]
+    assert calls[0] is reviewed_package
+    assert result is receipts[0]
+    assert offline_calls == []
+
+
+def test_live_review_failure_never_falls_back_to_offline(tmp_path):
+    from test_application_sanity_review import package as build_package
+
+    reviewed_package = build_package()
+    failure = RuntimeError("synthetic reviewer failure")
+    live_calls = []
+    offline_calls = []
+
+    def live_reviewer(package):
+        live_calls.append(package)
+        raise failure
+
+    def offline_reviewer(package):
+        offline_calls.append(package)
+        return _fixture_review(package, tmp_path)
+
+    with pytest.raises(RuntimeError) as raised:
+        fixture_module._resolve_sanity_review_receipt(
+            reviewed_package,
+            mode=fixture_module.SanityReviewMode.LIVE,
+            live_reviewer=live_reviewer,
+            offline_reviewer=offline_reviewer,
+        )
+
+    assert raised.value is failure
+    assert live_calls == [reviewed_package]
+    assert offline_calls == []
+
+
+def test_live_review_missing_or_empty_result_fails_closed(tmp_path):
+    from test_application_sanity_review import package as build_package
+
+    reviewed_package = build_package()
+    offline_calls = []
+
+    def offline_reviewer(package):
+        offline_calls.append(package)
+        return _fixture_review(package, tmp_path)
+
+    with pytest.raises(RuntimeError, match="live sanity reviewer is required"):
+        fixture_module._resolve_sanity_review_receipt(
+            reviewed_package,
+            mode=fixture_module.SanityReviewMode.LIVE,
+            live_reviewer=None,
+            offline_reviewer=offline_reviewer,
+        )
+
+    with pytest.raises(RuntimeError, match="returned no receipt"):
+        fixture_module._resolve_sanity_review_receipt(
+            reviewed_package,
+            mode=fixture_module.SanityReviewMode.LIVE,
+            live_reviewer=lambda _package: None,
+            offline_reviewer=offline_reviewer,
+        )
+
+    assert offline_calls == []
+
+
+def test_live_review_rejects_receipt_bound_to_another_package(tmp_path):
+    from test_application_sanity_review import package as build_package
+
+    reviewed_package = build_package()
+    other_package = build_package(letter="A different synthetic application.")
+    receipt = _fixture_review(reviewed_package, tmp_path)
+    offline_calls = []
+
+    def offline_reviewer(package):
+        offline_calls.append(package)
+        return _fixture_review(package, tmp_path)
+
+    with pytest.raises(ValueError, match="differs from its sanity-review receipt"):
+        fixture_module._resolve_sanity_review_receipt(
+            other_package,
+            mode=fixture_module.SanityReviewMode.LIVE,
+            live_reviewer=lambda _package: receipt,
+            offline_reviewer=offline_reviewer,
+        )
+
+    assert offline_calls == []
+
+
+def test_offline_mode_selects_only_its_explicit_reviewer(tmp_path):
+    from test_application_sanity_review import package as build_package
+
+    reviewed_package = build_package()
+    live_calls = []
+    offline_calls = []
+    receipts = []
+
+    def live_reviewer(package):
+        live_calls.append(package)
+        return _fixture_review(package, tmp_path)
+
+    def offline_reviewer(package):
+        offline_calls.append(package)
+        receipt = _fixture_review(package, tmp_path)
+        receipts.append(receipt)
+        return receipt
+
+    result = fixture_module._resolve_sanity_review_receipt(
+        reviewed_package,
+        mode=fixture_module.SanityReviewMode.OFFLINE,
+        live_reviewer=live_reviewer,
+        offline_reviewer=offline_reviewer,
+    )
+
+    assert result is receipts[0]
+    assert live_calls == []
+    assert offline_calls == [reviewed_package]

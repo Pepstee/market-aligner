@@ -48,19 +48,24 @@ from test_jaa09_independent_acceptance import (
     NONCE,
     _released_browser_inputs,
 )
+from test_jaa08_independent_acceptance import _fixture_now
 from test_jaa09_real_vacancy_acceptance import (
     _real_issued_release_inputs,
     _write_evidence_receipt_if_requested,
 )
+from testing_repository import operator_control_path
 
 
 ROOT = Path(__file__).resolve().parent
 CERTIFIED_CORPUS = Path(
     os.environ.get(
         "JAA_CERTIFIED_CORPUS_ROOT",
-        "/home/gutua/software-factory/.control/jaa-12h-supervisor-20260727/"
-        "runtime/.jaa04-corpus-v3-a4f4490-releases/"
-        "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
+        operator_control_path(
+            "jaa-12h-supervisor-20260727",
+            "runtime",
+            ".jaa04-corpus-v3-a4f4490-releases",
+            "sha256-f93733a741ffe9b0441fe4bf549d3bb34e167d28d90283f70003843805201258",
+        ),
     )
 )
 TRACKED_SEED = ROOT / "career_automation/fixtures/jaa04_admitted_queue.json"
@@ -149,8 +154,7 @@ def _valid_receipt() -> dict[str, object]:
             "candidate_projection": "fixture",
             "projection_content_sha256": digest,
             "disclosure": (
-                "deterministic approved fixture candidate projection; "
-                "not a real person"
+                "deterministic approved fixture candidate projection; not a real person"
             ),
         },
         "release_binding": {
@@ -189,9 +193,7 @@ def _valid_receipt() -> dict[str, object]:
                 "in_process_fixture_receipt_forgery_residual"
             ),
             "ats_scope": "local_simulated_ats_only",
-            "filesystem_trust_limit": (
-                "operator_control_root_local_filesystem"
-            ),
+            "filesystem_trust_limit": ("operator_control_root_local_filesystem"),
             "real_application_submitted": False,
             "external_authority_granted": False,
         },
@@ -396,10 +398,13 @@ def test_verified_real_vacancy_path_still_refuses_external_navigation(
     ) as fixture:
         store = BrowserWorkflowStore(tmp_path / "external.sqlite3")
         run_id = store.create_run(workflow)
-        assert store.claim_run(
-            "jaa09-real-vacancy-worker",
-            run_id=run_id,
-        ) is not None
+        assert (
+            store.claim_run(
+                "jaa09-real-vacancy-worker",
+                run_id=run_id,
+            )
+            is not None
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
@@ -454,17 +459,24 @@ def test_tampered_jaa08_token_on_real_vacancy_produces_no_receipt(
         )
         store = BrowserWorkflowStore(database.path)
         run_id = store.create_run(workflow)
-        assert store.claim_run(
-            "jaa09-real-vacancy-worker",
-            run_id=run_id,
-        ) is not None
+        assert (
+            store.claim_run(
+                "jaa09-real-vacancy-worker",
+                run_id=run_id,
+            )
+            is not None
+        )
         store.authorize_release(
             run_id,
             token=invalid_token,
             authorization_reference="JAA08:REAL_VACANCY_INVALID_TOKEN",
             idempotency_key="jaa09-real-vacancy-invalid-token",
         )
-        executor = LocalBrowserExecutor(store, repository_root=ROOT)
+        executor = LocalBrowserExecutor(
+            store,
+            repository_root=ROOT,
+            clock=lambda: _fixture_now(database),
+        )
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
@@ -522,10 +534,13 @@ def test_consumed_jaa08_token_cannot_submit_real_vacancy_twice(
         )
         first_store = BrowserWorkflowStore(database.path)
         first_run = first_store.create_run(first_workflow)
-        assert first_store.claim_run(
-            "jaa09-real-vacancy-worker",
-            run_id=first_run,
-        ) is not None
+        assert (
+            first_store.claim_run(
+                "jaa09-real-vacancy-worker",
+                run_id=first_run,
+            )
+            is not None
+        )
         first_store.authorize_release(
             first_run,
             token=issued.release_token,
@@ -537,7 +552,11 @@ def test_consumed_jaa08_token_cannot_submit_real_vacancy_twice(
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
-            executor = LocalBrowserExecutor(first_store, repository_root=ROOT)
+            executor = LocalBrowserExecutor(
+                first_store,
+                repository_root=ROOT,
+                clock=lambda: _fixture_now(database),
+            )
             for _action in first_workflow.actions:
                 executor.execute_next(
                     page,
@@ -579,10 +598,13 @@ def test_consumed_jaa08_token_cannot_submit_real_vacancy_twice(
             second_workflow,
             idempotency_key="jaa09-real-vacancy-second-run",
         )
-        assert second_store.claim_run(
-            "jaa09-real-vacancy-worker",
-            run_id=second_run,
-        ) is not None
+        assert (
+            second_store.claim_run(
+                "jaa09-real-vacancy-worker",
+                run_id=second_run,
+            )
+            is not None
+        )
         second_store.authorize_release(
             second_run,
             token=issued.release_token,
@@ -594,7 +616,11 @@ def test_consumed_jaa08_token_cannot_submit_real_vacancy_twice(
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
-            executor = LocalBrowserExecutor(second_store, repository_root=ROOT)
+            executor = LocalBrowserExecutor(
+                second_store,
+                repository_root=ROOT,
+                clock=lambda: _fixture_now(database),
+            )
             for _action in second_workflow.actions[:-1]:
                 executor.execute_next(
                     page,
@@ -619,3 +645,127 @@ def test_consumed_jaa08_token_cannot_submit_real_vacancy_twice(
             event["event_type"] == "submit_click_started"
             for event in second_store.events(second_run)
         )
+
+
+@pytest.mark.parametrize("schema", ["v1", "v2"])
+def test_noncertifying_receipt_versions_roundtrip(tmp_path: Path, schema: str) -> None:
+    from career_automation.runtime_compatibility import (
+        CERTIFIED_PYTHON_VERSION, PLAYWRIGHT_VERSION, CHROMIUM_REVISION,
+        CHROMIUM_BROWSER_VERSION,
+    )
+    receipt = _valid_receipt()
+    receipt["schema_version"] = f"jaa09.real-vacancy-local-receipt.{schema}"
+    if schema == "v2":
+        receipt["source_environment"].update(
+            interpreter_path="/usr/bin/python3.12", python_version=CERTIFIED_PYTHON_VERSION,
+            playwright_version=PLAYWRIGHT_VERSION, chromium_revision=CHROMIUM_REVISION,
+            chromium_version=CHROMIUM_BROWSER_VERSION,
+        )
+    validate_real_vacancy_receipt(receipt)
+    path = write_real_vacancy_receipt(receipt, tmp_path)
+    stored = json.loads(path.read_bytes())
+    validate_real_vacancy_receipt(stored)
+    assert stored == receipt
+    assert stored["certifies_slice"] is False
+
+
+@pytest.mark.parametrize("field,value", [
+    ("interpreter_path", "relative/python"), ("interpreter_path", "/usr/bin/notpython"),
+    ("python_version", "0.0.0"), ("playwright_version", "1.61.0"),
+    ("chromium_revision", "wrong"), ("chromium_version", "wrong"),
+])
+def test_v2_receipt_rejects_runtime_substitution(field: str, value: str) -> None:
+    from career_automation.runtime_compatibility import (
+        CERTIFIED_PYTHON_VERSION, PLAYWRIGHT_VERSION, CHROMIUM_REVISION,
+        CHROMIUM_BROWSER_VERSION,
+    )
+    receipt = _valid_receipt()
+    receipt["schema_version"] = "jaa09.real-vacancy-local-receipt.v2"
+    receipt["source_environment"].update(
+        interpreter_path="/usr/bin/python3.12", python_version=CERTIFIED_PYTHON_VERSION,
+        playwright_version=PLAYWRIGHT_VERSION, chromium_revision=CHROMIUM_REVISION,
+        chromium_version=CHROMIUM_BROWSER_VERSION,
+    )
+    receipt["source_environment"][field] = value
+    with pytest.raises(RealVacancyReceiptError, match="environment binding"):
+        validate_real_vacancy_receipt(receipt)
+
+
+@pytest.mark.parametrize("change", ["unknown_schema", "certifying", "legacy_new_runtime"])
+def test_receipt_compatibility_does_not_widen_authority(change: str) -> None:
+    receipt = _valid_receipt()
+    if change == "unknown_schema":
+        receipt["schema_version"] = "jaa09.real-vacancy-local-receipt.v3"
+    elif change == "certifying":
+        receipt["certifies_slice"] = True
+    else:
+        from career_automation.runtime_compatibility import PLAYWRIGHT_VERSION
+        receipt["source_environment"]["playwright_version"] = PLAYWRIGHT_VERSION
+    with pytest.raises(RealVacancyReceiptError):
+        validate_real_vacancy_receipt(receipt)
+
+
+def test_current_runtime_receipt_writer_roundtrip(tmp_path, monkeypatch):
+    """Exercise receipt emission only; synthetic authority is not corpus certification."""
+    import sys
+    from types import SimpleNamespace
+    from career_automation.runtime_compatibility import inspect_runtime
+
+    sample = _valid_receipt()
+    corpus = sample["corpus_binding"]
+    vacancy = sample["vacancy_identity"]
+    release = sample["release_binding"]
+    browser_evidence = sample["browser_evidence"]
+    raw = tmp_path / "synthetic-response"
+    raw.write_bytes(b"x" * corpus["official_response_size"])
+    raw.chmod(0o444)
+    authority = SimpleNamespace(
+        corpus_root=tmp_path / "synthetic-corpus",
+        inventory_sha256=corpus["corpus_inventory_sha256"],
+        inventory_files_sha256=corpus["files_hash"],
+        raw_response_sha256=corpus["official_response_sha256"],
+        raw_response_path=raw, dossier_sha256=corpus["dossier_sha256"],
+        queue_body_content_sha256=corpus["queue_content_sha256"],
+        admitted_queue_payload_sha256=corpus["queue_payload_hash"],
+        tracked_seed_payload_sha256=corpus["tracked_seed_payload_hash"],
+        job_key=vacancy["job_key"], company=vacancy["company"],
+        title=vacancy["title"], vacancy_url=vacancy["url"],
+        observed_at=vacancy["observed_at"],
+        opportunity_score_bp=vacancy["opportunity0_score_bp"],
+    )
+    inputs = [None] * 12
+    inputs[1] = SimpleNamespace(candidate_profile_hash=sample["candidate_boundary"]["projection_content_sha256"])
+    inputs[4] = SimpleNamespace(content_sha256=release["application_source_sha256"], vacancy_sha256=release["vacancy_sha256"])
+    inputs[5] = SimpleNamespace(artifact_set_sha256=release["artifact_set_sha256"])
+    inputs[7] = SimpleNamespace(receipt_sha256=release["artifact_receipt_sha256"])
+    inputs[11] = SimpleNamespace(
+        manifest=SimpleNamespace(release_manifest_sha256=release["release_manifest_sha256"]),
+        token_sha256=release["release_token_sha256"],
+    )
+    output_root = tmp_path / "receipts"
+    output_root.mkdir(mode=0o700)
+    monkeypatch.setenv("JAA09_EVIDENCE_CONTROL_ROOT", str(output_root))
+    for env, key in (
+        ("JAA09_SOURCE_GIT_REVISION", "source_git_revision"),
+        ("JAA09_SOURCE_TREE", "source_tree"),
+        ("JAA09_SOURCE_CONTENT_REVISION", "source_content_revision"),
+    ):
+        monkeypatch.setenv(env, sample["source_environment"][key])
+    runtime = inspect_runtime(launch=True)
+    target = _write_evidence_receipt_if_requested(
+        authority=authority, release_inputs=tuple(inputs),
+        workflow=SimpleNamespace(content_hash=browser_evidence["workflow_sha256"]),
+        run_id=browser_evidence["run_id"],
+        fixture_receipt=SimpleNamespace(receipt_id=browser_evidence["receipt_id"], payload_sha256=browser_evidence["receipt_payload_sha256"]),
+        outputs=browser_evidence, chromium_version=runtime.launched_browser_version,
+        submit_count=1, non_loopback_requests=0,
+    )
+    stored = json.loads(target.read_bytes())
+    validate_real_vacancy_receipt(stored)
+    assert stored["schema_version"] == "jaa09.real-vacancy-local-receipt.v2"
+    assert stored["source_environment"]["interpreter_path"] == sys.executable
+    assert stored["source_environment"]["chromium_revision"] == runtime.chromium_revision
+    assert stored["source_environment"]["chromium_version"] == runtime.launched_browser_version
+    assert stored["certifies_slice"] is False
+    assert stored["disclosures"]["real_application_submitted"] is False
+    assert target.stat().st_mode & 0o777 == 0o444

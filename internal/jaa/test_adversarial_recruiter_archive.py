@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import replace
 
 import pytest
 
 from career_automation.adversarial_recruiter import (
     RecruiterAssessmentReceipt,
-    RESULT_SCHEMA_VERSION,
 )
 from career_automation.adversarial_recruiter_archive import (
     RecruiterDiagnosticArchiveError,
@@ -21,15 +19,19 @@ from career_automation.adversarial_recruiter_runtime import (
 )
 from career_automation.evidence_matching import content_hash
 from career_automation.external_document_assurance import IntendedVacancy
+from career_automation.testing_adversarial_recruiter import (
+    fixture_recruiter_result,
+)
 
 
 def _assessment() -> RecruiterAssessmentReceipt:
-    result = {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "calibration_status": "uncalibrated",
-        "fit_percent": 41,
-        "fit_range_percent": {"low": 25, "high": 55},
-        "overall_verdict": "weak_fit",
+    result = fixture_recruiter_result(
+        fit_percent=41,
+        fit_low=25,
+        fit_high=55,
+        overall_verdict="weak_fit",
+    )
+    result.update({
         "ats_reaction": {
             "progression_probability_percent": 42,
             "verdict": "borderline",
@@ -40,22 +42,29 @@ def _assessment() -> RecruiterAssessmentReceipt:
             "verdict": "borderline",
             "reasons": ["Evidence is credible but narrow."],
         },
-        "strengths": [{"location": "cv:projects", "assessment": "Relevant Python project."}],
+        "strengths": [{
+            "location": "cv:projects", "assessment": "Relevant Python project.",
+            "outward_evidence_refs": ["cv:char:0:1"],
+        }],
         "risks": [{
             "category": "experience", "severity": "high", "location": "cv:experience",
             "assessment": "No comparable production ownership is demonstrated.",
+            "outward_evidence_refs": ["cv:char:0:1"],
         }],
         "application_improvements": [{
+            "rank": 1,
             "target": "cv",
             "recommendation": "Lead with the closest production-grade evidence.",
             "expected_effect": "Makes relevance visible during screening.",
+            "support_required": False,
+            "outward_evidence_refs": ["cv:char:0:1"],
         }],
         "profile_improvements": [{
             "category": "experience",
             "recommendation": "Build evidence of operating a deployed service.",
             "time_horizon": "months", "expected_effect": "Addresses the seniority gap.",
         }],
-    }
+    })
     vacancy = IntendedVacancy(
         "example:123", hashlib.sha256(b"listing").hexdigest(),
         "Infrastructure Engineer", "Example Systems",

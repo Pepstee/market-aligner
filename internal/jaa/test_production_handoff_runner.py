@@ -18,17 +18,21 @@ def test_public_runner_owns_current_time_and_exposes_no_release_path(
 ) -> None:
     data_home = tmp_path / "data"
     repository_root = tmp_path / "repo"
+    output_root = tmp_path / "market-handoff"
     data_home.mkdir(mode=0o700)
     repository_root.mkdir(mode=0o755)
+    candidate_directory = tmp_path / "candidate"
+    candidate_directory.mkdir(mode=0o700)
     deployment = _ProductionHandoffDeployment(
         data_home=data_home,
         repository_root=repository_root,
-        output_root=runner.PRODUCTION_MARKET_OUTBOX_ROOT,
+        output_root=output_root,
         collection_config_path=runner.PRODUCTION_COLLECTION_CONFIG_PATH,
         collection_config_sha256=runner.PRODUCTION_COLLECTION_CONFIG_SHA256,
         collection_config_file_sha256=runner.PRODUCTION_COLLECTION_CONFIG_FILE_SHA256,
         deployment_configuration_sha256="d" * 64,
         research_archive_root_identity=runner.PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY,
+        candidate_authority_path=candidate_directory / "candidate_authority.json",
     )
     witness = object()
     observed: dict[str, object] = {}
@@ -79,8 +83,8 @@ def test_public_runner_owns_current_time_and_exposes_no_release_path(
         "collection_config_file_sha256": runner.PRODUCTION_COLLECTION_CONFIG_FILE_SHA256,
         "data_home": str(data_home),
         "deployment_configuration_sha256": "d" * 64,
-        "execution_receipt_root": str(runner.PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT),
-        "output_root": str(runner.PRODUCTION_MARKET_OUTBOX_ROOT),
+        "execution_receipt_root": str(output_root / "receipts"),
+        "output_root": str(output_root),
         "profile_id": "prf_" + "1" * 32,
         "repository_root": str(repository_root),
         "schema_version": "jaa.production-handoff-freshness-subject.v1",
@@ -102,9 +106,6 @@ def test_public_runner_owns_current_time_and_exposes_no_release_path(
         "collection_config_path",
         "collection_config_sha256",
         "collection_config_file_sha256",
-        "data_home",
-        "output_root",
-        "repository_root",
     ],
 )
 def test_alternate_roots_fail_before_time_or_state_read(
@@ -136,7 +137,8 @@ def test_alternate_roots_fail_before_time_or_state_read(
         runner, "_build_production_handoff_from_authenticated_time", forbidden_build
     )
     with pytest.raises(
-        runner.ProductionHandoffDeploymentError, match="compiled canonical roots"
+        runner.ProductionHandoffDeploymentError,
+        match="differs|collection configuration",
     ):
         runner.run_production_handoff(
             profile_id="prf_" + "1" * 32,
@@ -169,6 +171,43 @@ def test_compiled_deployment_document_is_exact_and_receipt_root_is_derived() -> 
     )
 
 
+def test_host_deployment_paths_are_accepted_when_bound_to_the_repository(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "artvault" / "market-aligner"
+    data_home = tmp_path / "artvault" / "ma-state"
+    output_root = tmp_path / "artvault" / "ma-outbox"
+    candidate = tmp_path / "artvault" / "private" / "candidate_authority.json"
+    raw = runner.production_handoff_deployment_configuration_bytes(
+        data_home=data_home,
+        repository_root=repository,
+        output_root=output_root,
+        candidate_authority_path=candidate,
+        candidate_authority_sha256="a" * 64,
+    )
+
+    assert runner._parse_deployment_configuration(raw) == hashlib.sha256(raw).hexdigest()
+    document = __import__("json").loads(raw)
+    assert document["repository_root"] == str(repository)
+    assert document["collection_config_path"] == str(
+        repository / "internal/jaa/skeleton/config.overnight.yaml"
+    )
+    assert document["candidate_authority_path"] == str(candidate)
+    assert document["candidate_authority_sha256"] == "a" * 64
+
+
+def test_host_deployment_configuration_requires_all_authority_values(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        runner.ProductionHandoffDeploymentError,
+        match="all five host-specific authority values",
+    ):
+        runner.production_handoff_deployment_configuration_bytes(
+            data_home=tmp_path / "private-state"
+        )
+
+
 def test_outbox_symlink_is_rejected_before_time_or_state(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -179,6 +218,8 @@ def test_outbox_symlink_is_rejected_before_time_or_state(
     data_home.mkdir(mode=0o700)
     repository_root.mkdir(mode=0o755)
     output_parent.mkdir(mode=0o700)
+    candidate_directory = tmp_path / "candidate"
+    candidate_directory.mkdir(mode=0o700)
     real_output.mkdir(mode=0o700)
     output = output_parent / "outbox"
     output.symlink_to(real_output, target_is_directory=True)
@@ -191,6 +232,7 @@ def test_outbox_symlink_is_rejected_before_time_or_state(
         collection_config_file_sha256=runner.PRODUCTION_COLLECTION_CONFIG_FILE_SHA256,
         deployment_configuration_sha256="e" * 64,
         research_archive_root_identity=runner.PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY,
+        candidate_authority_path=candidate_directory / "candidate_authority.json",
     )
     called = {"time": False}
     monkeypatch.setattr(

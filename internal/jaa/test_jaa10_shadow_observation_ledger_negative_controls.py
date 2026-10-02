@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import sqlite3
 import subprocess
 import sys
@@ -147,8 +148,7 @@ def test_host_clock_step_back_aborts_append_without_a_partial_receipt(
     receipt_count = len(store.receipts())
     head = store.receipts()[-1].document
     earlier = (
-        datetime.fromisoformat(str(head["host_recorded_at_utc"]))
-        - timedelta(seconds=1)
+        datetime.fromisoformat(str(head["host_recorded_at_utc"])) - timedelta(seconds=1)
     ).isoformat()
     monotonic_ns = int(head["host_monotonic_ns"]) + 1
     monkeypatch.setattr(
@@ -168,9 +168,7 @@ def test_append_only_triggers_block_direct_update_and_delete(tmp_path) -> None:
     connection = sqlite3.connect(store.database_path)
     try:
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-            connection.execute(
-                "UPDATE ledger_receipt SET event_type = 'session_open'"
-            )
+            connection.execute("UPDATE ledger_receipt SET event_type = 'session_open'")
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):
             connection.execute("DELETE FROM ledger_metadata")
     finally:
@@ -259,14 +257,8 @@ def test_summary_vocabulary_cannot_be_mistaken_for_live_evidence(
 
     assert summary["assessment"] == ASSESSMENT
     assert summary["span_meaning"] == SPAN_MEANING
-    assert (
-        summary["policy"]["clock_authentication"]
-        == CLOCK_AUTHENTICATION
-    )
-    assert (
-        summary["policy"]["monotonic_witness_scope"]
-        == MONOTONIC_WITNESS_SCOPE
-    )
+    assert summary["policy"]["clock_authentication"] == CLOCK_AUTHENTICATION
+    assert summary["policy"]["monotonic_witness_scope"] == MONOTONIC_WITNESS_SCOPE
     assert (
         summary["policy"]["filesystem_privileged_writer_limit"]
         == FILESYSTEM_WRITER_LIMIT
@@ -306,6 +298,17 @@ module._host_time = lambda: (
 )
 store.begin_session()
 """
+    repository_root = Path(__file__).resolve().parents[2]
+    environment = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            (
+                str(repository_root / "internal" / "jaa"),
+                str(repository_root / "src"),
+                os.environ.get("PYTHONPATH", ""),
+            )
+        ),
+    }
     completed = subprocess.run(
         [
             sys.executable,
@@ -319,6 +322,7 @@ store.begin_session()
         ],
         check=False,
         capture_output=True,
+        env=environment,
         text=True,
     )
 

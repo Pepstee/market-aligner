@@ -15,6 +15,9 @@ from career_automation.adversarial_recruiter import (
 )
 from career_automation.external_document_assurance import IntendedVacancy
 from career_automation.rendering import _build_text_pdf
+from career_automation.testing_adversarial_recruiter import (
+    fixture_recruiter_result,
+)
 from llm.client import Backend, LLMClient, LLMResponse, MockBackend
 
 
@@ -37,38 +40,12 @@ class ScriptedBackend(Backend):
 
 
 def result() -> dict[str, object]:
-    reaction = {
-        "progression_probability_percent": 42,
-        "verdict": "borderline",
-        "reasons": ["Relevant projects are present but commercial depth is unclear."],
-    }
-    return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "calibration_status": "uncalibrated",
-        "fit_percent": 41,
-        "fit_range_percent": {"low": 25, "high": 55},
-        "overall_verdict": "weak_fit",
-        "ats_reaction": reaction,
-        "human_reaction": reaction,
-        "strengths": [{"location": "cv:projects", "assessment": "Relevant Python project."}],
-        "risks": [{
-            "category": "experience",
-            "severity": "high",
-            "location": "cv:experience",
-            "assessment": "No comparable production ownership is demonstrated.",
-        }],
-        "application_improvements": [{
-            "target": "cv",
-            "recommendation": "Lead with the closest production-grade project evidence.",
-            "expected_effect": "Makes relevance visible during the first screen.",
-        }],
-        "profile_improvements": [{
-            "category": "experience",
-            "recommendation": "Build evidence of operating a deployed service.",
-            "time_horizon": "months",
-            "expected_effect": "Addresses the largest seniority gap.",
-        }],
-    }
+    return fixture_recruiter_result(
+        fit_percent=41,
+        fit_low=25,
+        fit_high=55,
+        overall_verdict="weak_fit",
+    )
 
 
 def pdf(text: str) -> bytes:
@@ -110,6 +87,16 @@ def test_detached_recruiter_scores_exact_employer_visible_package(tmp_path) -> N
     receipt = assess_application_as_recruiter(candidate, client=client(backend, tmp_path))
     verify_recruiter_assessment_receipt(receipt, candidate)
     assert receipt.model_result["fit_percent"] == 41
+    progression = receipt.model_result["stage_progression_percent"]
+    assert tuple(progression) == (
+        "ats_screen",
+        "recruiter_screen",
+        "hiring_manager_review",
+        "interview_invitation",
+    )
+    assert list(progression.values()) == sorted(progression.values(), reverse=True)
+    assert receipt.model_result["evidence_gaps"]
+    assert receipt.model_result["uncertainty_drivers"]
     assert receipt.model_identity == "detached-test-v1"
     assert receipt.release_authority is False
     assert receipt.mutation_authority is False
@@ -169,6 +156,42 @@ def test_every_employer_visible_binding_detects_mutation(tmp_path) -> None:
         {"schema_version": RESULT_SCHEMA_VERSION},
         {**result(), "fit_percent": 101},
         {**result(), "fit_range_percent": {"low": 50, "high": 70}},
+        {
+            **result(),
+            "stage_progression_percent": {
+                "ats_screen": 60,
+                "recruiter_screen": 50,
+                "hiring_manager_review": 40,
+                "interview_invitation": 41,
+            },
+        },
+        {**result(), "uncertainty_drivers": []},
+        {
+            **result(),
+            "strengths": [
+                {
+                    **result()["strengths"][0],
+                    "outward_evidence_refs": ["cv:char:0:999999"],
+                }
+            ],
+        },
+        {
+            **result(),
+            "application_improvements": [
+                {**result()["application_improvements"][0], "rank": 2}
+            ],
+        },
+        {
+            **result(),
+            "risks": [
+                {**result()["risks"][0], "severity": "low"},
+                {
+                    **result()["risks"][0],
+                    "severity": "high",
+                    "category": "skills",
+                },
+            ],
+        },
         {**result(), "release_authority": True},
     ),
 )

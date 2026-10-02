@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Sequence
 
 from llm.client import Backend, LLMClient, LLMResponse
 
@@ -25,11 +26,13 @@ class FixturePassBackend(Backend):
 
     def complete(self, system: str, user: str, temperature: float) -> LLMResponse:
         return LLMResponse(
-            text=json.dumps({
-                "schema_version": RESULT_SCHEMA_VERSION,
-                "verdict": "pass",
-                "findings": [],
-            }),
+            text=json.dumps(
+                {
+                    "schema_version": RESULT_SCHEMA_VERSION,
+                    "verdict": "pass",
+                    "findings": [],
+                }
+            ),
             model="scripted-fixture-v1",
         )
 
@@ -40,7 +43,9 @@ def fixture_pass_receipt(
     artifacts,
     questions,
     state_root: Path,
+    field_answer_bindings: Sequence[tuple[str, str]] | None = None,
     vacancy_requirements=None,
+    vacancy_review_material=None,
 ) -> SanityReviewReceipt:
     client = LLMClient(
         backend=FixturePassBackend(),
@@ -56,7 +61,9 @@ def fixture_pass_receipt(
             source=source,
             artifacts=artifacts,
             questions=questions,
+            field_answer_bindings=field_answer_bindings,
             vacancy_requirements=vacancy_requirements,
+            vacancy_review_material=vacancy_review_material,
         ),
         client=client,
     )

@@ -9,6 +9,7 @@ import pytest
 
 from career_automation.application_archive import (
     RELEASE_REQUIRED_ROLES,
+    REVIEW_REQUIRED_ROLES,
     ApplicationArchive,
     ApplicationArchiveError,
     ApplicationArchiveReceipt,
@@ -20,6 +21,300 @@ from career_automation.application_archive import (
 
 
 ATTEMPT_ID = "jaa-20260805T220000Z-0123456789abcdef"
+
+
+def _review_preparation(tmp_path, *, forensic_method="GET", begin=True):
+    from types import SimpleNamespace
+    from career_automation.production_attempt import GreenhouseAttemptRecorder, ProductionIdentity
+    from career_automation.production_runner import PreparedGreenhouseReview
+    from career_automation.application_sanity_review import review_application_package
+    from career_automation.external_document_assurance import assert_application_artifacts
+    from form_filling.ats_forensics import ATSForensicRecorder, runtime_fingerprint
+    from test_application_sanity_review import package, client, ScriptedBackend, PASS
+
+    reviewed = package(fields=())
+    repository, root = _roots(tmp_path)
+    vacancy = VacancyArchiveIdentity(
+        reviewed.intended_vacancy.job_key, reviewed.intended_vacancy.vacancy_sha256,
+        reviewed.intended_vacancy.role_title, reviewed.intended_vacancy.company_name,
+        "https://job-boards.greenhouse.io/example/jobs/123",
+    )
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=root, repository_root=repository, vacancy=vacancy,
+        complete_vacancy=b"vacancy", structured_vacancy={}, assessment={},
+    )
+    if begin:
+        recorder.begin_review_only()
+    recorder._add("browser.prefill_snapshot", b"{}", "application/json")
+    recorder._add("vacancy.visible_listing_capture", reviewed.vacancy_review_material.visible_listing_text_bytes, "text/plain", disposition="observed")
+    source = SimpleNamespace(
+        source_id=reviewed.application_source_identity,
+        job_key=vacancy.job_key, vacancy_sha256=vacancy.vacancy_sha256,
+        role_title=vacancy.role_title, company_name=vacancy.company_name,
+        document=lambda: {"source_id": reviewed.application_source_identity},
+        facts=(SimpleNamespace(fact_kind="candidate", authority=SimpleNamespace(
+            candidate_claim_id="CLAIM-1", candidate_claim_version=1,
+            candidate_evidence_id="EVIDENCE-1", candidate_evidence_version=1,
+        )),),
+    )
+    artifacts = SimpleNamespace(
+        artifact_set_sha256="a" * 64,
+        cv_pdf=SimpleNamespace(pdf_bytes=reviewed.cv_pdf_bytes),
+        cover_letter_pdf=SimpleNamespace(pdf_bytes=reviewed.cover_letter_pdf_bytes),
+        editable=SimpleNamespace(answers_text=""),
+    )
+    forensics = ATSForensicRecorder(
+        root / "passive-forensics", attempt_id=recorder.attempt.attempt_id,
+        application_id="123", application_url=vacancy.source_url, ats_name="greenhouse",
+        artifact_set_sha256=artifacts.artifact_set_sha256,
+        runtime=runtime_fingerprint(browser_name="synthetic", browser_version="1", headless=True, user_agent="synthetic"),
+    )
+    forensics.record_checkpoint("greenhouse_preflight_inventory", inventory_sha256="b" * 64, boundary_signal_count=0, passive_inventory=True)
+    forensics.record_request(method=forensic_method, url=vacancy.source_url,
+                             resource_type="document", headers={}, post_data=None)
+    forensics.record_screenshot(b"synthetic screenshot", label="preflight")
+    receipt = forensics.finalize(outcome="prepared")
+    prepared = PreparedGreenhouseReview(
+        source, artifacts,
+        assert_application_artifacts(cv_pdf_bytes=reviewed.cv_pdf_bytes,
+                                     cover_letter_pdf_bytes=reviewed.cover_letter_pdf_bytes,
+                                     answers_text="", intended_vacancy=reviewed.intended_vacancy),
+        review_application_package(reviewed, client=client(ScriptedBackend(PASS), tmp_path)),
+        ProductionIdentity("c" * 40, "d" * 64, "e" * 64),
+        None, reviewed.vacancy_review_material, reviewed.vacancy_requirements,
+        forensics.root, receipt,
+    )
+    return recorder, prepared
+
+
+def test_review_only_terminal_is_complete_and_immutable(tmp_path):
+    recorder, prepared = _review_preparation(tmp_path)
+    digest = recorder.finalize_review_only(prepared)
+    verified = verify_complete_attempt(recorder.attempt.attempt_id, root=recorder.attempt.archive.root,
+                                       repository_root=recorder.attempt.archive.repository_root)
+    assert verified["outcome"] == "review_only"
+    assert verified["terminal_manifest_sha256"] == digest
+    manifest = json.loads((recorder.attempt.path / "terminal-manifest.json").read_bytes())
+    assert manifest["mode"] == "review_only"
+    for flag in ("submission_attempted", "release_authority", "submission_authority"):
+        assert manifest[flag] is False
+    assert manifest["release_manifest_sha256"] is None
+    assert recorder.attempt.finalize_terminal(outcome="review_only", selected={}) == digest
+    with pytest.raises(ApplicationArchiveError):
+        recorder.attempt.finalize_release(selected={})
+    with pytest.raises(ApplicationArchiveError):
+        recorder._add("review.extra", b"extra", "text/plain")
+
+
+def _resume_review_recorder(recorder):
+    from career_automation.production_attempt import GreenhouseAttemptRecorder
+
+    return GreenhouseAttemptRecorder.resume(
+        archive_root=recorder.attempt.archive.root,
+        repository_root=recorder.attempt.archive.repository_root,
+        attempt_id=recorder.attempt.attempt_id,
+    )
+
+
+def _queue_base_recorder(tmp_path):
+    from career_automation.production_attempt import GreenhouseAttemptRecorder
+
+    repository, root = _roots(tmp_path)
+    return GreenhouseAttemptRecorder.create(
+        archive_root=root, repository_root=repository, vacancy=_vacancy(),
+        complete_vacancy=b"complete vacancy", structured_vacancy={}, assessment={},
+    )
+
+
+def test_review_only_resume_keeps_exact_intent_and_evidence(tmp_path):
+    recorder, _ = _review_preparation(tmp_path)
+    original = recorder.attempt._events()
+    resumed = _resume_review_recorder(recorder)
+    resumed.begin_review_only()
+    resumed.begin_review_only()
+    resumed._add("browser.prefill_snapshot", b"{}", "application/json")
+    assert resumed.attempt.attempt_id == recorder.attempt.attempt_id
+    assert resumed.attempt._events() == original
+    with pytest.raises(ApplicationArchiveError, match="replay evidence differs"):
+        resumed._add("browser.prefill_snapshot", b'{"changed":true}', "application/json")
+    assert resumed.attempt._events() == original
+
+
+@pytest.mark.parametrize("extra", [None, "artifact", "navigation"])
+def test_review_only_new_admission_requires_exact_queue_base(tmp_path, extra):
+    recorder = _queue_base_recorder(tmp_path)
+    if extra == "artifact":
+        recorder._add("vacancy.assessment", b"{}", "application/json")
+    elif extra == "navigation":
+        recorder._record_evidence("navigation", result="completed", details={"method": "GET"})
+    original = recorder.attempt._events()
+    if extra is None:
+        recorder.begin_review_only()
+        assert len(recorder.attempt._events()) == len(original) + 1
+    else:
+        with pytest.raises(ApplicationArchiveError, match="queue-created base"):
+            recorder.begin_review_only()
+        assert recorder.attempt._events() == original
+
+
+def test_review_only_cannot_convert_resumed_pristine_live_base(tmp_path):
+    recorder = _queue_base_recorder(tmp_path)
+    original = recorder.attempt._events()
+    with pytest.raises(ApplicationArchiveError, match="no review-only intent"):
+        _resume_review_recorder(recorder).begin_review_only()
+    assert recorder.attempt._events() == original
+
+
+@pytest.mark.parametrize("invalid", ["mismatch", "duplicate"])
+def test_review_only_resume_refuses_invalid_intent(tmp_path, invalid):
+    recorder = _queue_base_recorder(tmp_path)
+    if invalid == "mismatch":
+        recorder._add("review.intent", b'{"mode":"live"}', "application/json")
+    else:
+        recorder.begin_review_only()
+        intent = recorder.attempt._objects(recorder.attempt._events())[-1]
+        recorder._add("review.intent", recorder.attempt.read_artifact(intent), "application/json")
+    original = recorder.attempt._events()
+    with pytest.raises(ApplicationArchiveError, match="intent"):
+        _resume_review_recorder(recorder).begin_review_only()
+    assert recorder.attempt._events() == original
+
+
+@pytest.mark.parametrize("role", ["release.issued", "submission.result", "candidate.gate", "candidate.release_token"])
+def test_review_only_resume_refuses_consequential_archive_artifacts(tmp_path, monkeypatch, role):
+    import career_automation.application_archive as archive_module
+
+    recorder, _ = _review_preparation(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(archive_module, "_review_event_allowed", lambda *args: None)
+        recorder._add(role, b"{}", "application/json")
+    original = recorder.attempt._events()
+    with pytest.raises(ApplicationArchiveError, match="consequential"):
+        _resume_review_recorder(recorder).begin_review_only()
+    assert recorder.attempt._events() == original
+
+
+@pytest.mark.parametrize("kind", ["field_filled", "field_selected", "file_uploaded", "click"])
+def test_review_only_resume_refuses_archived_mutation_events(tmp_path, monkeypatch, kind):
+    import career_automation.application_archive as archive_module
+
+    recorder, _ = _review_preparation(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(archive_module, "_review_event_allowed", lambda *args: None)
+        recorder._record_evidence(kind, result="completed")
+    original = recorder.attempt._events()
+    with pytest.raises(ApplicationArchiveError, match="mutation"):
+        _resume_review_recorder(recorder).begin_review_only()
+    assert recorder.attempt._events() == original
+
+
+@pytest.mark.parametrize("filename", ["terminal-manifest.json", "release-manifest.json", "release-receipt.json", "release-token.json"])
+def test_review_only_resume_refuses_terminal_or_release_files(tmp_path, filename):
+    recorder, _ = _review_preparation(tmp_path)
+    (recorder.attempt.path / filename).write_text("{}")
+    original = recorder.attempt._events()
+    with pytest.raises(ApplicationArchiveError, match="terminal|release"):
+        _resume_review_recorder(recorder).begin_review_only()
+    assert recorder.attempt._events() == original
+
+
+def test_review_only_completed_attempt_cannot_resume(tmp_path):
+    recorder, prepared = _review_preparation(tmp_path)
+    recorder.finalize_review_only(prepared)
+    original = recorder.attempt._events()
+    manifest = (recorder.attempt.path / "terminal-manifest.json").read_bytes()
+    with pytest.raises(ApplicationArchiveError, match="terminal"):
+        _resume_review_recorder(recorder).begin_review_only()
+    assert recorder.attempt._events() == original
+    assert (recorder.attempt.path / "terminal-manifest.json").read_bytes() == manifest
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_review_only_semantic_review_is_not_repeated_on_recovery(tmp_path, interrupted):
+    from career_automation.application_sanity_review import package_from_application
+
+    recorder, prepared = _review_preparation(tmp_path)
+    package = package_from_application(
+        source=prepared.source, artifacts=prepared.artifacts, questions=None,
+        vacancy_requirements=prepared.vacancy_requirements,
+        vacancy_review_material=prepared.vacancy_review_material,
+    )
+    calls = []
+
+    def review():
+        calls.append("review")
+        if interrupted:
+            raise TimeoutError("synthetic interruption")
+        return prepared.sanity_review_receipt
+
+    if interrupted:
+        with pytest.raises(TimeoutError):
+            recorder.review_once(package, review)
+    else:
+        assert recorder.review_once(package, review) == prepared.sanity_review_receipt
+    original = recorder.attempt._events()
+    resumed = _resume_review_recorder(recorder)
+    if interrupted:
+        with pytest.raises(ValueError, match="second review is forbidden"):
+            resumed.review_once(package, review)
+    else:
+        assert resumed.review_once(package, review) == prepared.sanity_review_receipt
+    assert calls == ["review"]
+    assert recorder.attempt._events() == original
+
+
+@pytest.mark.parametrize("kind", ["field_filled", "field_selected", "file_uploaded", "click", "release"])
+def test_review_only_refuses_mutation_events(tmp_path, kind):
+    recorder, _ = _review_preparation(tmp_path)
+    with pytest.raises(ApplicationArchiveError, match="mutation"):
+        recorder._record_evidence(kind, result="completed")
+
+
+@pytest.mark.parametrize("role", ["release.issued", "release.consumed", "submission.click_intent", "browser.upload_mapping"])
+def test_review_only_refuses_release_and_submit_artifacts(tmp_path, role):
+    recorder, _ = _review_preparation(tmp_path)
+    with pytest.raises(ApplicationArchiveError, match="consequential"):
+        recorder._add(role, b"{}", "application/json")
+
+
+def test_review_only_refuses_post_and_nonzero_counts(tmp_path):
+    recorder, _ = _review_preparation(tmp_path)
+    with pytest.raises(ApplicationArchiveError, match="GET"):
+        recorder._record_evidence("request", result="observed", details={"method": "POST"})
+    with pytest.raises(ApplicationArchiveError, match="zero"):
+        recorder._record_evidence("terminal", result="completed", details={"interaction_counts": {"submit_clicks": 1}})
+
+
+def test_review_only_requires_all_evidence_and_rejects_pdf_substitution(tmp_path):
+    recorder, prepared = _review_preparation(tmp_path)
+    recorder._record_evidence("terminal", result="completed")
+    with pytest.raises(ApplicationArchiveError, match="missing roles"):
+        recorder.attempt.finalize_terminal(outcome="review_only", selected=recorder._selected())
+    recorder, prepared = _review_preparation(tmp_path / "substitution")
+    prepared.artifacts.cv_pdf.pdf_bytes = prepared.artifacts.cover_letter_pdf.pdf_bytes
+    with pytest.raises(ValueError, match="sanity-review"):
+        recorder.finalize_review_only(prepared)
+
+
+@pytest.mark.parametrize("missing", sorted(REVIEW_REQUIRED_ROLES))
+def test_review_only_rejects_each_missing_required_member(tmp_path, monkeypatch, missing):
+    recorder, prepared = _review_preparation(tmp_path)
+    finalize = recorder.attempt.finalize_terminal
+
+    def omit_member(*, outcome, selected, finalized_at):
+        return finalize(outcome=outcome, selected={role: digest for role, digest in selected.items() if role != missing}, finalized_at=finalized_at)
+
+    monkeypatch.setattr(recorder.attempt, "finalize_terminal", omit_member)
+    with pytest.raises(ApplicationArchiveError, match="missing roles"):
+        recorder.finalize_review_only(prepared)
+    assert not (recorder.attempt.path / "terminal-manifest.json").exists()
+
+
+def test_review_only_rejects_post_in_passive_forensics(tmp_path):
+    recorder, prepared = _review_preparation(tmp_path, forensic_method="POST")
+    with pytest.raises(ApplicationArchiveError, match="must use GET"):
+        recorder.finalize_review_only(prepared)
+    assert not (recorder.attempt.path / "terminal-manifest.json").exists()
 
 
 def _sha(value: bytes) -> str:
@@ -907,3 +1202,90 @@ def test_export_is_create_only(tmp_path: Path) -> None:
             destination=destination,
         )
     assert marker.read_text() == "keep"
+
+
+def test_private_evidence_event_is_ordered_recoverable_and_redacted_from_view(
+    tmp_path: Path,
+) -> None:
+    from career_automation.application_archive import (
+        load_complete_attempt_view,
+        render_complete_attempt_view,
+    )
+
+    repository, root = _roots(tmp_path)
+    archive = ApplicationArchive(root, repository_root=repository)
+    attempt = archive.create_attempt(_vacancy(), attempt_id=ATTEMPT_ID)
+    kwargs = {
+        "event_id": "field.email.0001",
+        "event_kind": "field_filled",
+        "occurred_at": "2026-08-05T22:00:00Z",
+        "result": "completed",
+        "details": {
+            "field_id": "email",
+            "field_type": "email",
+            "required": True,
+            "options": [],
+            "provenance": "synthetic-test-profile",
+        },
+        "private_value": b"synthetic@example.test",
+        "private_media_type": "text/plain",
+    }
+    first = attempt.record_evidence_event(**kwargs)
+    second = attempt.record_evidence_event(**kwargs)
+    assert first == second
+    private_objects = [
+        row
+        for row in attempt._objects(attempt._events())
+        if row.role == "evidence.private.field.email.0001"
+    ]
+    assert len(private_objects) == 1
+    private_path = archive.root / private_objects[0].relative_path
+    assert private_path.stat().st_mode & 0o777 == 0o600
+    view = load_complete_attempt_view(
+        ATTEMPT_ID, root=archive.root, repository_root=repository
+    )
+    rendered = render_complete_attempt_view(
+        ATTEMPT_ID, root=archive.root, repository_root=repository
+    )
+    assert view["evidence_events"][0]["payload"]["member_sha256s"]
+    assert "synthetic@example.test" not in json.dumps(view)
+    assert "synthetic@example.test" not in rendered
+    with pytest.raises(ApplicationArchiveError, match="replay differs"):
+        attempt.record_evidence_event(**{**kwargs, "result": "failed"})
+
+
+def test_private_evidence_event_rejects_secret_bytes(tmp_path: Path) -> None:
+    repository, root = _roots(tmp_path)
+    attempt = ApplicationArchive(root, repository_root=repository).create_attempt(
+        _vacancy(), attempt_id=ATTEMPT_ID
+    )
+    with pytest.raises(ApplicationArchiveError, match="secret-like"):
+        attempt.record_evidence_event(
+            event_id="field.password.0001",
+            event_kind="field_filled",
+            occurred_at="2026-08-05T22:00:00Z",
+            result="refused",
+            private_value=b"Authorization: Bearer secret-secret",
+            private_media_type="text/plain",
+        )
+
+
+def test_exact_artifact_read_survives_reopen_and_refuses_substitution(tmp_path):
+    from dataclasses import replace
+
+    repository, root = _roots(tmp_path)
+    archive = ApplicationArchive(root, repository_root=repository)
+    attempt = archive.create_attempt(_vacancy(), attempt_id=ATTEMPT_ID)
+    original = attempt.add_artifact("vacancy.visible_listing_capture", b"original", media_type="text/plain")
+    attempt.add_artifact("vacancy.visible_listing_capture", b"newer", media_type="text/plain")
+    reopened = archive.open_attempt(ATTEMPT_ID)
+    assert reopened.read_artifact(original) == b"original"
+    for changed in (replace(original, role="vacancy.capture"), replace(original, lineage=("a" * 64,)), replace(original, event_sha256="b" * 64)):
+        with pytest.raises(ApplicationArchiveError, match="recorded event"):
+            reopened.read_artifact(changed)
+    other = archive.create_attempt(_vacancy("other"))
+    with pytest.raises(ApplicationArchiveError, match="recorded event"):
+        other.read_artifact(original)
+    (root / original.relative_path).write_bytes(b"tampered")
+    with pytest.raises(ApplicationArchiveError, match="bytes differ"):
+        reopened.read_artifact(original)

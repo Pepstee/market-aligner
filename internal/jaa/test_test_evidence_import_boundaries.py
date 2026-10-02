@@ -20,7 +20,9 @@ GENERATOR = PROJECT_ROOT / "scripts" / "generate-test-evidence.py"
 
 
 def _generator_module():
-    spec = importlib.util.spec_from_file_location("import_boundary_generator", GENERATOR)
+    spec = importlib.util.spec_from_file_location(
+        "import_boundary_generator", GENERATOR
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -38,24 +40,38 @@ def _write_isolated_checkout(root: Path) -> None:
     (root / "skeleton").mkdir()
     (root / "skeleton" / "__init__.py").write_text("LOCAL = True\n", encoding="utf-8")
     requirements = []
-    for raw in (PROJECT_ROOT / "requirements-test.lock").read_text(encoding="utf-8").splitlines():
+    for raw in (
+        (PROJECT_ROOT / "requirements-test.lock")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ):
         line = raw.strip()
         if line and not line.startswith("#"):
             distribution = line.split("==", 1)[0]
-            requirements.append(f"{distribution}=={importlib.metadata.version(distribution)}")
-    (root / "requirements-test.lock").write_text("\n".join(requirements) + "\n", encoding="utf-8")
+            requirements.append(
+                f"{distribution}=={importlib.metadata.version(distribution)}"
+            )
+    (root / "requirements-test.lock").write_text(
+        "\n".join(requirements) + "\n", encoding="utf-8"
+    )
     (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
     (root / "pytest.py").write_text(
-        "import sys\n"
-        "print('==== 2 passed in 0.01s ====')\n"
-        "raise SystemExit(0)\n",
+        "import sys\nprint('==== 2 passed in 0.01s ====')\nraise SystemExit(0)\n",
         encoding="utf-8",
     )
     subprocess.run(("git", "init", "-q"), cwd=root, check=True)
     subprocess.run(("git", "add", "."), cwd=root, check=True)
     subprocess.run(
-        ("git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
-         "commit", "-qm", "isolated checkout"),
+        (
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "isolated checkout",
+        ),
         cwd=root,
         check=True,
     )
@@ -75,14 +91,16 @@ def test_isolated_checkout_prefers_its_root_over_conflicting_activated_editable_
 
     foreign = tmp_path / "foreign-editable"
     (foreign / "skeleton").mkdir(parents=True)
-    (foreign / "skeleton" / "__init__.py").write_text("LOCAL = False\n", encoding="utf-8")
+    (foreign / "skeleton" / "__init__.py").write_text(
+        "LOCAL = False\n", encoding="utf-8"
+    )
     (foreign / "pyproject.toml").write_text(
         "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
         "[project]\nname = 'conflicting-skeleton-editable'\nversion = '1.0'\n",
         encoding="utf-8",
     )
     venv = tmp_path / "activated-locked-cpython312"
-    subprocess.run((sys.executable, "-m", "venv", "--system-site-packages", str(venv)), check=True)
+    subprocess.run((sys.executable, "-m", "venv", str(venv)), check=True)
     python = _venv_python(venv)
     build_requirements = tomllib.loads(
         (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -104,7 +122,16 @@ def test_isolated_checkout_prefers_its_root_over_conflicting_activated_editable_
         text=True,
     )
     subprocess.run(
-        (str(python), "-m", "pip", "install", "--no-build-isolation", "--no-deps", "--editable", str(foreign)),
+        (
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-build-isolation",
+            "--no-deps",
+            "--editable",
+            str(foreign),
+        ),
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -123,7 +150,9 @@ def test_isolated_checkout_prefers_its_root_over_conflicting_activated_editable_
         text=True,
         stdout=subprocess.PIPE,
     )
-    assert Path(foreign_import.stdout.strip()).resolve().is_relative_to(foreign.resolve())
+    assert (
+        Path(foreign_import.stdout.strip()).resolve().is_relative_to(foreign.resolve())
+    )
 
     completed = subprocess.run(
         (str(python), str(checkout / "scripts" / GENERATOR.name)),
@@ -135,18 +164,30 @@ def test_isolated_checkout_prefers_its_root_over_conflicting_activated_editable_
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    receipt = json.loads((checkout / completed.stdout.strip()).read_text(encoding="utf-8"))
+    receipt = json.loads(
+        (checkout / completed.stdout.strip()).read_text(encoding="utf-8")
+    )
     rendered = json.dumps(receipt, sort_keys=True)
     assert receipt["suites"] == [
-        {"name": "complete", "argv": ["python", "-m", "pytest", "-q"],
-         "counts": {"collected": 2, "passed": 2, "skipped": 0, "failed": 0}},
-        {"name": "career_automation", "argv": ["python", "-m", "pytest", "-q", "career_automation"],
-         "counts": {"collected": 2, "passed": 2, "skipped": 0, "failed": 0},
-         "historical_baseline_passed": 65},
+        {
+            "name": "complete",
+            "argv": ["python", "-m", "pytest", "-q"],
+            "counts": {"collected": 2, "passed": 2, "skipped": 0, "failed": 0},
+        },
+        {
+            "name": "career_automation",
+            "argv": ["python", "-m", "pytest", "-q", "career_automation"],
+            "counts": {"collected": 2, "passed": 2, "skipped": 0, "failed": 0},
+            "historical_baseline_passed": 65,
+        },
     ]
     assert str(tmp_path) not in rendered
     assert str(python) not in rendered
-    assert all(not Path(arg).is_absolute() for suite in receipt["suites"] for arg in suite["argv"])
+    assert all(
+        not Path(arg).is_absolute()
+        for suite in receipt["suites"]
+        for arg in suite["argv"]
+    )
 
 
 def test_public_generator_refuses_an_apparent_local_source_symlink_escape_before_receipt(
@@ -161,7 +202,9 @@ def test_public_generator_refuses_an_apparent_local_source_symlink_escape_before
     external_source.parent.mkdir()
     external_source.write_text("ESCAPED = True\n", encoding="utf-8")
     local_source = checkout / "skeleton" / "__init__.py"
-    subprocess.run(("git", "rm", "--cached", "skeleton/__init__.py"), cwd=checkout, check=True)
+    subprocess.run(
+        ("git", "rm", "--cached", "skeleton/__init__.py"), cwd=checkout, check=True
+    )
     (checkout / ".gitignore").write_text(
         ".venv/\nskeleton/__init__.py\n", encoding="utf-8"
     )
@@ -170,8 +213,14 @@ def test_public_generator_refuses_an_apparent_local_source_symlink_escape_before
     subprocess.run(("git", "add", ".gitignore"), cwd=checkout, check=True)
     subprocess.run(
         (
-            "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
-            "commit", "-qm", "ignore local skeleton source",
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "ignore local skeleton source",
         ),
         cwd=checkout,
         check=True,
@@ -190,7 +239,10 @@ def test_public_generator_refuses_an_apparent_local_source_symlink_escape_before
     )
 
     assert completed.returncode != 0
-    assert "local project import 'skeleton' does not resolve to this repository" in completed.stderr
+    assert (
+        "local project import 'skeleton' does not resolve to this repository"
+        in completed.stderr
+    )
     assert not (checkout / "runtime_evidence" / "pytest").exists()
 
 
@@ -208,7 +260,9 @@ def test_local_source_file_rejects_a_root_first_module_resolving_outside_root(
     (package / "__init__.py").symlink_to(target)
     monkeypatch.setattr(VERIFIER, "ROOT", root)
 
-    with pytest.raises(VERIFIER.EvidenceError, match="does not resolve to this repository"):
+    with pytest.raises(
+        VERIFIER.EvidenceError, match="does not resolve to this repository"
+    ):
         VERIFIER.local_source_file("skeleton")
 
 
@@ -223,5 +277,7 @@ def test_local_source_file_still_accepts_normal_source_and_rejects_missing_modul
     monkeypatch.setattr(VERIFIER, "ROOT", root)
 
     assert VERIFIER.local_source_file("skeleton") == source.resolve()
-    with pytest.raises(VERIFIER.EvidenceError, match="does not resolve to this repository"):
+    with pytest.raises(
+        VERIFIER.EvidenceError, match="does not resolve to this repository"
+    ):
         VERIFIER.local_source_file("missing_local_module")

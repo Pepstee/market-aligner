@@ -69,8 +69,9 @@ def get_client() -> LLMClient:
 # --------------------------------------------------------------------------- #
 def extract_job(
     raw: dict[str, Any],
-    profile: Optional[dict[str, Any]] = None,
+    profile: Optional[dict[str, Any] | LLMClient] = None,
     client: Optional[LLMClient] = None,
+    *, mode: str = "evidence",
 ) -> dict[str, Any]:
     """Extract a structured job row from a raw posting (JobRow-shaped subset).
 
@@ -78,10 +79,18 @@ def extract_job(
     Returns the job_extract-schema fields; provenance & dedup_key are added by
     the caller (the scraper) which owns those.
     """
+    if isinstance(profile, LLMClient):
+        if client is not None:
+            raise TypeError("extract_job received a client twice")
+        client, profile = profile, None
     client = client or _client
-    prompt = load_prompt("extract_job")
-    schema = load_schema("job_extract")
-    payload: dict[str, Any] = {"raw_posting": raw}
+    if mode not in {"evidence", "creative"}:
+        raise ValueError("extraction mode must be evidence or creative")
+    prefix = "creative_" if mode == "creative" else ""
+    prompt = load_prompt(prefix + "extract_job")
+    schema = load_schema(prefix + "job_extract")
+    payload: dict[str, Any] = ({**raw, "_scoring_mode": "creative"}
+                               if mode == "creative" else {"raw_posting": raw})
     if profile:
         payload["candidate_dossier"] = profile
     user = prompt.render_user(json.dumps(payload, ensure_ascii=False, sort_keys=True))
@@ -95,6 +104,7 @@ def rate_axes(
     job: dict[str, Any],
     profile: Optional[dict[str, Any]] = None,
     client: Optional[LLMClient] = None,
+    *, mode: str = "evidence",
 ) -> dict[str, Any]:
     """Rate one posting on the seven 0-10 axes (axis_ratings schema).
 
@@ -102,9 +112,14 @@ def rate_axes(
     priors) that nudges relevance. The deterministic scoring stays in the skeleton.
     """
     client = client or _client
-    prompt = load_prompt("rate_axes")
-    schema = load_schema("axis_ratings")
+    if mode not in {"evidence", "creative"}:
+        raise ValueError("rating mode must be evidence or creative")
+    prefix = "creative_" if mode == "creative" else ""
+    prompt = load_prompt(prefix + "rate_axes")
+    schema = load_schema(prefix + "axis_ratings")
     payload = {"job": job, "profile": profile or {}}
+    if mode == "creative":
+        payload["_scoring_mode"] = "creative"
     user = prompt.render_user(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return client.complete_json(prompt.system, user, schema=schema, task="rate_axes")
 
@@ -115,6 +130,7 @@ def rate_axes(
 def assess_portfolio(
     items: list[dict[str, Any]],
     client: Optional[LLMClient] = None,
+    *, mode: str = "evidence",
 ) -> dict[str, Any]:
     """Rough read of candidate portfolio items → per-field evidence (profiler-facing).
 
@@ -122,9 +138,15 @@ def assess_portfolio(
     whole profiler/data tree (privacy rule).
     """
     client = client or _client
-    prompt = load_prompt("assess_portfolio")
-    schema = load_schema("portfolio_assess")
-    user = prompt.render_user(json.dumps({"items": items}, ensure_ascii=False, sort_keys=True))
+    if mode not in {"evidence", "creative"}:
+        raise ValueError("portfolio mode must be evidence or creative")
+    prefix = "creative_" if mode == "creative" else ""
+    prompt = load_prompt(prefix + "assess_portfolio")
+    schema = load_schema(prefix + "portfolio_assess")
+    payload = {"items": items}
+    if mode == "creative":
+        payload["_scoring_mode"] = "creative"
+    user = prompt.render_user(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return client.complete_json(prompt.system, user, schema=schema, task="assess_portfolio")
 
 
@@ -222,6 +244,36 @@ def _log_merge(term: str, canonical: str, confidence: float, approved: bool) -> 
 # These make capabilities reproducible in tests with NO API key. They are pure
 # functions of the input payload and produce schema-valid output.
 # =========================================================================== #
+_CREATIVE_SKILL_HINTS = {
+    "blender": ["blender", "블렌더"],
+    "unreal": ["unreal", "ue5", "ue4", "언리얼"],
+    "unity": ["unity", "유니티"],
+    "rhino": ["rhino", "라이노"],
+    "figma": ["figma", "피그마"],
+    "cinema4d": ["cinema 4d", "c4d", "시네마4d"],
+    "maya": ["maya", "마야"],
+    "photoshop": ["photoshop", "포토샵"],
+    "autocad": ["autocad", "오토캐드", "cad"],
+    "touchdesigner": ["touchdesigner", "터치디자이너"],
+}
+
+_CREATIVE_CAREER_HINTS = [
+    ("Spatial_VMD", ["vmd", "visual merchand", "비주얼머천다이징", "머천다이징"]),
+    ("Exhibition", ["exhibition", "전시", "booth", "부스"]),
+    ("Brand_Space", ["brand space", "브랜드공간", "flagship", "pop-up", "팝업"]),
+    ("ArchViz", ["archviz", "architectural vis", "건축시각화"]),
+    ("XR_Spatial", ["xr", "ar/vr", " vr ", "증강현실", "가상현실"]),
+    ("Technical_Artist", ["technical artist", "테크니컬아티스트", "shader", "pipeline"]),
+    ("Environment_Art", ["environment art", "환경아트", "level art"]),
+    ("Motion_Graphic", ["motion", "모션그래픽", "after effects", "애프터이펙트"]),
+    ("UX_UI", ["ux", "ui", "product design", "제품 디자인", "인터랙션"]),
+    ("3D_Generalist", ["3d generalist", "3d artist", "3d 아티스트", "modeling", "3d 모델"]),
+]
+
+_CREATIVE_ENTRY_TOKENS = ("신입", "경력무관", "인턴", "intern", "entry")
+
+_CREATIVE_SENIOR_TOKENS = ("경력", "senior", "시니어", "lead")
+
 _SKILL_HINTS = {
     "python": ["python"],
     "aws": ["aws", "amazon web services", "lambda"],
@@ -285,6 +337,66 @@ def _text_of(payload: dict[str, Any]) -> str:
 
 
 def _mock_extract_job(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("_scoring_mode") == "creative":
+        raw = payload.get("raw_json") or payload
+        text = _text_of(payload)
+
+        title = ""
+        company = ""
+        if isinstance(raw, dict):
+            title = str(raw.get("title") or raw.get("job_title") or raw.get("position") or "")
+            company = str(raw.get("company") or raw.get("company_name") or raw.get("employer") or "")
+
+        mapped = "other"
+        for career, hints in _CREATIVE_CAREER_HINTS:
+            if any(h in text for h in hints):
+                mapped = career
+                break
+
+        entry: Optional[bool]
+        if any(tok in text for tok in _CREATIVE_ENTRY_TOKENS):
+            entry = True
+        elif any(tok in text for tok in _CREATIVE_SENIOR_TOKENS):
+            entry = False
+        else:
+            entry = None
+
+        software = sorted(
+            cid for cid, hints in _CREATIVE_SKILL_HINTS.items() if any(h in text for h in hints)
+        )
+
+        # Lifestyle signals — deterministic keyword read (the real model judges duties).
+        remote: Optional[bool]
+        if any(tok in text for tok in _REMOTE_TOKENS):
+            remote = True
+        elif any(tok in text for tok in _OFFICE_ONLY_TOKENS):
+            remote = False
+        else:
+            remote = None
+        site_hits = sum(1 for tok in _SITE_TOKENS if tok in text)
+        site: Optional[float] = None if site_hits == 0 else float(min(10, 2 + 2 * site_hits))
+
+        fit = (
+            f"Maps to {mapped}; "
+            + ("entry-level friendly" if entry else "experience expected" if entry is False else "seniority unclear")
+            + "."
+        )
+        # Confidence: high when we found a title and a concrete career, lower otherwise.
+        conf = 0.9 if (title and mapped != "other") else 0.6 if title else 0.4
+
+        return {
+            "job_title": title,
+            "company": company,
+            "mapped_career": mapped,
+            "entry_level": entry,
+            "required_software": software,
+            "remote_flag": remote,
+            "site_intensity": site,
+            "why_it_fits": fit,
+            "skills_to_learn": software,
+            "extraction_confidence": conf,
+        }
+
     posting = payload.get("raw_posting") or payload
     raw = posting.get("raw_json") or posting
     text = _text_of(posting)
@@ -393,6 +505,39 @@ def _mock_extract_job(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mock_rate_axes(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("_scoring_mode") == "creative":
+        job = payload.get("job", {}) if isinstance(payload, dict) else {}
+        career = str(job.get("mapped_career", "other"))
+        software = [str(s).lower() for s in (job.get("required_software") or [])]
+        entry = job.get("entry_level")
+
+        # Deterministic per-career baselines (integers, 0-10). Not calibrated — this
+        # is a mock stand-in; the real model replaces these.
+        base = {
+            "UX_UI":            dict(visualization=6, spatial_relevance=2, cs_usefulness=6, english_usefulness=7, freelance_potential=6, market_demand=9, barrier_to_entry=4),
+            "Spatial_VMD":      dict(visualization=7, spatial_relevance=9, cs_usefulness=2, english_usefulness=4, freelance_potential=5, market_demand=6, barrier_to_entry=4),
+            "Exhibition":       dict(visualization=7, spatial_relevance=9, cs_usefulness=3, english_usefulness=4, freelance_potential=6, market_demand=5, barrier_to_entry=5),
+            "Brand_Space":      dict(visualization=8, spatial_relevance=8, cs_usefulness=3, english_usefulness=5, freelance_potential=6, market_demand=6, barrier_to_entry=5),
+            "ArchViz":          dict(visualization=9, spatial_relevance=7, cs_usefulness=4, english_usefulness=5, freelance_potential=8, market_demand=6, barrier_to_entry=6),
+            "3D_Generalist":    dict(visualization=8, spatial_relevance=5, cs_usefulness=5, english_usefulness=6, freelance_potential=7, market_demand=6, barrier_to_entry=6),
+            "Environment_Art":  dict(visualization=9, spatial_relevance=6, cs_usefulness=5, english_usefulness=6, freelance_potential=6, market_demand=6, barrier_to_entry=7),
+            "XR_Spatial":       dict(visualization=8, spatial_relevance=8, cs_usefulness=7, english_usefulness=7, freelance_potential=6, market_demand=6, barrier_to_entry=7),
+            "Technical_Artist": dict(visualization=6, spatial_relevance=5, cs_usefulness=9, english_usefulness=7, freelance_potential=5, market_demand=6, barrier_to_entry=8),
+            "Motion_Graphic":   dict(visualization=9, spatial_relevance=2, cs_usefulness=4, english_usefulness=6, freelance_potential=8, market_demand=7, barrier_to_entry=4),
+            "other":            dict(visualization=5, spatial_relevance=5, cs_usefulness=5, english_usefulness=5, freelance_potential=5, market_demand=5, barrier_to_entry=5),
+        }
+        axes = dict(base.get(career, base["other"]))
+
+        # Small deterministic nudges from concrete signals.
+        if any(s in ("unreal", "unity", "touchdesigner") for s in software):
+            axes["cs_usefulness"] = min(10, axes["cs_usefulness"] + 1)
+        if entry is True:
+            axes["barrier_to_entry"] = max(0, axes["barrier_to_entry"] - 1)
+        elif entry is False:
+            axes["barrier_to_entry"] = min(10, axes["barrier_to_entry"] + 1)
+
+        return {k: float(v) for k, v in axes.items()}
+
     job = payload.get("job", {}) if isinstance(payload, dict) else {}
     career = str(job.get("mapped_career", "other"))
     entry = job.get("entry_level")
@@ -427,9 +572,12 @@ def _mock_assess_portfolio(payload: dict[str, Any]) -> dict[str, Any]:
     items = payload.get("items", []) if isinstance(payload, dict) else []
     text = _text_of({"items": items})
 
+    creative = payload.get("_scoring_mode") == "creative"
+    career_hints = _CREATIVE_CAREER_HINTS if creative else _CAREER_HINTS
+    skill_hints = _CREATIVE_SKILL_HINTS if creative else _SKILL_HINTS
     per_field: list[dict[str, Any]] = []
     detected: set[str] = set()
-    for career, hints in _CAREER_HINTS:
+    for career, hints in career_hints:
         hits = sum(1 for h in hints if h in text)
         if hits:
             per_field.append(
@@ -439,7 +587,7 @@ def _mock_assess_portfolio(payload: dict[str, Any]) -> dict[str, Any]:
                     "note": f"Portfolio text references {career.replace('_', ' ')} work.",
                 }
             )
-    for cid, hints in _SKILL_HINTS.items():
+    for cid, hints in skill_hints.items():
         if any(h in text for h in hints):
             detected.add(cid)
 

@@ -7,6 +7,7 @@ Person-specific paths, defaults, instructions, and career taxonomies are exclude
 from __future__ import annotations
 
 import re
+import math
 import uuid
 import hashlib
 import json
@@ -37,20 +38,21 @@ def new_profile_id() -> str:
 
 
 def validate_profile_id(profile_id: str) -> str:
-    value = str(profile_id).strip()
-    if not PROFILE_ID_PATTERN.fullmatch(value):
+    if not isinstance(profile_id, str) or not PROFILE_ID_PATTERN.fullmatch(profile_id):
         raise ValueError("profile_id must be opaque and match prf_<32 lowercase hex characters>")
-    return value
+    return profile_id
 
 
 def _number(value: Any, low: float, high: float, label: str) -> float:
-    try:
-        result = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{label} must be numeric") from exc
-    if not low <= result <= high:
-        raise ValueError(f"{label} must be in [{low}, {high}], got {result}")
-    return result
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        raise ValueError(f"{label} must be a finite JSON number")
+    if not low <= value <= high:
+        raise ValueError(f"{label} must be in [{low}, {high}], got {value}")
+    return float(value)
 
 
 def assert_secret_free(value: Any, path: str = "root") -> None:

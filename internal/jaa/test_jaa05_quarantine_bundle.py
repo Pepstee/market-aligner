@@ -1,4 +1,5 @@
 """Package 019 combined failed-cycle quarantine controls."""
+
 from __future__ import annotations
 
 import copy
@@ -28,16 +29,17 @@ from career_automation.official_cohort import (
     build,
 )
 from skeleton.configuration import load_config
+from testing_repository import historical_path, operator_control_path
 
 
 ROOT = Path(__file__).resolve().parent
-CONTROL = Path(
-    "/home/gutua/software-factory/.control/resumed-dual-lane-20260728/"
-    "jaa/jaa05-next-cycle"
-)
-SEALED_EVIDENCE = Path(
-    "/home/gutua/software-factory/.control/resumed-dual-lane-20260728/"
-    "jaa/runtime/fresh-jaa05-holdout-v1-0c90c73/capture-evidence.json"
+CONTROL = operator_control_path("resumed-dual-lane-20260728", "jaa", "jaa05-next-cycle")
+SEALED_EVIDENCE = operator_control_path(
+    "resumed-dual-lane-20260728",
+    "jaa",
+    "runtime",
+    "fresh-jaa05-holdout-v1-0c90c73",
+    "capture-evidence.json",
 )
 OLD = CONTROL / "failed-holdout-quarantine-index.json"
 ACQUISITION = CONTROL / "failed-cycle-acquisition-quarantine-index.json"
@@ -104,16 +106,11 @@ def test_trace_overlap_cross_checks_match_the_terminal_failure() -> None:
     old = load_quarantine_index(OLD, OLD_SHA)
     selected = [row for row in trace if row["disposition"] == "selected"]
     previously_quarantined = [
-        row for row in trace
-        if row["disposition"] == "quarantined_job_key"
+        row for row in trace if row["disposition"] == "quarantined_job_key"
     ]
     assert not old.job_keys.intersection(row["job_key"] for row in selected)
-    assert not old.payload_hashes.intersection(
-        row["payload_hash"] for row in selected
-    )
-    assert {
-        row["job_key"] for row in previously_quarantined
-    }.issubset(old.job_keys)
+    assert not old.payload_hashes.intersection(row["payload_hash"] for row in selected)
+    assert {row["job_key"] for row in previously_quarantined}.issubset(old.job_keys)
 
 
 def test_builder_is_byte_deterministic_and_uses_all_trace_rows(
@@ -301,7 +298,13 @@ def test_legacy_cli_flags_are_rejected_before_acquisition(tmp_path: Path) -> Non
     assert "unrecognized arguments" in result.stderr
 
 
-def test_proposal_only_config_fails_before_journal_or_access(tmp_path: Path) -> None:
+def test_proposal_only_config_fails_before_journal_or_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import skeleton.configuration as configuration
+
+    monkeypatch.setattr(configuration, "Path", type(historical_path("/")))
     controller = SimpleNamespace(
         policy=SimpleNamespace(policy_sha256="1" * 64),
     )
@@ -317,10 +320,15 @@ def test_proposal_only_config_fails_before_journal_or_access(tmp_path: Path) -> 
     assert not (tmp_path / "request-journal.jsonl").exists()
 
 
-def test_config_v4_mechanically_exhausts_preserved_metadata_without_claiming_supply() -> None:
+def test_config_v4_mechanically_exhausts_preserved_metadata_without_claiming_supply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import skeleton.configuration as configuration
+
+    monkeypatch.setattr(configuration, "Path", type(historical_path("/")))
     proposal = yaml.safe_load(V4.read_text())
     resolved_v3 = load_config(
-        Path(
+        historical_path(
             "/home/gutua/software-factory/.control/"
             "jaa-12h-supervisor-20260727/runtime/"
             "ats-search-index-discovery-recovery-v1/"
@@ -328,16 +336,14 @@ def test_config_v4_mechanically_exhausts_preserved_metadata_without_claiming_sup
         )
     )
     metadata = json.loads(
-        Path(
+        historical_path(
             "/home/gutua/software-factory/.control/"
             "jaa-12h-supervisor-20260727/runtime/"
             "ats-search-index-discovery-recovery-v1/result.json"
         ).read_text()
     )["proposal_only_unactivated"]
     absent = {
-        provider: sorted(
-            set(tenants) - set(resolved_v3[provider]["companies"])
-        )
+        provider: sorted(set(tenants) - set(resolved_v3[provider]["companies"]))
         for provider, tenants in metadata.items()
     }
     assert absent == {"greenhouse": [], "lever": []}
@@ -350,18 +356,22 @@ def test_config_v4_mechanically_exhausts_preserved_metadata_without_claiming_sup
         (CONTROL / "config-v4-offline-capacity-report.json").read_text()
     )
     assert report["capacity"]["new_tenant_headroom_from_preserved_metadata"] == 0
-    assert report["capacity"]["offline_capacity_sufficient_for_another_live_gate"] is False
+    assert (
+        report["capacity"]["offline_capacity_sufficient_for_another_live_gate"] is False
+    )
     assert report["proves_live_availability"] is False
 
 
 def test_package019_tenants_cannot_bypass_exact_host_terms_authority() -> None:
     active = {
         "package_019_supply_derivation": {
-            "executable_tenants_added": [{
-                "provider": "personio",
-                "tenant": "unreviewed",
-                "api_host": "unreviewed.jobs.personio.test",
-            }],
+            "executable_tenants_added": [
+                {
+                    "provider": "personio",
+                    "tenant": "unreviewed",
+                    "api_host": "unreviewed.jobs.personio.test",
+                }
+            ],
             "inactive_pending_human_terms_review": [],
         }
     }
@@ -373,9 +383,11 @@ def test_package019_tenants_cannot_bypass_exact_host_terms_authority() -> None:
     inactive = copy.deepcopy(active)
     block = inactive["package_019_supply_derivation"]
     block["executable_tenants_added"] = []
-    block["inactive_pending_human_terms_review"] = [{
-        "api_host": "unreviewed.test",
-        "executable": True,
-    }]
+    block["inactive_pending_human_terms_review"] = [
+        {
+            "api_host": "unreviewed.test",
+            "executable": True,
+        }
+    ]
     with pytest.raises(RuntimeError, match="must remain inactive"):
         _validate_package019_supply_config(inactive, set())

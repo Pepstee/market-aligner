@@ -334,3 +334,141 @@ class ProfileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_retained_profile_revision_is_exact_and_ignores_current_pointer(tmp_path):
+    from dataclasses import asdict, replace
+    import pytest
+
+    store = ProfileStore(tmp_path / "data")
+    old = CandidateProfile(profile_id=new_profile_id(), version="v1", tracks={
+        "synthetic": TrackProfile(0, 0, 0, 0, evidence_ids=(), rationale="Synthetic fixture")
+    })
+    store.save(replace(old, version="v2"), [])
+    directory = store.directory(old.profile_id)
+    key = hashlib.sha256(old.version.encode()).hexdigest()
+    revisions = directory / "revisions"
+    revisions.mkdir(mode=0o700)
+    revision = revisions / key
+    revision.mkdir(mode=0o700)
+    profile_bytes = yaml.safe_dump(asdict(old), sort_keys=False, allow_unicode=True, width=100).encode()
+    evidence_bytes = b""
+    manifest = {
+        "schema_version": "market-aligner.profile-current.v1",
+        "profile_version": old.version, "version_key": key,
+        "profile_sha256": hashlib.sha256(profile_bytes).hexdigest(),
+        "evidence_ledger_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+    }
+    for name, raw in {"profile.yaml": profile_bytes, "evidence.jsonl": evidence_bytes,
+                      "manifest.json": json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()}.items():
+        path = revision / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    (directory / "current.json").write_text("invalid pointer must not be consulted")
+    assert store.load_revision(old.profile_id, old.version) == (old, {})
+    assert store.load(old.profile_id)[0].version == "v2"
+    with pytest.raises(KeyError):
+        store.load_revision(old.profile_id, "missing")
+    path = revision / "profile.yaml"
+    path.write_bytes(profile_bytes.replace(b"version: v1", b"version: v9"))
+    with pytest.raises(ValueError, match="manifest or content differs"):
+        store.load_revision(old.profile_id, old.version)
+    path.unlink()
+    path.symlink_to(directory / "profile.yaml")
+    with pytest.raises((OSError, ValueError)):
+        store.load_revision(old.profile_id, old.version)
+    path.unlink()
+    path.write_bytes(profile_bytes)
+    path.chmod(0o600)
+    assert store.load_revision(old.profile_id, old.version) == (old, {})
+
+    # A retained donor store has only a current pointer plus revisions.
+    for name in ("profile.yaml", "evidence.jsonl", "generation.json"):
+        (directory / name).unlink()
+    pointer = directory / "current.json"
+    pointer.write_bytes((revision / "manifest.json").read_bytes())
+    pointer.chmod(0o600)
+    assert store.list_profile_ids() == [old.profile_id]
+    assert store.load(old.profile_id) == (old, {})
+    changed = {**manifest, "profile_sha256": "0" * 64}
+    pointer.write_text(json.dumps(changed, sort_keys=True, separators=(",", ":")))
+    with pytest.raises(ValueError, match="differs from revision manifest"):
+        store.load(old.profile_id)
+    pointer.write_bytes((revision / "manifest.json").read_bytes())
+    assert store.load(old.profile_id) == (old, {})
+    (directory / "generation.json").write_bytes(b"invalid generation")
+    (directory / "generation.json").chmod(0o600)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        store.load(old.profile_id)
+
+
+def test_revision_format_write_replay_conflict_and_pointer_recovery(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import pytest
+    from market_aligner.profiler.store import ProfileGenerationOutcomeUnknown
+
+    store = ProfileStore(tmp_path / "data")
+    v1 = CandidateProfile(profile_id=new_profile_id(), version="v1", tracks={
+        "synthetic": TrackProfile(0, 0, 0, 0, evidence_ids=(), rationale="Synthetic history")
+    })
+    store.save_revision(v1, [])
+    v2 = replace(v1, version="v2")
+    store.save(v2, [])
+    directory = store.directory(v1.profile_id)
+    def bytes_now():
+        return {str(p.relative_to(directory)): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+    before = bytes_now()
+    store.save(v2, [])
+    assert bytes_now() == before
+    assert store.load(v1.profile_id) == (v2, {})
+    assert store.load_revision(v1.profile_id, "v1") == (v1, {})
+    with pytest.raises(ValueError, match="content does not match"):
+        store.save(replace(v1, unknowns=("Changed bytes for same version",)), [])
+    assert bytes_now() == before
+    v3 = replace(v1, version="v3")
+    def fail_pointer(*args, **kwargs):
+        raise OSError("synthetic failure before pointer rename")
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_rename_temp", fail_pointer)
+        with pytest.raises(ProfileGenerationOutcomeUnknown):
+            store.save(v3, [])
+    assert store.load(v1.profile_id) == (v2, {})
+    assert store.load_revision(v1.profile_id, "v3") == (v3, {})
+    store.save(v3, [])
+    assert store.load(v1.profile_id) == (v3, {})
+    v4 = replace(v1, version="v4")
+    persist = store._persist_revision_leaf
+    def fail_ledger(fd, name, payload):
+        if name == "evidence.jsonl":
+            raise OSError("synthetic partial revision")
+        return persist(fd, name, payload)
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_persist_revision_leaf", fail_ledger)
+        with pytest.raises(OSError):
+            store.save(v4, [])
+    assert store.load(v1.profile_id) == (v3, {})
+    with pytest.raises(KeyError):
+        store.load_revision(v1.profile_id, "v4")
+    store.save(v4, [])
+    assert store.load_revision(v1.profile_id, "v4") == (v4, {})
+    assert store.load(v1.profile_id) == (v4, {})
+    modern = ProfileStore(tmp_path / "modern")
+    modern.save(v1, [])
+    with pytest.raises(ValueError, match="cannot mix"):
+        modern.save_revision(v2, [])
+    assert modern.load(v1.profile_id) == (v1, {})
+
+
+def test_retained_profile_scalar_validation_rejects_coercion() -> None:
+    import pytest
+    from market_aligner.profiler.schema import _number, validate_profile_id
+
+    profile_id = 'prf_' + 'a' * 32
+    assert validate_profile_id(profile_id) == profile_id
+    assert _number(0.5, 0, 1, 'confidence') == 0.5
+    for value in (True, '0.5', None, float('nan'), float('inf')):
+        with pytest.raises(ValueError):
+            _number(value, 0, 1, 'confidence')
+    for value in (' ' + profile_id, profile_id + ' ', None):
+        with pytest.raises(ValueError):
+            validate_profile_id(value)

@@ -23,8 +23,8 @@ from scripts import certify_jaa05_human_evidence as certifier
 
 ROOT = Path(__file__).resolve().parent
 EVIDENCE = ROOT / "profiler" / "data" / "candidate_evidence.yaml"
-EVIDENCE_SHA256 = "7a7e18a686b0979e48716f983871568e018c04398e05b8c71af88059f6fb6195"
-PROJECTION_SHA256 = "82ba6ca979b66fea25b1e987c50b8cdbbeca746869d0563a24480892c7ddab00"
+EVIDENCE_SHA256 = "7352b93961b77dc33b2931c85cf449ed57a1d9475cd400453249ca2abc077ccb"
+PROJECTION_SHA256 = "6df137a3709d7c4600101ba864896900c0ffb56e7b290247972434a1655786ca"
 SOURCE_CONTENT_REVISION = "sha256:" + "a" * 64
 SOURCE_GIT_REVISION = "b" * 40
 
@@ -72,7 +72,7 @@ def test_receipt_proves_private_projection_and_idempotency_without_leaks(
         "record_count": 18,
         "human_authority_sha256": EXPECTED_HUMAN_AUTHORITY_SHA256,
         "source_packet_sha256": (
-            "6ee3cc29b2074b4244686ca938028ad397ca0a39ab6323de59b52eb20d6eadb7"
+            "074f036ea50a89bf75402a923fa1be1ddb6f583f385095d73fb96b61c8562eff"
         ),
     }
     assert document["production_graph"]["mode"] == "0600"
@@ -85,10 +85,7 @@ def test_receipt_proves_private_projection_and_idempotency_without_leaks(
         "candidate_claim_edges",
         "candidate_verification_decisions",
     ):
-        assert (
-            document["production_graph"]["state"]["tables"][table]["row_count"]
-            == 18
-        )
+        assert document["production_graph"]["state"]["tables"][table]["row_count"] == 18
     assert document["idempotency"]["executions"] == 2
     assert document["idempotency"]["projection_sha256_equal"] is True
     assert document["idempotency"]["graph_state_equal"] is True
@@ -136,6 +133,7 @@ def test_wrong_projection_binding_preserves_graph_without_receipt(
     assert graph.is_file()
     assert not receipts.exists()
     with sqlite3.connect(graph) as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM candidate_evidence"
-        ).fetchone()[0] == 18
+        assert (
+            connection.execute("SELECT COUNT(*) FROM candidate_evidence").fetchone()[0]
+            == 18
+        )

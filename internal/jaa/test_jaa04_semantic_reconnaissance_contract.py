@@ -7,7 +7,7 @@ on the frozen corpus or acceptance implementation to validate itself.
 from __future__ import annotations
 
 import hashlib
-from datetime import date
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -88,7 +88,10 @@ def test_markdown_blocks_remain_byte_exact_without_treating_json_as_markdown() -
 
 
 def _dossier(cache: RawResponseCache, *, excerpts: dict[str, str] | None = None) -> dict[str, object]:
-    today = date.today().isoformat()
+    # Match the validator's UTC authority clock. A host-local date can be one
+    # day ahead near midnight and incorrectly turn same-day evidence into a
+    # future publisher timestamp.
+    today = datetime.now(timezone.utc).date().isoformat()
     excerpts = excerpts or RELEVANT
     sources, plan, claims = [], [], []
     for index, kind in enumerate(KINDS):

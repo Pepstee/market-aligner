@@ -17,13 +17,17 @@ from pathlib import Path
 
 import pytest
 
+from testing_repository import clone_jaa_repository
+
 
 ROOT = Path(__file__).resolve().parent
 CERTIFIER = Path("scripts/accept_jaa_03.py")
 LOCKED_SET = Path("career_automation/fixtures/jaa03_vacancies.json")
 LOCKED_METRICS = Path("career_automation/fixtures/jaa03_locked_metrics.json")
 FORMAT = "jaa03-revision-certification/v1"
-LOCKED_SET_AUTHORITY_HASH = "sha256:b1f4b1386903b1f9de437fcccde21872f449f70ea63d374aed4229b87b588d4e"
+LOCKED_SET_AUTHORITY_HASH = (
+    "sha256:b1f4b1386903b1f9de437fcccde21872f449f70ea63d374aed4229b87b588d4e"
+)
 EXPECTED_POLICY = {
     "minimum_confidence_bp": 7_500,
     "minimum_opportunity_bp": 5_500,
@@ -33,34 +37,49 @@ EXPECTED_POLICY = {
 
 def _run(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        (sys.executable, *argv), cwd=root, text=True, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False,
+        (sys.executable, *argv),
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
 
 
 def _git(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ("git", *argv), cwd=root, text=True, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False,
+        ("git", *argv),
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
 
 
 @pytest.fixture(scope="module")
 def repository(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    clone = tmp_path_factory.mktemp("jaa03-repository") / "repository"
-    copied = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    clone = clone_jaa_repository(
+        ROOT,
+        tmp_path_factory.mktemp("jaa03-repository") / "repository",
     )
-    assert copied.returncode == 0, copied.stderr
     assert _git(clone, "config", "user.name", "JAA-03 independent test").returncode == 0
     assert _git(clone, "config", "user.email", "jaa03@example.test").returncode == 0
     shutil.rmtree(clone / "runtime_evidence" / "jaa03", ignore_errors=True)
+    staged = _git(clone, "add", "-A", "--", "runtime_evidence/jaa03")
+    assert staged.returncode == 0, staged.stderr
+    committed = _git(
+        clone, "commit", "-m", "remove checked JAA-03 receipt for certifier test"
+    )
+    assert committed.returncode == 0, committed.stderr
     return clone
 
 
 def _canonical(document: object) -> bytes:
-    return (json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    return (
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode()
 
 
 def _digest(path: Path) -> str:
@@ -68,9 +87,14 @@ def _digest(path: Path) -> str:
 
 
 def _content_hash(document: object) -> str:
-    return "sha256:" + hashlib.sha256(
-        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+    )
 
 
 def _certify(root: Path) -> tuple[Path, dict[str, object]]:
@@ -97,13 +121,19 @@ def _verify_receipt(root: Path, receipt: Path) -> None:
     assert _git(root, "merge-base", "--is-ancestor", origin, "HEAD").returncode == 0
     # This command is intentionally outside the certifier and binds every
     # tracked product byte except generated runtime evidence.
-    source_revision = _run(root, "-c", "from tracked_source_revision import source_content_revision; print(source_content_revision('.'))")
+    source_revision = _run(
+        root,
+        "-c",
+        "from tracked_source_revision import source_content_revision; print(source_content_revision('.'))",
+    )
     assert source_revision.returncode == 0, source_revision.stderr
     assert document["source_content_revision"] == source_revision.stdout.strip()
     assert document["source_content_revision_contract"] == {
-        "algorithm": "sha256", "domain": "jaa-source-content-revision-v2",
+        "algorithm": "sha256",
+        "domain": "jaa-source-content-revision-v2",
         "entry_encoding": "uint64be-length-prefixed-path-mode-content",
-        "scope": "current-tracked-source-tree", "ordering": "repository-relative-path-byte-order",
+        "scope": "current-tracked-source-tree",
+        "ordering": "repository-relative-path-byte-order",
         "exclusions": ["runtime_evidence/"],
     }
     assert document["runtime"] == {
@@ -114,8 +144,14 @@ def _verify_receipt(root: Path, receipt: Path) -> None:
         "locked_set_file_sha256": _digest(root / LOCKED_SET),
         "locked_metrics_file_sha256": _digest(root / LOCKED_METRICS),
     }
-    assert document["configuration"]["locked_set_id"] == "JAA-03-reviewed-historical-calibration-2026-07-20"
-    assert document["configuration"]["decision_rule_version"] == "jaa03.gold-decision-rules.v1"
+    assert (
+        document["configuration"]["locked_set_id"]
+        == "JAA-03-reviewed-historical-calibration-2026-07-20"
+    )
+    assert (
+        document["configuration"]["decision_rule_version"]
+        == "jaa03.gold-decision-rules.v1"
+    )
     assert document["configuration"]["policy"] == EXPECTED_POLICY
     assert document["configuration"]["policy_hash"] == _content_hash(EXPECTED_POLICY)
 
@@ -141,22 +177,33 @@ def _verify_receipt(root: Path, receipt: Path) -> None:
     assert result["locked_set_authority_hash"] == LOCKED_SET_AUTHORITY_HASH
     assert result["metrics_hash"] == _content_hash(metrics["metrics"])
     assert result["negative_controls"] == [
-        "expired", "inaccessible", "ineligible", "implausibly_senior",
-        "low_confidence_extraction", "candidate_fit_and_interest_forbidden",
+        "expired",
+        "inaccessible",
+        "ineligible",
+        "implausibly_senior",
+        "low_confidence_extraction",
+        "candidate_fit_and_interest_forbidden",
         "label_change_with_recomputed_envelope_hash",
     ]
 
 
 def _rehash(envelope: dict[str, object]) -> None:
     records = envelope["records"]
-    envelope["records_hash"] = "sha256:" + hashlib.sha256(
-        json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    envelope["records_hash"] = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                records, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+    )
 
 
 @pytest.mark.parametrize("record_index", range(100))
 def test_every_gold_decision_label_rehash_fails_independent_authority(
-    repository: Path, tmp_path: Path, record_index: int,
+    repository: Path,
+    tmp_path: Path,
+    record_index: int,
 ) -> None:
     """A changed decision cannot be legitimised by rehashing its envelope."""
     envelope = json.loads((repository / LOCKED_SET).read_text(encoding="utf-8"))
@@ -165,18 +212,34 @@ def test_every_gold_decision_label_rehash_fails_independent_authority(
     _rehash(envelope)
     altered = tmp_path / f"decision-{record_index}.json"
     altered.write_bytes(_canonical(envelope))
-    probe = _run(repository, "-c", "from career_automation.opportunity_calibration import load_locked_set; from pathlib import Path; import sys; load_locked_set(Path(sys.argv[1]))", str(altered))
+    probe = _run(
+        repository,
+        "-c",
+        "from career_automation.opportunity_calibration import load_locked_set; from pathlib import Path; import sys; load_locked_set(Path(sys.argv[1]))",
+        str(altered),
+    )
     assert probe.returncode != 0
     assert "authority mismatch" in probe.stderr
 
 
-@pytest.mark.parametrize("attack", ["canonical_input", "rule_identity", "locked_set_identity", "malformed"])
-def test_locked_set_attack_classes_fail_closed(repository: Path, tmp_path: Path, attack: str) -> None:
+@pytest.mark.parametrize(
+    "attack", ["canonical_input", "rule_identity", "locked_set_identity", "malformed"]
+)
+def test_locked_set_attack_classes_fail_closed(
+    repository: Path, tmp_path: Path, attack: str
+) -> None:
     envelope = json.loads((repository / LOCKED_SET).read_text(encoding="utf-8"))
     if attack == "canonical_input":
         row = envelope["records"][0]
         row["vacancy"]["text"] += " attacker-controlled canonical input"
-        row["content_hash"] = "sha256:" + hashlib.sha256(json.dumps(row["vacancy"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        row["content_hash"] = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    row["vacancy"], sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+        )
     elif attack == "rule_identity":
         envelope["decision_rule_version"] = "attacker-rule-v999"
     elif attack == "locked_set_identity":
@@ -186,7 +249,12 @@ def test_locked_set_attack_classes_fail_closed(repository: Path, tmp_path: Path,
     _rehash(envelope)
     altered = tmp_path / f"{attack}.json"
     altered.write_bytes(_canonical(envelope))
-    probe = _run(repository, "-c", "from career_automation.opportunity_calibration import load_locked_set; from pathlib import Path; import sys; load_locked_set(Path(sys.argv[1]))", str(altered))
+    probe = _run(
+        repository,
+        "-c",
+        "from career_automation.opportunity_calibration import load_locked_set; from pathlib import Path; import sys; load_locked_set(Path(sys.argv[1]))",
+        str(altered),
+    )
     assert probe.returncode != 0
     assert any(marker in probe.stderr for marker in ("mismatch", "exactly 100"))
 
@@ -230,10 +298,17 @@ def test_real_certifier_receipt_and_negative_receipt_controls(repository: Path) 
     _verify_receipt(repository, receipt)
     replay = _run(repository, str(CERTIFIER))
     assert replay.returncode == 0, replay.stderr
-    assert json.loads(replay.stdout)["receipt"] == receipt.relative_to(repository).as_posix()
-    assert list((repository / "runtime_evidence" / "jaa03").glob("sha256-*.json")) == [receipt]
+    assert (
+        json.loads(replay.stdout)["receipt"]
+        == receipt.relative_to(repository).as_posix()
+    )
+    assert list((repository / "runtime_evidence" / "jaa03").glob("sha256-*.json")) == [
+        receipt
+    ]
 
-    (repository / "README.md").write_bytes((repository / "README.md").read_bytes() + b"\nrevision replay\n")
+    (repository / "README.md").write_bytes(
+        (repository / "README.md").read_bytes() + b"\nrevision replay\n"
+    )
     assert _git(repository, "add", "README.md").returncode == 0
     assert _git(repository, "commit", "-m", "different revision").returncode == 0
     with pytest.raises(AssertionError):

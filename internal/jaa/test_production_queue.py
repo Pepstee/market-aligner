@@ -26,6 +26,17 @@ ROOT = Path(__file__).resolve().parent
 NOW = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("retry", [False, True])
+def test_review_only_terminal_never_automatically_reenters(retry):
+    candidate = _candidate("10", "0.2")
+    prior = PriorAttempt(candidate.vacancy, "jaa-20260805T120000Z-0123456789abcdef",
+                         "review_only", _digest("review-terminal"))
+    queue = build_ascending_queue((candidate,), prior_attempts=(prior,), as_of=NOW,
+                                  retry_repairable_preclick_blocks=retry)
+    assert queue.next_action is None
+    assert queue.excluded[0].reason == "prior_review_only"
+
+
 def _digest(label: str) -> str:
     return hashlib.sha256(label.encode()).hexdigest()
 
@@ -480,3 +491,25 @@ def test_historical_ashby_identity_is_quarantined_across_company_slug() -> None:
     queue = build_ascending_queue((candidate,), prior_attempts=(prior,), as_of=NOW)
     assert not queue.ready
     assert queue.excluded[0].reason == "prior_blocked"
+
+
+@pytest.mark.parametrize("selection", ["default", "environment", "explicit"])
+def test_queue_cli_archive_selection_uses_existing_archive(tmp_path, monkeypatch, capsys, selection):
+    from career_automation import production_queue as queue
+
+    roots = {name: tmp_path / name for name in ("default", "environment", "explicit")}
+    chosen = roots[selection]
+    archive = ApplicationArchive(chosen, repository_root=ROOT)
+    ProductionCheckpointLedger(archive)
+    monkeypatch.setattr(queue, "DEFAULT_ARCHIVE_ROOT", roots["default"])
+    monkeypatch.delenv(queue.ARCHIVE_ROOT_ENV, raising=False)
+    arguments = ["--repository-root", str(ROOT)]
+    if selection in ("environment", "explicit"):
+        monkeypatch.setenv(queue.ARCHIVE_ROOT_ENV, str(roots["environment"]))
+    if selection == "explicit":
+        arguments.extend(["--archive-root", str(chosen)])
+    assert queue._main(arguments) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["verified"] is True
+    assert document["event_count"] == document["attempt_count"] == 0
+    assert all(not path.exists() for name, path in roots.items() if name != selection)

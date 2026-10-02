@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,33 +52,163 @@ PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT = PRODUCTION_MARKET_OUTBOX_ROOT / "rece
 PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY = "state/public-employer-research-v2"
 _DEPLOYMENT_SCHEMA = "jaa.production-market-handoff-deployment.v1"
 _MAX_CONFIG_BYTES = 8192
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_COLLECTION_CONFIG_RELATIVE_PATH = Path(
+    "internal/jaa/skeleton/config.overnight.yaml"
+)
 
 
 class ProductionHandoffDeploymentError(ValueError):
     """The installed production deployment authority is absent or differs."""
 
 
-def _expected_deployment_document() -> dict[str, str]:
+def _expected_deployment_document(
+    *,
+    data_home: str | Path = PRODUCTION_MARKET_DATA_HOME,
+    repository_root: str | Path = PRODUCTION_MARKET_REPOSITORY_ROOT,
+    output_root: str | Path = PRODUCTION_MARKET_OUTBOX_ROOT,
+    candidate_authority_path: str | Path | None = None,
+    candidate_authority_sha256: str = PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
+) -> dict[str, str]:
+    repository = Path(repository_root)
+    candidate = Path(
+        production_handoff.PRODUCTION_CANDIDATE_AUTHORITY_PATH
+        if candidate_authority_path is None
+        else candidate_authority_path
+    )
     return {
-        "candidate_authority_path": str(
-            production_handoff.PRODUCTION_CANDIDATE_AUTHORITY_PATH
-        ),
-        "candidate_authority_sha256": PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
-        "collection_config_path": str(PRODUCTION_COLLECTION_CONFIG_PATH),
+        "candidate_authority_path": str(candidate),
+        "candidate_authority_sha256": candidate_authority_sha256,
+        "collection_config_path": str(repository / _COLLECTION_CONFIG_RELATIVE_PATH),
         "collection_config_sha256": PRODUCTION_COLLECTION_CONFIG_SHA256,
         "collection_config_file_sha256": PRODUCTION_COLLECTION_CONFIG_FILE_SHA256,
-        "data_home": str(PRODUCTION_MARKET_DATA_HOME),
-        "output_root": str(PRODUCTION_MARKET_OUTBOX_ROOT),
-        "repository_root": str(PRODUCTION_MARKET_REPOSITORY_ROOT),
+        "data_home": str(Path(data_home)),
+        "output_root": str(Path(output_root)),
+        "repository_root": str(repository),
         "research_archive_root_identity": PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY,
         "schema_version": _DEPLOYMENT_SCHEMA,
         "trust_root_id": production_handoff.PRODUCTION_HANDOFF_TRUST_ROOT_ID,
     }
 
 
-def production_handoff_deployment_configuration_bytes() -> bytes:
-    """Return the only deployable production handoff configuration bytes."""
-    return canonical_json_bytes(_expected_deployment_document())
+def _normalized_absolute_path(document: dict[str, object], key: str) -> Path:
+    value = document.get(key)
+    if type(value) is not str:
+        raise ProductionHandoffDeploymentError(
+            f"deployment configuration {key} is invalid"
+        )
+    path = Path(value)
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or str(path) != value
+        or path == Path("/")
+    ):
+        raise ProductionHandoffDeploymentError(
+            f"deployment configuration {key} is not a normalized absolute path"
+        )
+    return path
+
+
+def _validate_deployment_document(document: object) -> dict[str, object]:
+    expected_keys = set(_expected_deployment_document())
+    if type(document) is not dict:
+        raise ProductionHandoffDeploymentError(
+            "deployment configuration keys differ from the supported schema"
+        )
+    if set(document) != expected_keys:
+        raise ProductionHandoffDeploymentError(
+            "deployment configuration keys differ from the supported schema"
+        )
+    if (
+        document["schema_version"] != _DEPLOYMENT_SCHEMA
+        or document["trust_root_id"]
+        != production_handoff.PRODUCTION_HANDOFF_TRUST_ROOT_ID
+        or document["research_archive_root_identity"]
+        != PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY
+        or document["collection_config_sha256"]
+        != PRODUCTION_COLLECTION_CONFIG_SHA256
+        or document["collection_config_file_sha256"]
+        != PRODUCTION_COLLECTION_CONFIG_FILE_SHA256
+    ):
+        raise ProductionHandoffDeploymentError(
+            "deployment configuration trust or code identity differs"
+        )
+    for key in ("candidate_authority_sha256",):
+        if type(document[key]) is not str or not _SHA256.fullmatch(document[key]):
+            raise ProductionHandoffDeploymentError(
+                f"deployment configuration {key} is invalid"
+            )
+    data_home = _normalized_absolute_path(document, "data_home")
+    repository_root = _normalized_absolute_path(document, "repository_root")
+    output_root = _normalized_absolute_path(document, "output_root")
+    candidate_authority = _normalized_absolute_path(
+        document, "candidate_authority_path"
+    )
+    collection_config = _normalized_absolute_path(
+        document, "collection_config_path"
+    )
+    if collection_config != repository_root / _COLLECTION_CONFIG_RELATIVE_PATH:
+        raise ProductionHandoffDeploymentError(
+            "collection configuration path does not belong to the deployed repository"
+        )
+    if (
+        candidate_authority == repository_root
+        or repository_root in candidate_authority.parents
+        or data_home == repository_root
+        or repository_root in data_home.parents
+        or data_home in repository_root.parents
+        or output_root == repository_root
+        or repository_root in output_root.parents
+        or output_root in repository_root.parents
+        or output_root in candidate_authority.parents
+        or output_root == data_home
+        or data_home in output_root.parents
+        or output_root in data_home.parents
+    ):
+        raise ProductionHandoffDeploymentError(
+            "production data, repository, output and candidate authority roots overlap"
+        )
+    return document
+
+
+def production_handoff_deployment_configuration_bytes(
+    *,
+    data_home: str | Path | None = None,
+    repository_root: str | Path | None = None,
+    output_root: str | Path | None = None,
+    candidate_authority_path: str | Path | None = None,
+    candidate_authority_sha256: str | None = None,
+) -> bytes:
+    """Return canonical deployment bytes for one explicitly provisioned host."""
+    values = (
+        data_home,
+        repository_root,
+        output_root,
+        candidate_authority_path,
+        candidate_authority_sha256,
+    )
+    if any(value is not None for value in values) and not all(
+        value is not None for value in values
+    ):
+        raise ProductionHandoffDeploymentError(
+            "host deployment requires all five host-specific authority values"
+        )
+    if not any(value is not None for value in values):
+        data_home = PRODUCTION_MARKET_DATA_HOME
+        repository_root = PRODUCTION_MARKET_REPOSITORY_ROOT
+        output_root = PRODUCTION_MARKET_OUTBOX_ROOT
+        candidate_authority_path = production_handoff.PRODUCTION_CANDIDATE_AUTHORITY_PATH
+        candidate_authority_sha256 = PRODUCTION_CANDIDATE_AUTHORITY_SHA256
+    document = _expected_deployment_document(
+        data_home=data_home,
+        repository_root=repository_root,
+        output_root=output_root,
+        candidate_authority_path=candidate_authority_path,
+        candidate_authority_sha256=candidate_authority_sha256,
+    )
+    _validate_deployment_document(document)
+    return canonical_json_bytes(document)
 
 
 def _parse_deployment_configuration(raw: bytes) -> str:
@@ -87,14 +218,13 @@ def _parse_deployment_configuration(raw: bytes) -> str:
         raise ProductionHandoffDeploymentError(
             "deployment configuration is invalid JSON"
         ) from exc
-    expected = _expected_deployment_document()
-    if (
-        type(document) is not dict
-        or document != expected
-        or production_handoff_deployment_configuration_bytes() != raw
-    ):
+    try:
+        validated = _validate_deployment_document(document)
+    except ProductionHandoffDeploymentError:
+        raise
+    if canonical_json_bytes(validated) != raw:
         raise ProductionHandoffDeploymentError(
-            "deployment configuration differs from the compiled canonical roots"
+            "deployment configuration is not canonical JSON"
         )
     return hashlib.sha256(raw).hexdigest()
 
@@ -156,24 +286,35 @@ def _read_root_owned_configuration(path: Path) -> bytes:
 
 
 def installed_production_handoff_deployment() -> _ProductionHandoffDeployment:
-    """Load the compiled, root-owned live Market state and output authority."""
+    """Load the protected, root-owned live Market state and output authority."""
 
     raw = _read_root_owned_configuration(PRODUCTION_HANDOFF_DEPLOYMENT_CONFIG_PATH)
     configuration_sha256 = _parse_deployment_configuration(raw)
+    document = json.loads(raw)
+    _validate_deployment_document(document)
+    data_home = Path(document["data_home"])
+    repository_root = Path(document["repository_root"])
+    output_root = Path(document["output_root"])
+    collection_config_path = Path(document["collection_config_path"])
+    candidate_authority_path = Path(document["candidate_authority_path"])
     executing_repository = Path(__file__).resolve().parents[3]
-    if executing_repository != PRODUCTION_MARKET_REPOSITORY_ROOT:
+    if executing_repository != repository_root:
         raise ProductionHandoffDeploymentError(
-            "executing repository differs from the compiled production repository"
+            "executing repository differs from the installed production repository"
         )
     return _ProductionHandoffDeployment(
-        data_home=PRODUCTION_MARKET_DATA_HOME,
-        repository_root=PRODUCTION_MARKET_REPOSITORY_ROOT,
-        output_root=PRODUCTION_MARKET_OUTBOX_ROOT,
-        collection_config_path=PRODUCTION_COLLECTION_CONFIG_PATH,
-        collection_config_sha256=PRODUCTION_COLLECTION_CONFIG_SHA256,
-        collection_config_file_sha256=PRODUCTION_COLLECTION_CONFIG_FILE_SHA256,
+        data_home=data_home,
+        repository_root=repository_root,
+        output_root=output_root,
+        collection_config_path=collection_config_path,
+        collection_config_sha256=str(document["collection_config_sha256"]),
+        collection_config_file_sha256=str(
+            document["collection_config_file_sha256"]
+        ),
         deployment_configuration_sha256=configuration_sha256,
-        research_archive_root_identity=PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY,
+        research_archive_root_identity=str(document["research_archive_root_identity"]),
+        candidate_authority_path=candidate_authority_path,
+        candidate_authority_sha256=str(document["candidate_authority_sha256"]),
     )
 
 
@@ -183,6 +324,7 @@ def _validate_deployment_roots(deployment: _ProductionHandoffDeployment) -> None
     for label, path, private in (
         ("data home", deployment.data_home, True),
         ("repository", deployment.repository_root, False),
+        ("candidate authority parent", deployment.candidate_authority_path.parent, True),
     ):
         try:
             metadata = path.lstat()
@@ -246,13 +388,13 @@ def run_production_handoff(
     deployment = installed_production_handoff_deployment()
     _validate_deployment_roots(deployment)
     subject = {
-        "candidate_authority_sha256": PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
+        "candidate_authority_sha256": deployment.candidate_authority_sha256,
         "collection_config_path": str(deployment.collection_config_path),
         "collection_config_sha256": deployment.collection_config_sha256,
         "collection_config_file_sha256": deployment.collection_config_file_sha256,
         "data_home": str(deployment.data_home.absolute()),
         "deployment_configuration_sha256": deployment.deployment_configuration_sha256,
-        "execution_receipt_root": str(PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT),
+        "execution_receipt_root": str(deployment.output_root / "receipts"),
         "output_root": str(deployment.output_root.absolute()),
         "profile_id": profile_id,
         "repository_root": str(deployment.repository_root.absolute()),
