@@ -98,6 +98,11 @@ JAA03_README_COMMIT_SEQUENCE = (("internal/jaa/README.md", "modified"),)
 JAA03_REHASHED_RECEIPT_COMMIT_SEQUENCE = (
     (JAA03_REHASHED_RECEIPT_COMMIT, "replaced"),
 )
+JAA03_INDEPENDENT_ACCEPTANCE_COMMIT_SEQUENCE = (
+    (JAA03_INITIAL_RECEIPT_PATH, "deleted"),
+    (JAA03_RECEIPT_MUTATION, "added"),
+    ("internal/jaa/README.md", "modified"),
+)
 PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     "internal/jaa/README.md",
     "internal/jaa/scripts/jaa04_increment_a_test_inventory.json",
@@ -391,6 +396,7 @@ def _committed_inplace_branch(
                 JAA02_REHASHED_RECEIPT_COMMIT_SEQUENCE,
                 JAA03_README_COMMIT_SEQUENCE,
                 JAA03_REHASHED_RECEIPT_COMMIT_SEQUENCE,
+                JAA03_INDEPENDENT_ACCEPTANCE_COMMIT_SEQUENCE,
             )
             if (
                 commit_sequence not in permitted_sequences
@@ -697,7 +703,7 @@ def _commit_path_change(
             _abort_suite("fixture addition target already exists in the admitted source")
         if preexisting_added:
             if (
-                not _is_jaa02_receipt_path(path)
+                not (_is_jaa02_receipt_path(path) or _is_jaa03_receipt_path(path))
                 or not target.is_file()
                 or content is None
                 or target.read_bytes() != content
@@ -713,11 +719,14 @@ def _commit_path_change(
         _abort_suite("fixture write is missing its exact content bytes")
 
     result_blob_sha256 = hashlib.sha256(content).hexdigest() if content is not None else None
-    if operation == "added" and _mutation_path_matches(JAA02_RECEIPT_MUTATION, path) and (
+    if operation == "added" and (
+        _mutation_path_matches(JAA02_RECEIPT_MUTATION, path)
+        or _mutation_path_matches(JAA03_RECEIPT_MUTATION, path)
+    ) and (
         result_blob_sha256 is None
         or Path(path).name != f"sha256-{result_blob_sha256}.json"
     ):
-        _abort_suite("JAA-02 receipt path is not bound to its exact content hash")
+        _abort_suite("receipt path is not bound to its exact content hash")
     try:
         if operation == "modified":
             target.write_bytes(content or b"")

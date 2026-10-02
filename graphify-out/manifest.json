@@ -102,8 +102,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/README.md": {
-    "mtime": 1790973236.525974,
-    "seen": 1790974102.9118097,
+    "mtime": 1790974511.4219646,
+    "seen": 1790975951.3637881,
     "ast_hash": "45f42f20cdc97c40db4eb97d30baf983",
     "semantic_hash": ""
   },
@@ -1926,8 +1926,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/certify_jaa04_increment_a.py": {
-    "mtime": 1790973254.4379945,
-    "seen": 1790974102.9114015,
+    "mtime": 1790974532.1899898,
+    "seen": 1790975951.3633673,
     "ast_hash": "85be558982ba31f4c2af06beeab50d36",
     "semantic_hash": ""
   },
@@ -2442,9 +2442,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa03_independent_acceptance.py": {
-    "mtime": 1788246507.31071,
-    "seen": 1790775868.52016,
-    "ast_hash": "a77263d1fc27b1dd3c55f05e946e9305",
+    "mtime": 1790976157.085925,
+    "seen": 1790976303.9534197,
+    "ast_hash": "0152333bcfba2853dbbd534a7831fd71",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa03_receipt_tamper_controls.py": {
@@ -2496,8 +2496,8 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_authority_canaries.py": {
-    "mtime": 1790973268.2340064,
-    "seen": 1790974102.9115098,
+    "mtime": 1790974543.2139904,
+    "seen": 1790975951.363478,
     "ast_hash": "4624a315882844dd3412eb01e2084990",
     "semantic_hash": ""
   },
@@ -2508,9 +2508,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_certifier_fail_closed.py": {
-    "mtime": 1790973951.9299817,
-    "seen": 1790974102.9115117,
-    "ast_hash": "e20d24106b0b30bccee30ccc6d16e43b",
+    "mtime": 1790975517.0619397,
+    "seen": 1790975951.36348,
+    "ast_hash": "5906a0105d699a9eb149ac37920e2713",
     "semantic_hash": ""
   },
   "internal/jaa/test_jaa04_increment_a_independent_regressions.py": {

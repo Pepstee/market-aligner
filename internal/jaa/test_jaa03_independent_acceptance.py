@@ -1,8 +1,8 @@
 """Independent black-box acceptance checks for the JAA-03 certificate.
 
 These checks deliberately reconstruct the receipt contract instead of invoking
-the certifier's helpers.  They exercise a disposable Git checkout so a receipt
-is always bound to the exact revision that produced it.
+the certifier's helpers. They use the admitted serial in-place fixture so each
+receipt remains bound to the exact revision that produced it.
 """
 
 from __future__ import annotations
@@ -10,14 +10,24 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
-import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
-from testing_repository import clone_jaa_repository
+from test_jaa04_increment_a_certifier_fail_closed import (
+    JAA03_INDEPENDENT_ACCEPTANCE_COMMIT_SEQUENCE,
+    JAA03_INITIAL_RECEIPT_PATH,
+    REPOSITORY_ROOT,
+    _FixtureBranch,
+    _abort_suite,
+    _assert_admission,
+    _commit_existing_added_file,
+    _commit_path_change,
+    _committed_inplace_branch,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -33,6 +43,7 @@ EXPECTED_POLICY = {
     "minimum_opportunity_bp": 5_500,
     "weights": [45, 35, 20],
 }
+_ACTIVE_FIXTURE_STATE: _FixtureBranch | None = None
 
 
 def _run(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
@@ -58,21 +69,48 @@ def _git(root: Path, *argv: str) -> subprocess.CompletedProcess[str]:
 
 
 @pytest.fixture(scope="module")
-def repository(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    clone = clone_jaa_repository(
-        ROOT,
-        tmp_path_factory.mktemp("jaa03-repository") / "repository",
+def repository() -> Iterator[Path]:
+    global _ACTIVE_FIXTURE_STATE
+    mutations = frozenset(
+        path for path, _operation in JAA03_INDEPENDENT_ACCEPTANCE_COMMIT_SEQUENCE
     )
-    assert _git(clone, "config", "user.name", "JAA-03 independent test").returncode == 0
-    assert _git(clone, "config", "user.email", "jaa03@example.test").returncode == 0
-    shutil.rmtree(clone / "runtime_evidence" / "jaa03", ignore_errors=True)
-    staged = _git(clone, "add", "-A", "--", "runtime_evidence/jaa03")
-    assert staged.returncode == 0, staged.stderr
-    committed = _git(
-        clone, "commit", "-m", "remove checked JAA-03 receipt for certifier test"
-    )
-    assert committed.returncode == 0, committed.stderr
-    return clone
+    with _committed_inplace_branch(
+        "jaa03-independent-acceptance",
+        allowed_mutations=mutations,
+        commit_sequence=JAA03_INDEPENDENT_ACCEPTANCE_COMMIT_SEQUENCE,
+    ) as state:
+        _ACTIVE_FIXTURE_STATE = state
+        try:
+            _commit_path_change(
+                state,
+                JAA03_INITIAL_RECEIPT_PATH,
+                "deleted",
+                None,
+                "remove-checked-JAA03-receipt",
+            )
+            yield ROOT
+        finally:
+            _ACTIVE_FIXTURE_STATE = None
+
+
+@pytest.fixture(autouse=True)
+def _admit_each_test(repository: Path) -> Iterator[None]:
+    state = _ACTIVE_FIXTURE_STATE
+    if state is None:
+        _abort_suite("JAA-03 independent acceptance fixture is not active")
+    try:
+        _assert_admission(state.branch, state.head, False)
+    except pytest.exit.Exception:
+        raise
+    except Exception:
+        _abort_suite("JAA-03 in-place admission failed at test start")
+    yield
+    try:
+        _assert_admission(state.branch, state.head, False)
+    except pytest.exit.Exception:
+        raise
+    except Exception:
+        _abort_suite("JAA-03 in-place admission failed at test completion")
 
 
 def _canonical(document: object) -> bytes:
@@ -293,8 +331,14 @@ def test_real_certifier_receipt_and_negative_receipt_controls(repository: Path) 
     # Tracking a receipt changes Git HEAD but not the certified source-content
     # tree.  Re-running certification must reuse the one receipt, not create an
     # endless chain of self-invalidating evidence files.
-    assert _git(repository, "add", str(receipt.relative_to(repository))).returncode == 0
-    assert _git(repository, "commit", "-m", "track JAA-03 receipt").returncode == 0
+    state = _ACTIVE_FIXTURE_STATE
+    assert state is not None
+    _commit_existing_added_file(
+        state,
+        receipt.relative_to(REPOSITORY_ROOT).as_posix(),
+        receipt.read_bytes(),
+        "track-JAA03-receipt",
+    )
     _verify_receipt(repository, receipt)
     replay = _run(repository, str(CERTIFIER))
     assert replay.returncode == 0, replay.stderr
@@ -306,10 +350,12 @@ def test_real_certifier_receipt_and_negative_receipt_controls(repository: Path) 
         receipt
     ]
 
-    (repository / "README.md").write_bytes(
-        (repository / "README.md").read_bytes() + b"\nrevision replay\n"
+    _commit_path_change(
+        state,
+        "internal/jaa/README.md",
+        "modified",
+        (repository / "README.md").read_bytes() + b"\nrevision replay\n",
+        "different-revision",
     )
-    assert _git(repository, "add", "README.md").returncode == 0
-    assert _git(repository, "commit", "-m", "different revision").returncode == 0
     with pytest.raises(AssertionError):
         _verify_receipt(repository, receipt)
