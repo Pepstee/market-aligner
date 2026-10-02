@@ -34,10 +34,16 @@ ALLOWED_MUTATIONS = {
     f"internal/jaa/{CERTIFIER}",
     "internal/jaa/test_jaa04_increment_a_authority_canaries.py",
 }
+CERTIFICATION_SURFACE_MUTATIONS = {
+    "internal/jaa/career_automation/fixtures/jaa04_authority_canaries/greenhouse.json",
+    "internal/jaa/career_automation/fixtures/jaa04_authority_canaries/ashby.json",
+    "internal/jaa/career_automation/fixtures/jaa04_authority_canaries/unexpected.json",
+    "internal/jaa/career_automation/dirty-certifier-control.txt",
+}
 PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     "internal/jaa/scripts/jaa04_increment_a_test_inventory.json",
     "internal/jaa/test_jaa04_sidecar_temporal_semantics.py",
-}
+} | CERTIFICATION_SURFACE_MUTATIONS
 SUITES = (
     "test_jaa04_increment_a_authority_canaries.py",
     "test_jaa04_increment_a_temporal_authority_regression.py",
@@ -213,7 +219,9 @@ class _FixtureBranch:
     head: str
     allowed_mutations: frozenset[str]
     changed_path: str | None = None
+    changed_kind: str | None = None
     changed_sha256: str | None = None
+    base_blob_sha256: str | None = None
 
 
 @pytest.fixture(autouse=True)
@@ -302,18 +310,34 @@ def _committed_inplace_branch(
                     raise RuntimeError("original branch ref changed")
                 if state.changed_path is None:
                     if (
-                        state.changed_sha256 is not None
+                        state.changed_kind is not None
+                        or state.changed_sha256 is not None
+                        or state.base_blob_sha256 is not None
                         or _git("rev-list", "--count", f"{base_head}..{branch}") != "0"
                     ):
                         raise RuntimeError("fixture branch has an unexpected commit")
                 else:
+                    expected_status = {
+                        "modified": "M",
+                        "added": "A",
+                        "deleted": "D",
+                    }.get(state.changed_kind or "")
+                    current_blob = _git_path_blob_sha256(branch, state.changed_path)
                     if (
-                        state.changed_sha256 is None
+                        state.changed_kind not in {"modified", "added", "deleted"}
+                        or state.changed_path not in state.allowed_mutations
                         or _git("rev-list", "--count", f"{base_head}..{branch}") != "1"
                         or _git("rev-parse", f"{branch}^") != base_head
-                        or _git("diff", "--name-only", f"{base_head}..{branch}").splitlines()
-                        != [state.changed_path]
-                        or _git_blob_sha256(f"{branch}:{state.changed_path}") != state.changed_sha256
+                        or _git("diff", "--name-status", f"{base_head}..{branch}").splitlines()
+                        != [f"{expected_status}\t{state.changed_path}"]
+                        or _git_path_blob_sha256(base_head, state.changed_path)
+                        != state.base_blob_sha256
+                        or current_blob != state.changed_sha256
+                        or (state.changed_kind == "added" and state.base_blob_sha256 is not None)
+                        or (state.changed_kind == "modified" and state.base_blob_sha256 is None)
+                        or (state.changed_kind == "deleted" and (
+                            state.base_blob_sha256 is None or state.changed_sha256 is not None
+                        ))
                     ):
                         raise RuntimeError("fixture branch diff is outside its exact allowed path")
             except pytest.exit.Exception:
@@ -348,23 +372,107 @@ def _committed_inplace_branch(
         os.close(lock_fd)
 
 
-def _commit_mutation(state: _FixtureBranch, path: str, content: str, case: str) -> None:
+def _safe_mutation_target(path: str) -> Path:
+    relative = Path(path)
+    if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != path:
+        _abort_suite("fixture mutation path is not a canonical repository-relative path")
+    target = REPOSITORY_ROOT / relative
+    if target.resolve(strict=False) != target:
+        _abort_suite("fixture mutation path resolves through an unexpected alias")
+    for parent in target.parents:
+        if parent == REPOSITORY_ROOT:
+            break
+        if parent.is_symlink():
+            _abort_suite("fixture mutation path crosses a symlinked parent")
+    return target
+
+
+def _git_path_blob_sha256(revision: str, path: str) -> str | None:
+    listed = _run(
+        REPOSITORY_ROOT,
+        "git",
+        "ls-tree",
+        "-r",
+        "--name-only",
+        revision,
+        "--",
+        path,
+    )
+    if listed.returncode != 0:
+        raise RuntimeError("cannot inspect exact fixture path in Git tree")
+    paths = listed.stdout.splitlines()
+    if not paths:
+        return None
+    if paths != [path]:
+        raise RuntimeError("Git tree path lookup returned an unexpected path")
+    return _git_blob_sha256(f"{revision}:{path}")
+
+
+def _commit_path_change(
+    state: _FixtureBranch,
+    path: str,
+    operation: str,
+    content: bytes | None,
+    case: str,
+) -> None:
     if path not in state.allowed_mutations:
         _abort_suite("fixture mutation path is not allowlisted")
     _assert_admission(state.branch, state.head, False)
-    target = CANON_ROOT / path
-    if not target.is_file() or target.is_symlink():
-        _abort_suite("fixture mutation target is not a regular allowlisted file")
-    expected_content = content.encode("utf-8")
-    target.write_bytes(expected_content)
+    target = _safe_mutation_target(path)
+    base_blob_sha256 = _git_path_blob_sha256(state.base_head, path)
+    if operation in {"modified", "deleted"}:
+        if (
+            base_blob_sha256 is None
+            or not target.is_file()
+            or target.is_symlink()
+            or hashlib.sha256(target.read_bytes()).hexdigest() != base_blob_sha256
+        ):
+            _abort_suite("fixture mutation source differs from its admitted base blob")
+    elif operation == "added":
+        if base_blob_sha256 is not None or target.exists() or target.is_symlink():
+            _abort_suite("fixture addition target already exists in the admitted source")
+    else:
+        _abort_suite("fixture mutation operation is not permitted")
+    if operation == "deleted" and content is not None:
+        _abort_suite("fixture deletion unexpectedly supplied replacement bytes")
+    if operation != "deleted" and content is None:
+        _abort_suite("fixture write is missing its exact content bytes")
+
     state.changed_path = path
-    state.changed_sha256 = hashlib.sha256(expected_content).hexdigest()
-    _assert_admission(state.branch, state.head, True)
-    if (
-        _git("status", "--porcelain", "--untracked-files=all").splitlines() != [f" M {path}"]
+    state.changed_kind = operation
+    state.changed_sha256 = hashlib.sha256(content).hexdigest() if content is not None else None
+    state.base_blob_sha256 = base_blob_sha256
+    try:
+        if operation == "modified":
+            target.write_bytes(content or b"")
+        elif operation == "added":
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o644,
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content or b"")
+                stream.flush()
+                os.fsync(stream.fileno())
+        else:
+            target.unlink()
+    except OSError:
+        _abort_suite("fixture path change failed; preserving current branch state")
+
+    expected_unstaged = {
+        "modified": f" M {path}",
+        "added": f"?? {path}",
+        "deleted": f" D {path}",
+    }[operation]
+    if _git("status", "--porcelain", "--untracked-files=all").splitlines() != [expected_unstaged]:
+        _abort_suite("fixture working diff is not the single exact allowlisted path")
+    if content is not None and (
+        not target.is_file()
+        or target.is_symlink()
         or hashlib.sha256(target.read_bytes()).hexdigest() != state.changed_sha256
     ):
-        _abort_suite("fixture working diff is not the single allowlisted path")
+        _abort_suite("fixture working bytes differ from the exact admitted content")
     _assert_admission(state.branch, state.head, True)
     staged = _run(
         REPOSITORY_ROOT,
@@ -373,11 +481,17 @@ def _commit_mutation(state: _FixtureBranch, path: str, content: str, case: str) 
     )
     if staged.returncode != 0:
         _abort_suite("fixture could not stage its exact allowlisted path")
+    expected_staged = {
+        "modified": f"M  {path}",
+        "added": f"A  {path}",
+        "deleted": f"D  {path}",
+    }[operation]
     if (
-        _git("status", "--porcelain", "--untracked-files=all").splitlines() != [f"M  {path}"]
+        _git("status", "--porcelain", "--untracked-files=all").splitlines() != [expected_staged]
         or _git("diff", "--cached", "--name-only").splitlines() != [path]
         or _git("diff", "--name-only")
-        or hashlib.sha256(target.read_bytes()).hexdigest() != state.changed_sha256
+        or (content is not None and hashlib.sha256(target.read_bytes()).hexdigest() != state.changed_sha256)
+        or (content is None and target.exists())
     ):
         _abort_suite("fixture staged diff is not exactly its allowlisted path")
     _assert_admission(state.branch, state.head, True)
@@ -391,13 +505,99 @@ def _commit_mutation(state: _FixtureBranch, path: str, content: str, case: str) 
         _abort_suite("fixture commit failed; preserving staged work")
     state.head = _git("rev-parse", "HEAD")
     _assert_admission(state.branch, state.head, False)
+    expected_diff = {
+        "modified": "M",
+        "added": "A",
+        "deleted": "D",
+    }[operation]
     if (
         _git("rev-parse", f"{state.branch}^") != state.base_head
-        or _git("diff", "--name-only", f"{state.base_head}..{state.branch}").splitlines() != [path]
-        or _git_blob_sha256(f"{state.branch}:{path}") != state.changed_sha256
+        or _git("diff", "--name-status", f"{state.base_head}..{state.branch}").splitlines()
+        != [f"{expected_diff}\t{path}"]
+        or _git_path_blob_sha256(state.base_head, path) != state.base_blob_sha256
+        or _git_path_blob_sha256(state.branch, path) != state.changed_sha256
         or _git("status", "--porcelain", "--untracked-files=all")
     ):
         _abort_suite("fixture commit changed more than the exact intended path")
+
+
+def _commit_mutation(state: _FixtureBranch, path: str, content: str, case: str) -> None:
+    _commit_path_change(state, path, "modified", content.encode("utf-8"), case)
+
+
+def _commit_added_file(state: _FixtureBranch, path: str, content: bytes, case: str) -> None:
+    _commit_path_change(state, path, "added", content, case)
+
+
+def _commit_deleted_file(state: _FixtureBranch, path: str, case: str) -> None:
+    _commit_path_change(state, path, "deleted", None, case)
+
+
+@contextmanager
+def _uncommitted_control_file(
+    state: _FixtureBranch,
+    path: str,
+    content: bytes,
+) -> Iterator[Path]:
+    if path not in state.allowed_mutations:
+        _abort_suite("uncommitted control path is not allowlisted")
+    _assert_admission(state.branch, state.head, False)
+    target = _safe_mutation_target(path)
+    if _git_path_blob_sha256(state.base_head, path) is not None or target.exists() or target.is_symlink():
+        _abort_suite("uncommitted control path already exists in the admitted source")
+    created = False
+    try:
+        try:
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+        except OSError:
+            _abort_suite("cannot create exact uncommitted dirty-state control")
+        created = True
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+        expected_status = [f"?? {path}"]
+        _assert_admission(state.branch, state.head, True)
+        if (
+            _git("status", "--porcelain", "--untracked-files=all").splitlines() != expected_status
+            or not target.is_file()
+            or target.is_symlink()
+            or hashlib.sha256(target.read_bytes()).hexdigest() != expected_sha256
+        ):
+            _abort_suite("dirty-state control is not the exact single untracked file")
+        yield target
+    finally:
+        if created:
+            expected_sha256 = hashlib.sha256(content).hexdigest()
+            expected_status = [f"?? {path}"]
+            if (
+                not target.is_file()
+                or target.is_symlink()
+                or hashlib.sha256(target.read_bytes()).hexdigest() != expected_sha256
+                or _git("status", "--porcelain", "--untracked-files=all").splitlines()
+                != expected_status
+            ):
+                _abort_suite("unexpected dirty-state changes detected; preserving work")
+            _assert_admission(state.branch, state.head, True)
+            try:
+                target.unlink()
+            except OSError:
+                _abort_suite("cannot remove only the exact dirty-state control")
+            try:
+                _assert_admission(state.branch, state.head, False)
+            except pytest.exit.Exception:
+                raise
+            except Exception:
+                _abort_suite("unexpected work remains after dirty-state control removal")
+            if target.exists() or target.is_symlink() or _git(
+                "status", "--porcelain", "--untracked-files=all"
+            ):
+                _abort_suite("dirty-state control did not restore the exact clean branch")
 
 
 def _certify(
@@ -406,8 +606,9 @@ def _certify(
     head: str,
     *,
     env: dict[str, str] | None = None,
+    expected_dirty: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
-    _assert_admission(branch, head, False)
+    _assert_admission(branch, head, expected_dirty)
     receipt_directory = tmp_path / "receipt"
     try:
         receipt_directory.resolve().relative_to(Path("/tmp").resolve())
