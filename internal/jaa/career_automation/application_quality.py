@@ -523,7 +523,7 @@ def review_application_package_with_pinned_skills(
             + skill_document.decode("utf-8", errors="strict")
         )
     prompt_sections.append(
-        "When applying pinned criteria, preserve their mandatory, aim, and conditional distinctions: cite concrete defects with supporting excerpts, and do not invent numbers or convert aim-level targets (e.g., the 60% measurable-result guidance) into mandatory failures; accept supported qualitative results only where specific numbers are unavailable, without weakening truthfulness or quality requirements."
+        "When applying pinned criteria, preserve their mandatory, aim, and conditional distinctions: cite concrete defects with supporting excerpts, and do not invent numbers or convert aim-level targets (e.g., the 60% measurable-result guidance) into mandatory failures; accept supported qualitative results only where specific numbers are unavailable, without weakening truthfulness or quality requirements. For this purpose, numbers are unavailable only when absent from the supplied supported evidence; never infer or invent them."
     )
     if local_synthetic_context is None:
         return review_application_package_with_criteria(

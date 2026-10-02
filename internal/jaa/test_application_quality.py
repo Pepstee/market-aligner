@@ -638,6 +638,10 @@ def test_native_combined_review_is_one_call_and_rebinds_only_visible_fields(
     assert receipt.review_coverage["review_stage"] == "pre_fill_semantic_intent"
     assert "aim-level targets" in backend.last_system
     assert "accept supported qualitative results" in backend.last_system
+    assert (
+        "numbers are unavailable only when absent from the supplied supported evidence"
+        in backend.last_system
+    )
     assert "synthetic-hidden-provider-state" not in backend.last_user
     assert "provider_state" not in backend.last_user
 
