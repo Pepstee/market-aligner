@@ -162,6 +162,23 @@ def test_runner_rejects_malformed_config_before_acceptance_stages(
     assert reason in result.stderr
 
 
+@pytest.mark.parametrize("missing_parent", [False, True])
+def test_runner_reports_missing_config_with_setup_guidance(
+    tmp_path: Path, missing_parent: bool,
+) -> None:
+    config_parent = tmp_path / "config"
+    if not missing_parent:
+        config_parent.mkdir()
+    config = config_parent / "runtime.json"
+    result = subprocess.run(
+        [sys.executable, str(RUNNER), "--config", str(config)],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 2
+    assert "runtime config is absent; create it with" in result.stderr
+    assert "No such file or directory" not in result.stderr
+
+
 @pytest.mark.parametrize(
     ("source_value", "evidence_value", "message"),
     [
