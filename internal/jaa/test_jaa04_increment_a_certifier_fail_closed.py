@@ -114,6 +114,11 @@ TEST_EVIDENCE_SYMLINK_COMMIT_SEQUENCE = (
     ("internal/jaa/README.md", "modified"),
     ("internal/jaa/README.md", "symlink"),
 )
+TEST_EVIDENCE_LOCAL_IMPORT_SYMLINK_COMMIT_SEQUENCE = (
+    ("internal/jaa/README.md", "modified"),
+    ("internal/jaa/.gitignore", "modified"),
+    ("internal/jaa/skeleton/__init__.py", "deleted"),
+)
 JAA03_REHASHED_RECEIPT_COMMIT_SEQUENCE = (
     (JAA03_REHASHED_RECEIPT_COMMIT, "replaced"),
 )
@@ -124,6 +129,8 @@ JAA03_INDEPENDENT_ACCEPTANCE_COMMIT_SEQUENCE = (
 )
 PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     "internal/jaa/README.md",
+    "internal/jaa/.gitignore",
+    "internal/jaa/skeleton/__init__.py",
     "internal/jaa/untracked-product-executable.py",
     "internal/jaa/scripts/jaa04_increment_a_test_inventory.json",
     "internal/jaa/test_jaa04_sidecar_temporal_semantics.py",
@@ -421,6 +428,7 @@ def _committed_inplace_branch(
                 JAA03_INDEPENDENT_ACCEPTANCE_COMMIT_SEQUENCE,
                 TEST_EVIDENCE_CONTENT_COMMIT_SEQUENCE,
                 TEST_EVIDENCE_SYMLINK_COMMIT_SEQUENCE,
+                TEST_EVIDENCE_LOCAL_IMPORT_SYMLINK_COMMIT_SEQUENCE,
             )
             if (
                 commit_sequence not in permitted_sequences
@@ -546,6 +554,16 @@ def _committed_inplace_branch(
                 raise
             except Exception:
                 _abort_suite("fixture branch failed admission before restoration; preserving work")
+            if commit_sequence == TEST_EVIDENCE_LOCAL_IMPORT_SYMLINK_COMMIT_SEQUENCE:
+                deleted_source = REPOSITORY_ROOT / "internal/jaa/skeleton/__init__.py"
+                try:
+                    deleted_source.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    _abort_suite(
+                        "ignored local import path remains; preserving fixture branch"
+                    )
             try:
                 restored = _run(
                     REPOSITORY_ROOT,

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import importlib.metadata
 import importlib.util
 import json
 import os
-import shutil
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -33,51 +32,6 @@ def _generator_module():
 
 
 VERIFIER = _generator_module()
-
-
-def _write_isolated_checkout(root: Path) -> None:
-    """Create a clean, runnable checkout whose test runner is deterministic."""
-    script = root / "scripts" / GENERATOR.name
-    script.parent.mkdir(parents=True)
-    shutil.copy2(GENERATOR, script)
-    (root / "skeleton").mkdir()
-    (root / "skeleton" / "__init__.py").write_text("LOCAL = True\n", encoding="utf-8")
-    requirements = []
-    for raw in (
-        (PROJECT_ROOT / "requirements-test.lock")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ):
-        line = raw.strip()
-        if line and not line.startswith("#"):
-            distribution = line.split("==", 1)[0]
-            requirements.append(
-                f"{distribution}=={importlib.metadata.version(distribution)}"
-            )
-    (root / "requirements-test.lock").write_text(
-        "\n".join(requirements) + "\n", encoding="utf-8"
-    )
-    (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
-    (root / "pytest.py").write_text(
-        "import sys\nprint('==== 2 passed in 0.01s ====')\nraise SystemExit(0)\n",
-        encoding="utf-8",
-    )
-    subprocess.run(("git", "init", "-q"), cwd=root, check=True)
-    subprocess.run(("git", "add", "."), cwd=root, check=True)
-    subprocess.run(
-        (
-            "git",
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "-qm",
-            "isolated checkout",
-        ),
-        cwd=root,
-        check=True,
-    )
 
 
 def _venv_python(venv: Path) -> Path:
@@ -278,56 +232,87 @@ def test_public_generator_refuses_an_apparent_local_source_symlink_escape_before
     tmp_path: Path,
 ) -> None:
     """The complete process must reject a local-looking source that escapes checkout."""
-    checkout = tmp_path / "isolated-checkout"
-    checkout.mkdir()
-    _write_isolated_checkout(checkout)
-
     external_source = tmp_path / "outside-checkout" / "__init__.py"
     external_source.parent.mkdir()
     external_source.write_text("ESCAPED = True\n", encoding="utf-8")
-    local_source = checkout / "skeleton" / "__init__.py"
-    subprocess.run(
-        ("git", "rm", "--cached", "skeleton/__init__.py"), cwd=checkout, check=True
+    source_path = PROJECT_ROOT / "skeleton" / "__init__.py"
+    ignore_path = PROJECT_ROOT / ".gitignore"
+    receipt_directory = public_cli.REPOSITORY / "runtime_evidence" / "pytest"
+    assert not receipt_directory.exists()
+    original_source = source_path.read_bytes()
+    original_source_mode = stat.S_IMODE(source_path.stat().st_mode)
+    original_ignore = ignore_path.read_bytes()
+    original_ignore_mode = stat.S_IMODE(ignore_path.stat().st_mode)
+    assert b"skeleton/__init__.py" not in original_ignore.splitlines()
+    base_head = public_cli.inplace_fixture._git(
+        "rev-parse", public_cli.inplace_fixture.BASE_BRANCH
     )
-    (checkout / ".gitignore").write_text(
-        ".venv/\nskeleton/__init__.py\n", encoding="utf-8"
-    )
-    local_source.unlink()
-    local_source.symlink_to(external_source)
-    subprocess.run(("git", "add", ".gitignore"), cwd=checkout, check=True)
-    subprocess.run(
-        (
-            "git",
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "-qm",
-            "ignore local skeleton source",
-        ),
-        cwd=checkout,
-        check=True,
-    )
+    assert public_cli.inplace_fixture._git_path_mode(
+        base_head, "internal/jaa/skeleton/__init__.py"
+    ) == "100644"
+    assert public_cli.inplace_fixture._git_path_mode(
+        base_head, "internal/jaa/.gitignore"
+    ) == "100644"
 
-    environment = dict(os.environ)
-    environment.pop("PYTHONPATH", None)
-    completed = subprocess.run(
-        (sys.executable, str(checkout / "scripts" / GENERATOR.name)),
-        cwd=checkout,
-        env=environment,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+    complete = "================ 2 passed in 0.01s ================"
+    career = "================ 2 passed in 0.01s ================"
+    sequence = public_cli.inplace_fixture.TEST_EVIDENCE_LOCAL_IMPORT_SYMLINK_COMMIT_SEQUENCE
+    with public_cli._canonical_public_cli_session(
+        tmp_path,
+        complete,
+        career,
+        python=sys.executable,
+        use_pythonpath=False,
+        commit_sequence=sequence,
+    ) as session:
+        state = session.state
+        ignore_content = original_ignore + (
+            b"" if original_ignore.endswith(b"\n") else b"\n"
+        ) + b"skeleton/__init__.py\n"
+        public_cli.inplace_fixture._commit_mutation(
+            state,
+            "internal/jaa/.gitignore",
+            ignore_content.decode("utf-8"),
+            "evidence-import-symlink",
+        )
+        public_cli.inplace_fixture._commit_path_change(
+            state,
+            "internal/jaa/skeleton/__init__.py",
+            "deleted",
+            None,
+            "evidence-import-symlink",
+        )
+        assert ignore_path.read_bytes() == ignore_content
+        assert stat.S_IMODE(ignore_path.stat().st_mode) == original_ignore_mode
+        assert not source_path.exists() and not source_path.is_symlink()
+        public_cli.inplace_fixture._assert_admission(state.branch, state.head, False)
+        try:
+            source_path.symlink_to(external_source)
+            assert source_path.is_symlink()
+            assert os.readlink(source_path) == str(external_source)
+            public_cli.inplace_fixture._git(
+                "check-ignore", "--quiet", "internal/jaa/skeleton/__init__.py"
+            )
+            public_cli.inplace_fixture._assert_admission(state.branch, state.head, False)
+            run = public_cli._run_canonical_public_cli_in_session(session)
+        finally:
+            public_cli.inplace_fixture._assert_admission(state.branch, state.head, False)
+            if not source_path.is_symlink() or os.readlink(source_path) != str(external_source):
+                raise AssertionError("ignored symlink changed before exact cleanup")
+            if external_source.read_text(encoding="utf-8") != "ESCAPED = True\n":
+                raise AssertionError("synthetic symlink target changed before cleanup")
+            source_path.unlink()
+            public_cli.inplace_fixture._assert_admission(state.branch, state.head, False)
 
-    assert completed.returncode != 0
-    assert (
-        "local project import 'skeleton' does not resolve to this repository"
-        in completed.stderr
-    )
-    assert not (checkout / "runtime_evidence" / "pytest").exists()
+    assert run.returncode != 0
+    assert "local project import 'skeleton' does not resolve to this repository" in run.stderr
+    assert run.receipt_path is None
+    assert not receipt_directory.exists()
+    assert source_path.is_file() and not source_path.is_symlink()
+    assert source_path.read_bytes() == original_source
+    assert stat.S_IMODE(source_path.stat().st_mode) == original_source_mode
+    assert ignore_path.read_bytes() == original_ignore
+    assert stat.S_IMODE(ignore_path.stat().st_mode) == original_ignore_mode
 
 
 def test_local_source_file_rejects_a_root_first_module_resolving_outside_root(
