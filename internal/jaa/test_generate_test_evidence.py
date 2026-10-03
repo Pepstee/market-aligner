@@ -559,6 +559,7 @@ def test_public_script_content_revision_changes_for_every_product_content_class(
     )
     sidecar_directory = REPOSITORY / "runtime_evidence" / "pytest"
     sidecar_directory_created = False
+    branch_restored = False
     session: _CanonicalGeneratorSession | None = None
     try:
         with _canonical_public_cli_session(
@@ -643,8 +644,9 @@ def test_public_script_content_revision_changes_for_every_product_content_class(
             )
             revisions.append(revision_for_current_tree(GENERATOR_RECEIPT_SIDECAR_BASE))
             assert len(set(revisions)) == len(revisions)
+        branch_restored = True
     finally:
-        if sidecar_directory_created and session is not None:
+        if sidecar_directory_created and session is not None and branch_restored:
             inplace_fixture._assert_admission(
                 session.state.base_branch, session.state.base_head, False
             )

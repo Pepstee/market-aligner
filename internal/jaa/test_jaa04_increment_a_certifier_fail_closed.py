@@ -791,10 +791,13 @@ def _commit_path_change(
     try:
         if operation == "modified":
             _assert_admission(state.branch, state.head, False)
-            target.write_bytes(content or b"")
             if result_mode is not None:
-                _assert_admission(state.branch, state.head, True)
+                if target.read_bytes() != content:
+                    _abort_suite("fixture mode change unexpectedly alters file bytes")
                 target.chmod(result_mode)
+                _assert_admission(state.branch, state.head, True)
+            else:
+                target.write_bytes(content or b"")
         elif operation == "symlink":
             target.unlink()
             _assert_admission(state.branch, state.head, True)
