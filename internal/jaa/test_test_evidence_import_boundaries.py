@@ -9,10 +9,13 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tomllib
 from pathlib import Path
 
 import pytest
+
+import test_generate_test_evidence as public_cli
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -85,88 +88,162 @@ def test_isolated_checkout_prefers_its_root_over_conflicting_activated_editable_
     tmp_path: Path,
 ) -> None:
     """No PYTHONPATH may be needed to reject an activated foreign editable package."""
-    checkout = tmp_path / "isolated-checkout"
-    checkout.mkdir()
-    _write_isolated_checkout(checkout)
-
     foreign = tmp_path / "foreign-editable"
-    (foreign / "skeleton").mkdir(parents=True)
-    (foreign / "skeleton" / "__init__.py").write_text(
-        "LOCAL = False\n", encoding="utf-8"
-    )
+    package = foreign / "src" / "skeleton"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("LOCAL = False\n", encoding="utf-8")
     (foreign / "pyproject.toml").write_text(
-        "[build-system]\nrequires = ['setuptools']\nbuild-backend = 'setuptools.build_meta'\n"
-        "[project]\nname = 'conflicting-skeleton-editable'\nversion = '1.0'\n",
+        '[build-system]\nrequires = ["setuptools==80.9.0"]\n'
+        'build-backend = "setuptools.build_meta"\n'
+        '[project]\nname = "conflicting-skeleton-editable"\nversion = "1.0"\n',
         encoding="utf-8",
     )
     venv = tmp_path / "activated-locked-cpython312"
     subprocess.run((sys.executable, "-m", "venv", str(venv)), check=True)
     python = _venv_python(venv)
+    purelib = Path(
+        subprocess.run(
+            (str(python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"),
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+    )
+    assert purelib.is_dir()
+    dependency_depot = Path(sysconfig.get_paths()["purelib"]).resolve()
+    dependency_path = purelib / "zz_dependency_depot.pth"
+    assert not dependency_path.exists()
+    dependency_path.write_text(f"{dependency_depot}\n", encoding="utf-8")
     build_requirements = tomllib.loads(
         (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )["build-system"]["requires"]
     assert build_requirements == ["setuptools==80.9.0"]
-    subprocess.run(
-        (
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            *build_requirements,
-            "--requirement",
-            str(checkout / "requirements-test.lock"),
-        ),
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    environment = public_cli._generator_environment(
+        python,
+        runner_directory=None,
+        use_pythonpath=False,
     )
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["VIRTUAL_ENV"] = str(venv)
+    locked_versions = {
+        line.split("==", 1)[0]: line.split("==", 1)[1]
+        for line in (PROJECT_ROOT / "requirements-test.lock")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    locked_versions["setuptools"] = build_requirements[0].split("==", 1)[1]
+    version_probe = (
+        "import importlib.metadata as metadata, json; "
+        f"print(json.dumps({{name: metadata.version(name) for name in {tuple(locked_versions)!r}}}))"
+    )
+    observed_versions = json.loads(
+        subprocess.run(
+            (str(python), "-c", version_probe),
+            env=environment,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+    )
+    assert observed_versions == locked_versions
     subprocess.run(
         (
             str(python),
             "-m",
             "pip",
             "install",
+            "--no-index",
             "--no-build-isolation",
             "--no-deps",
             "--editable",
             str(foreign),
         ),
+        env=environment,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
-    environment = dict(os.environ)
-    environment.pop("PYTHONPATH", None)
-    environment["VIRTUAL_ENV"] = str(venv)
-    environment["PATH"] = str(python.parent) + os.pathsep + environment.get("PATH", "")
+    assert "PYTHONPATH" not in environment
 
-    foreign_import = subprocess.run(
-        (str(python), "-c", "import skeleton; print(skeleton.__file__)"),
+    distribution = json.loads(
+        subprocess.run(
+            (
+                str(python),
+                "-c",
+                "import importlib.metadata as metadata, json; "
+                "print(metadata.distribution('conflicting-skeleton-editable').read_text('direct_url.json'))",
+            ),
+            env=environment,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+    )
+    assert distribution["dir_info"] == {"editable": True}
+    assert distribution["url"] == foreign.resolve().as_uri()
+
+    origin_probe = subprocess.run(
+        (
+            str(python),
+            "-c",
+            "import importlib.util, json, sys; "
+            "assert 'skeleton' not in sys.modules; "
+            "spec = importlib.util.find_spec('skeleton'); "
+            "assert spec is not None and spec.origin is not None; "
+            "assert 'skeleton' not in sys.modules; "
+            "print(json.dumps({'origin': spec.origin, 'loaded': 'skeleton' in sys.modules}))",
+        ),
+        env=environment,
         cwd=tmp_path,
-        env=environment,
         check=True,
         text=True,
         stdout=subprocess.PIPE,
     )
-    assert (
-        Path(foreign_import.stdout.strip()).resolve().is_relative_to(foreign.resolve())
-    )
-
-    completed = subprocess.run(
-        (str(python), str(checkout / "scripts" / GENERATOR.name)),
-        cwd=checkout,
+    assert json.loads(origin_probe.stdout) == {
+        "origin": str((package / "__init__.py").resolve()),
+        "loaded": False,
+    }
+    foreign_import = subprocess.run(
+        (
+            str(python),
+            "-c",
+            "import json, skeleton; "
+            "print(json.dumps({'origin': skeleton.__file__, 'local': skeleton.LOCAL}))",
+        ),
         env=environment,
+        cwd=tmp_path,
+        check=True,
         text=True,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
     )
-    assert completed.returncode == 0, completed.stderr
-    receipt = json.loads(
-        (checkout / completed.stdout.strip()).read_text(encoding="utf-8")
-    )
+    assert json.loads(foreign_import.stdout) == {
+        "origin": str((package / "__init__.py").resolve()),
+        "local": False,
+    }
+
+    complete = "================ 2 passed in 0.01s ================"
+    career = "================ 2 passed in 0.01s ================"
+    public_cli._write_scripted_pytest(purelib, complete, career)
+    with public_cli._canonical_public_cli_session(
+        tmp_path,
+        complete,
+        career,
+        python=python,
+        runner_directory=purelib,
+        use_pythonpath=False,
+    ) as session:
+        session.environment["VIRTUAL_ENV"] = str(venv)
+        assert session.environment["VIRTUAL_ENV"] == str(venv)
+        assert "PYTHONPATH" not in session.environment
+        run = public_cli._run_canonical_public_cli_in_session(session)
+
+    assert run.returncode == 0, run.stderr
+    assert run.receipt_path is not None
+    assert run.receipt_payload is not None
+    assert run.stdout == f"{run.receipt_path}\n"
+    receipt = json.loads(run.receipt_payload)
     rendered = json.dumps(receipt, sort_keys=True)
     assert receipt["suites"] == [
         {
@@ -188,6 +265,13 @@ def test_isolated_checkout_prefers_its_root_over_conflicting_activated_editable_
         for suite in receipt["suites"]
         for arg in suite["argv"]
     )
+    assert [
+        json.loads(line)
+        for line in (run.runner_directory / "invocations.jsonl").read_text().splitlines()
+    ] == [
+        {"argv": ["-q"], "cwd": str(public_cli.REPOSITORY)},
+        {"argv": ["-q", "career_automation"], "cwd": str(public_cli.REPOSITORY)},
+    ]
 
 
 def test_public_generator_refuses_an_apparent_local_source_symlink_escape_before_receipt(
