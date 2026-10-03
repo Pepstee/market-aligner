@@ -4,8 +4,8 @@
   "node_count": 56647,
   "outputs": {
     ".graphify_labels.json": "cc04a2310929aa0faf2a8d0c20165fa0e31c16068f252f409f6782aa645cc165",
-    "GRAPH_REPORT.md": "595d4d4956c05d2f2bf0d6c5815c57610db5c3db63c83daac812cdd1eee62118",
-    "graph.json": "e04333a2ee117ae26701e7a169594c62297b17ac4ba0825682985b0d4cf6d62b"
+    "GRAPH_REPORT.md": "a0f9f7cbd9c6d3a0ca8b662032f9b02004ad89cb1ed2afc8f16d2a57d3b0a445",
+    "graph.json": "2cf7b5b49fb252d37d263b37fd52b897bf3ba47db02d2422a6c4b0585998035c"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "4f47e2310bdf0d4321b8d1179b4763e1465697d2",
+  "source_base_commit": "c470d710d8c10c6307f1c256eb67b02eb45c0ab7",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -121,7 +121,7 @@
     "internal/jaa/career_automation/fixtures/jaa04_authority_canaries/workable.json": "d0e7fe1aa258e2e6083e763fa9d49a9c99debf9d1ffa208b4d4c7b7d875d6c86",
     "internal/jaa/career_automation/fixtures/jaa05_locked_labels.json": "c5a132f4f964da507608d726b76a20860015abc6f579a71fb87e1e77ef68d953",
     "internal/jaa/career_automation/fixtures/jaa06_locked_strategies.json": "14f9a89b8c9785ddefb7561104ed03ea65d0b38f2fa97350413c4a1d70c6da05",
-    "internal/jaa/career_automation/fixtures/jaa07_locked_application_packs.json": "db09e1b792a83b87f42d28219ed85abbb304fc8eab78f4c8e0ed7efd5072f52c",
+    "internal/jaa/career_automation/fixtures/jaa07_locked_application_packs.json": "605d2766d651832aabc0571e7ad20380bbb8cc14ff6c47c9402060e08560f2df",
     "internal/jaa/career_automation/fixtures/jaa07_locked_application_packs_hard_metrics_v1.json": "e24029378de5a36d1a43f676efa6d1ef2417763305af0bdbf55d4700af66d6d5",
     "internal/jaa/career_automation/fixtures/market-aligner-v1-vectors.json": "421d39504c4828c928389d5c30c2147fb7c01249b299972a11e204e956350160",
     "internal/jaa/career_automation/fixtures/provider-observation-capture-objects/greenhouse-success-test-observation.json": "1010bf38fbf6077943e761d091dcec1b56786bd6ce73950ea2f961b0ed40b381",
@@ -579,7 +579,7 @@
     "internal/jaa/test_jaa05_quarantine_bundle.py": "d58c3a179596a25757786bd1065a6091e8c1805876b932c682d4113c855d98fb",
     "internal/jaa/test_jaa06_independent_acceptance.py": "600bb74109b4e922a9a37fadc3563897d7fc88bccefec3e71362e9f365459089",
     "internal/jaa/test_jaa06_negative_controls.py": "e2ff4e91293183b2d268a458516b2d9e6c1667f599a18f0e2da99ad49d26c371",
-    "internal/jaa/test_jaa07_independent_acceptance.py": "96e607edcd49f7ed91655e52606620521176c736fdd950c4d27b029d4b6a105c",
+    "internal/jaa/test_jaa07_independent_acceptance.py": "ff2d37ac02ec8d89ac02bf59330a1d2a5d11fa315ff79a9b42d47f8c4ef3b5c4",
     "internal/jaa/test_jaa07_negative_controls.py": "dcb01fcff1a01fd38932999014281a6475dc082183d6857453f7e1c30da60de7",
     "internal/jaa/test_jaa08_independent_acceptance.py": "f73dac00058b3ec307ae1d7748fa612b40af49c9066f0a41c89cf37d6789fdb1",
     "internal/jaa/test_jaa08_negative_controls.py": "a842370703f4f218f10539f80ba8663d4922ba90e8185459ab679fad26a8d41d",

@@ -272,10 +272,20 @@ def test_editable_outputs_are_single_column_and_preserve_authoritative_values() 
     ):
         assert value in artifacts.cv_text
         assert value in artifacts.cover_letter_text
-    assert (
-        tuple(heading for heading in CV_SECTION_ORDER if heading in artifacts.cv_text)
-        == CV_SECTION_ORDER
+    outward_section_order = (
+        "Professional Summary",
+        "Skills",
+        "Projects",
+        "Education",
+        "Experience",
+        "Highlights",
+        "Results",
+        "Outcomes",
     )
+    rendered_section_order = tuple(
+        line for line in artifacts.cv_text.splitlines() if line in CV_SECTION_ORDER
+    )
+    assert rendered_section_order == outward_section_order
     assert "Example Ltd operates a documented service." in artifacts.cover_letter_text
     assert "Describe a relevant delivery example." in artifacts.answers_text
     assert artifacts.cv_sha256 == hashlib.sha256(artifacts.cv_text.encode()).hexdigest()
