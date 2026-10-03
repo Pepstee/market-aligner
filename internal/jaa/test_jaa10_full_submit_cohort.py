@@ -361,7 +361,7 @@ def test_network_fit_documents_synthetic_facts_without_wrappers_or_duplicate_res
     assert len(employer_facts) == 1
     assert rendered.cover_letter_text.count(employer_facts[0].text) == 1
     assert employer_facts[0].text == (
-        "Example: Example's product service platform provides reliable engineering "
+        "Example's product service platform provides reliable engineering "
         "and technology for customer workflows."
     )
     with database.connection() as connection:
