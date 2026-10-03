@@ -18,7 +18,7 @@
         "path": "career_automation/browser_executor.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "43511366544c49b6989f800722415f34fef2db1f",
-        "current_git_blob": "84d84e79f26200ccbe6c7d5d2b51a549742d7169",
+        "current_git_blob": "0fe504826d8297010d196af940e72f99cdaecd93",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -34,7 +34,7 @@
         "path": "test_jaa09_independent_acceptance.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "6e260955c84c3c3aba88ac76d7f5606abce6c8ea",
-        "current_git_blob": "46c9c7590ca778a7d5cd410dc160ebec46828f7e",
+        "current_git_blob": "c89ac1655dc04ebb1eedeb4a7a3e2c5907498682",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -42,7 +42,7 @@
         "path": "test_jaa09_negative_controls.py",
         "historical_source_git_revision": "7f2acfcfddb7c1f66af6a63dd7cb52a3762f54a8",
         "historical_git_blob": "415a1168e2b22108ab1c596a489647a7cec40577",
-        "current_git_blob": "68fc10b3f174f7fbf7f25b1d371e667cc5901060",
+        "current_git_blob": "59836ddd45f171c3cc5fe4a0064d815de3182245",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -58,7 +58,7 @@
         "path": "career_automation/browser_executor.py",
         "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
         "historical_git_blob": "43511366544c49b6989f800722415f34fef2db1f",
-        "current_git_blob": "84d84e79f26200ccbe6c7d5d2b51a549742d7169",
+        "current_git_blob": "0fe504826d8297010d196af940e72f99cdaecd93",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -66,7 +66,7 @@
         "path": "test_jaa09_negative_controls.py",
         "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
         "historical_git_blob": "415a1168e2b22108ab1c596a489647a7cec40577",
-        "current_git_blob": "68fc10b3f174f7fbf7f25b1d371e667cc5901060",
+        "current_git_blob": "59836ddd45f171c3cc5fe4a0064d815de3182245",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -74,7 +74,7 @@
         "path": "career_automation/browser_executor.py",
         "historical_source_git_revision": "545b9e6489abc33896021957214e98396645188c",
         "historical_git_blob": "43511366544c49b6989f800722415f34fef2db1f",
-        "current_git_blob": "84d84e79f26200ccbe6c7d5d2b51a549742d7169",
+        "current_git_blob": "0fe504826d8297010d196af940e72f99cdaecd93",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -90,7 +90,7 @@
         "path": "career_automation/application_compiler.py",
         "historical_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
         "historical_git_blob": "c46fae1c4a55d6fcdff6bdc4362dfd526ebc0f20",
-        "current_git_blob": "8313e676009b87e8dda3b1ec70a048c7d7ee4330",
+        "current_git_blob": "3663a00021cdfce12bbf2ee1760cb6cb7dcab616",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -170,7 +170,7 @@
         "path": "test_jaa07_negative_controls.py",
         "historical_source_git_revision": "a975d7b35cd6dd20d00cc689018b91c71bf5af63",
         "historical_git_blob": "be4c88a0737591ff1eb59d244c4de9b6c94795c4",
-        "current_git_blob": "b0282ec9c5e5163a84f7dc9c0e40d4bd48754aa4",
+        "current_git_blob": "1b4eeb7cdb0e21a1929790051a598bfb9c7f7942",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -194,7 +194,7 @@
         "path": "career_automation/employer_research.py",
         "historical_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
         "historical_git_blob": "1d609bf8bc2e3ef62c7a59f668818317fad3363d",
-        "current_git_blob": "419b1df0fdc3a16b96b39c6d6c9532f29381a3ab",
+        "current_git_blob": "b176d7c7e4db0b2baf251dad8525d5c608e77c92",
         "reason": "current_source_differs_from_historical_authority"
       },
       {
@@ -210,7 +210,7 @@
         "path": "test_acceptance_declaration_contract.py",
         "historical_source_git_revision": "9bde24e294e49c98f84a16ba1f683047f8f3d1c0",
         "historical_git_blob": "2275b75c98708bf508ee36fd5f13eb02ff0f0fbf",
-        "current_git_blob": "7e8f8dd071cdd6d1c367088682905bc10d514e7e",
+        "current_git_blob": "f4a0b9dc49c58539c36288d2afb54bcd09f14a87",
         "reason": "current_source_differs_from_historical_authority"
       },
       {

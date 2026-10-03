@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "88039a67cacc5204c4de79efa47d5f4f71963f8c",
+  "source_base_commit": "d3cffe0e2d255f6d2f0c118fd098b1d0c82ce973",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -37,7 +37,7 @@
     "docs/processing/FIT-001_PROCESS_ONE_CONTRACT.md": "057cd56204b10a791697ba5774998bb5c5ee5d78da749995c0c9edfdbe81c341",
     "internal/jaa/.gitignore": "ff376858d2a842cd880e6ba615c5123c4eaffc1b5e35dd7b7cd24a65e2409079",
     "internal/jaa/AGENTS.md": "6c7db7735ac4a1613459d1542cf98a2ef6d4d1e2268a174d5af5d2d36afaeeb4",
-    "internal/jaa/ASSURANCE_MANIFEST.json": "beb3c473158be62e0eabc49fa1088b57bb5009101ad2e469f7c477920b6ef06b",
+    "internal/jaa/ASSURANCE_MANIFEST.json": "9b9ba35d09b77d75ca9a5928cd3ef20536b9a2fafe3c1c35d300db01b2bd5585",
     "internal/jaa/Architecture.md": "9fbe0027a347ba77daa454cd5ff6c93eb8ecdda7d98587fe16e78bfae295b801",
     "internal/jaa/BUILD_PLAN.md": "dc3c5ce90f242db82e8801bdf43e16c92d5fa44ee2ee357da1cbe82e092a84b4",
     "internal/jaa/FACTORY_BRIEF.md": "87acff51fe5fae6f85efee1696c5241e8ebe103ed15061b1de989d84d39708eb",
