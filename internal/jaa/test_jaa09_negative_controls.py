@@ -942,17 +942,17 @@ def test_expected_fixture_payload_normalizes_cover_note_newlines(
         )
 
     def with_newlines(value: str):
-        editable = replace(
-            authority.artifacts.editable,
-            answers_text=value,
-            answers_sha256=hashlib.sha256(value.encode()).hexdigest(),
-        )
-        changed_artifacts = replace(authority.artifacts, editable=editable)
+        def answer_for_field(field_id: str) -> str:
+            if field_id != "cover_note":
+                raise AssertionError("unexpected fixture field")
+            return value
+
         return SimpleNamespace(
             application_id=authority.application_id,
             job_key=authority.job_key,
             contact=authority.contact,
-            artifacts=changed_artifacts,
+            artifacts=authority.artifacts,
+            answer_for_field=answer_for_field,
         )
 
     expected = LocalBrowserExecutor._expected_fixture_payload_sha256(

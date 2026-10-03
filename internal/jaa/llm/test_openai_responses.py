@@ -364,7 +364,10 @@ def test_duplicate_nonfinite_and_schema_invalid_output_fail_closed(
     response.document["output"][1]["content"][0]["text"] = invalid_text
     response.content = json.dumps(response.document, separators=(",", ":")).encode()
     FakeSession.responses = [response]
-    with pytest.raises(LLMError, match="structured backend failed|not in enum"):
+    with pytest.raises(
+        LLMError,
+        match="structured backend failed|not in enum|schema validation failed",
+    ):
         client(backend(), tmp_path).complete_json(
             "policy", "{}", schema=SCHEMA, json_attempts=1
         )

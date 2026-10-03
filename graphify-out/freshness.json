@@ -1,11 +1,11 @@
 {
-  "community_count": 30064,
-  "edge_count": 73778,
-  "node_count": 56646,
+  "community_count": 30056,
+  "edge_count": 73779,
+  "node_count": 56647,
   "outputs": {
-    ".graphify_labels.json": "65a9e8b96f0238b328693cfccc7b76d0f2a7b78b70751aa9f9aaa1c035c6fdae",
-    "GRAPH_REPORT.md": "957238462f97b2be25be076911900742b8bf7c51af07b2a53d981137ec7029a5",
-    "graph.json": "80ef282451f74d8105e9c001409a1d80e20cbe4c8808d556a551309c01be18cb"
+    ".graphify_labels.json": "cc04a2310929aa0faf2a8d0c20165fa0e31c16068f252f409f6782aa645cc165",
+    "GRAPH_REPORT.md": "595d4d4956c05d2f2bf0d6c5815c57610db5c3db63c83daac812cdd1eee62118",
+    "graph.json": "e04333a2ee117ae26701e7a169594c62297b17ac4ba0825682985b0d4cf6d62b"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "a35c75292a1f46674ee295ca03cdc9d46d046e9e",
+  "source_base_commit": "4f47e2310bdf0d4321b8d1179b4763e1465697d2",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -294,7 +294,7 @@
     "internal/jaa/llm/schemas/portfolio_assess.json": "27363de1f51fec512765acf48c7e9836fb361ce439271d2c7837b669615e6015",
     "internal/jaa/llm/schemas/skill_normalise.json": "5231012fe943225bdfbdb6ebbb23fcbd26b354dda08230cc131b1f300c9fa441",
     "internal/jaa/llm/test_llm.py": "cdb122f386e0e74b8f6b4d9a223584bcbfa00b8ed1193ff457330b93b04dc272",
-    "internal/jaa/llm/test_openai_responses.py": "22fce3bea284ee042314684b935229ea19d1b72d0b2f7b36de458090fcf0b413",
+    "internal/jaa/llm/test_openai_responses.py": "582217ead0b5fd5a88b494893fb24f250bbbacf12eea1476c3325e62a674b6b2",
     "internal/jaa/profiler/README.md": "0dcfacea968fe6eb81143e283ff78acb20392da99e9e23c04ed9aad04f158d02",
     "internal/jaa/profiler/__init__.py": "c534d914bc9425930391f29420321c835eda759ee60942336f0d7b226b94bd9e",
     "internal/jaa/profiler/candidate_profile.py": "55fbaa227eb6b9b2abbd440b643dbabeb76ed2a10be27bf2a2ac6720b6cc3dfe",
@@ -584,7 +584,7 @@
     "internal/jaa/test_jaa08_independent_acceptance.py": "f73dac00058b3ec307ae1d7748fa612b40af49c9066f0a41c89cf37d6789fdb1",
     "internal/jaa/test_jaa08_negative_controls.py": "a842370703f4f218f10539f80ba8663d4922ba90e8185459ab679fad26a8d41d",
     "internal/jaa/test_jaa09_independent_acceptance.py": "725ecf94283bef741973f8e0025eeebbeadf1a09dfa31e94385e483629d6a5cf",
-    "internal/jaa/test_jaa09_negative_controls.py": "c87dd64d44985557dc83450f6a52cec96dac209e70a5388186ef212ccd9c81d9",
+    "internal/jaa/test_jaa09_negative_controls.py": "b140e11ed053121620ddc115cb1085edeea311cc929299602a5ce14e61fb283f",
     "internal/jaa/test_jaa09_real_vacancy_acceptance.py": "aabd6563ce4a39a62b451b4e75e0cb2ab42493591b8c5703d88a1d33c77ddc54",
     "internal/jaa/test_jaa09_real_vacancy_negative_controls.py": "a23cf7c8e43f0db4fe4b75b39e69979294084f098a4ebc2aa02de14891de2352",
     "internal/jaa/test_jaa10_authenticated_time_witness.py": "13fdf132e8ea5be08529c7e62bd2d62888c0e3a10c50844ac4ec10aaf2da1e66",
@@ -680,7 +680,7 @@
     "internal/jaa/test_production_operational_surfaces.py": "6ba2d2722fb94d866f683c3bc2a582387e29f8222f41089a302b7dac90d519bb",
     "internal/jaa/test_production_preparation_runner.py": "3123e333343aadd80736d6d5181b765dfd31af82933a15bd12a11093dd6e8e05",
     "internal/jaa/test_production_queue.py": "4938e6ccb2201304b3fec2437af3ee9015ca94691b5f5c1e104e8b6069707718",
-    "internal/jaa/test_production_runner.py": "c34d8ddecae9111dfe093159b72a1b6bfcfdf60850d3353cfc1b14ae47ad07c0",
+    "internal/jaa/test_production_runner.py": "da342c49aa888b83b88a520075646333932c1f1bba3080262c98eeecb1166bf8",
     "internal/jaa/test_protected_corpus_binding.py": "f89867e487a336cd2cbba2af498d32677b2772bd6509ebcd52c7bb94b6af2b65",
     "internal/jaa/test_provider_observation_authority.py": "41d999fbae2f12e979ceb181ad9e02b15385ed063ff2af4c6e346f4ea37466c2",
     "internal/jaa/test_provider_observation_capture.py": "6887778502909c999ef1c5d949ed18dbfd536914d29b2e406c07330961d21aa4",
