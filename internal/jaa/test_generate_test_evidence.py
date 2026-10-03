@@ -9,15 +9,32 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+import test_jaa04_increment_a_certifier_fail_closed as inplace_fixture
+
 
 REPOSITORY = Path(__file__).resolve().parent
 GENERATOR = REPOSITORY / "scripts" / "generate-test-evidence.py"
+GENERATOR_README_PATH = "internal/jaa/README.md"
+
+
+@dataclass(frozen=True)
+class _CanonicalGeneratorRun:
+    returncode: int
+    stdout: str
+    stderr: str
+    receipt_path: str | None
+    receipt_payload: bytes | None
+    tested_git_parent: str
+    runner_directory: Path
 
 
 def _generator_module():
@@ -29,6 +46,224 @@ def _generator_module():
 
 
 GENERATOR_MODULE = _generator_module()
+
+
+def _write_scripted_pytest(
+    directory: Path,
+    complete_output: str,
+    career_output: str,
+    complete_status: int = 0,
+    career_status: int = 0,
+) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    runner = directory / "pytest.py"
+    runner.write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        f"career = {career_output!r}\n"
+        f"complete = {complete_output!r}\n"
+        f"career_status = {career_status!r}\n"
+        f"complete_status = {complete_status!r}\n"
+        "arguments = sys.argv[1:]\n"
+        "with (Path(__file__).parent / 'invocations.jsonl').open('a', encoding='utf-8') as stream:\n"
+        "    stream.write(json.dumps({'argv': arguments, 'cwd': os.getcwd()}) + '\\n')\n"
+        "print(career if 'career_automation' in arguments else complete)\n"
+        "raise SystemExit(career_status if 'career_automation' in arguments else complete_status)\n",
+        encoding="utf-8",
+    )
+
+
+def _generator_environment(
+    python: Path | str,
+    *,
+    runner_directory: Path | None,
+    use_pythonpath: bool = True,
+) -> dict[str, str]:
+    environment = {
+        "PATH": os.pathsep.join(
+            (str(Path(python).parent), "/usr/local/bin", "/usr/bin", "/bin")
+        ),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PYTHONNOUSERSITE": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "PIP_CONFIG_FILE": "/dev/null",
+        "PIP_NO_INDEX": "1",
+    }
+    if runner_directory is not None and use_pythonpath:
+        environment["PYTHONPATH"] = str(runner_directory)
+    return environment
+
+
+def _run_canonical_public_cli(
+    tmp_path: Path,
+    complete_output: str,
+    career_output: str,
+    complete_status: int = 0,
+    career_status: int = 0,
+    *,
+    python: Path | str = sys.executable,
+    runner_directory: Path | None = None,
+    use_pythonpath: bool = True,
+) -> _CanonicalGeneratorRun:
+    if runner_directory is None:
+        runner_directory = tmp_path / "scripted-test-runner"
+        _write_scripted_pytest(
+            runner_directory,
+            complete_output,
+            career_output,
+            complete_status,
+            career_status,
+        )
+    elif not (runner_directory / "pytest.py").is_file():
+        raise AssertionError("scripted pytest runner is not present in the supplied environment")
+
+    environment = _generator_environment(
+        python,
+        runner_directory=runner_directory if runner_directory is not None else None,
+        use_pythonpath=use_pythonpath,
+    )
+    receipt_directory = REPOSITORY / "runtime_evidence" / "pytest"
+    evidence_root = receipt_directory.parent
+    receipt_directory_existed = receipt_directory.exists()
+    evidence_root_existed = evidence_root.exists()
+
+    with inplace_fixture._committed_inplace_branch(
+        "test-evidence-cli",
+        allowed_mutations={GENERATOR_README_PATH},
+        commit_sequence=inplace_fixture.TEST_EVIDENCE_GENERATOR_COMMIT_SEQUENCE,
+    ) as state:
+        original_readme = (REPOSITORY / "README.md").read_bytes()
+        marker = f"\n<!-- test-evidence-cli:{uuid.uuid4().hex} -->\n"
+        inplace_fixture._commit_mutation(
+            state,
+            GENERATOR_README_PATH,
+            original_readme.decode("utf-8") + marker,
+            "test-evidence-cli",
+        )
+        inplace_fixture._assert_admission(state.branch, state.head, False)
+        completed = subprocess.run(
+            (str(python), str(GENERATOR)),
+            cwd=REPOSITORY,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            if inplace_fixture._git("status", "--porcelain", "--untracked-files=all"):
+                raise AssertionError("rejected generator run left unexpected repository changes")
+            inplace_fixture._assert_admission(state.branch, state.head, False)
+            return _CanonicalGeneratorRun(
+                completed.returncode,
+                completed.stdout,
+                completed.stderr,
+                None,
+                None,
+                state.head,
+                runner_directory,
+            )
+
+        output_lines = completed.stdout.splitlines()
+        if (
+            len(output_lines) != 1
+            or re.fullmatch(
+                r"runtime_evidence/pytest/sha256-[0-9a-f]{64}\.json",
+                output_lines[0],
+            ) is None
+        ):
+            raise AssertionError("canonical generator returned an unexpected receipt path")
+        receipt_relative_path = output_lines[0]
+        receipt_path = REPOSITORY / receipt_relative_path
+        if (
+            receipt_path.parent.resolve() != receipt_directory.resolve()
+            or any(parent.is_symlink() for parent in (receipt_path.parent, evidence_root))
+            or not stat.S_ISREG(receipt_path.lstat().st_mode)
+        ):
+            raise AssertionError("canonical generator receipt is not a regular in-root file")
+        receipt_payload = receipt_path.read_bytes()
+        receipt_digest = hashlib.sha256(receipt_payload).hexdigest()
+        receipt_repository_path = receipt_path.relative_to(
+            inplace_fixture.REPOSITORY_ROOT
+        ).as_posix()
+        expected_status = [f"?? {receipt_repository_path}"]
+        inplace_fixture._assert_admission(state.branch, state.head, True)
+        if (
+            Path(receipt_relative_path).name != f"sha256-{receipt_digest}.json"
+            or inplace_fixture._git(
+                "status", "--porcelain", "--untracked-files=all"
+            ).splitlines()
+            != expected_status
+        ):
+            raise AssertionError("canonical generator receipt is not the sole exact runtime artifact")
+
+        inplace_fixture._assert_admission(state.branch, state.head, True)
+        if (
+            not receipt_path.is_file()
+            or receipt_path.is_symlink()
+            or hashlib.sha256(receipt_path.read_bytes()).hexdigest() != receipt_digest
+        ):
+            raise AssertionError("canonical generator receipt changed before exact cleanup")
+        receipt_path.unlink()
+        if not receipt_directory_existed:
+            if receipt_directory.is_symlink() or any(receipt_directory.iterdir()):
+                raise AssertionError("new receipt directory contains an unowned artifact")
+            inplace_fixture._assert_admission(state.branch, state.head, False)
+            receipt_directory.rmdir()
+        if not evidence_root_existed and evidence_root.is_dir() and not any(evidence_root.iterdir()):
+            inplace_fixture._assert_admission(state.branch, state.head, False)
+            evidence_root.rmdir()
+        inplace_fixture._assert_admission(state.branch, state.head, False)
+        if inplace_fixture._git("status", "--porcelain", "--untracked-files=all"):
+            raise AssertionError("canonical generator receipt cleanup did not restore clean status")
+        return _CanonicalGeneratorRun(
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+            receipt_relative_path,
+            receipt_payload,
+            state.head,
+            runner_directory,
+        )
+
+
+def test_canonical_public_cli_writes_a_bound_receipt_and_restores_clean_tree(
+    tmp_path: Path,
+) -> None:
+    complete = "================ 4 passed in 0.01s ================"
+    career = "================ 2 passed in 0.01s ================"
+    run = _run_canonical_public_cli(tmp_path, complete, career)
+
+    assert run.returncode == 0, run.stderr
+    assert run.receipt_path is not None
+    assert run.receipt_payload is not None
+    assert run.stdout == f"{run.receipt_path}\n"
+    receipt = json.loads(run.receipt_payload)
+    assert receipt["tested_git_parent"] == run.tested_git_parent
+    assert receipt["suites"] == [
+        {
+            "name": "complete",
+            "argv": ["python", "-m", "pytest", "-q"],
+            "counts": {"collected": 4, "passed": 4, "skipped": 0, "failed": 0},
+        },
+        {
+            "name": "career_automation",
+            "argv": ["python", "-m", "pytest", "-q", "career_automation"],
+            "counts": {"collected": 2, "passed": 2, "skipped": 0, "failed": 0},
+            "historical_baseline_passed": 65,
+        },
+    ]
+    invocations = [
+        json.loads(line)
+        for line in (run.runner_directory / "invocations.jsonl").read_text().splitlines()
+    ]
+    assert invocations == [
+        {"argv": ["-q"], "cwd": str(REPOSITORY)},
+        {"argv": ["-q", "career_automation"], "cwd": str(REPOSITORY)},
+    ]
+    assert not (REPOSITORY / run.receipt_path).exists()
 
 
 def _identity_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
