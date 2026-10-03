@@ -1202,6 +1202,10 @@ def _synthetic_seam_fixture(
         observed["sanity_package"] = package_under_review
         return SimpleNamespace(receipt_sha256="4" * 64, backend_identity="synthetic")
 
+    def tracked_combined_review(package_under_review, client, **kwargs):
+        observed["combined_review_kwargs"] = kwargs
+        return tracked_review(package_under_review, client)
+
     def tracked_generate(**kwargs):
         return package
 
@@ -1226,6 +1230,11 @@ def _synthetic_seam_fixture(
     monkeypatch.setattr(
         "career_automation.gutua_greenhouse_session.review_application_package",
         tracked_review,
+    )
+    monkeypatch.setattr(
+        session_module,
+        "review_application_package_with_pinned_skills",
+        tracked_combined_review,
     )
     monkeypatch.setattr(
         session_module, "capture_or_recover_greenhouse_forensic_observation", tracked_capture
@@ -1466,6 +1475,7 @@ def test_synthetic_seam_passive_forensics_after_sanity_before_gate(
         "inventory.active",
         "fill",
     ]
+    assert fixture.observed["combined_review_kwargs"] == {}
     capture_kwargs = fixture.observed["capture_kwargs"]
     assert capture_kwargs["artifact_set_sha256"] == fixture.artifact_set_sha256
     assert capture_kwargs["release_manifest_sha256"] is None
@@ -1536,6 +1546,7 @@ def test_synthetic_seam_blocked_forensics_archives_then_refuses_before_gate(
             )
         browser.close()
     assert fixture.order == ["inventory.passive", "sanity", "forensics"]
+    assert fixture.observed["combined_review_kwargs"] == {}
     manifest = json.loads(
         (
             fixture.archive_root

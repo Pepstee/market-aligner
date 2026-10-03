@@ -534,6 +534,7 @@ def _prepared_authority(
         page,
         source=source,
         artifacts=artifacts,
+        questions=questions,
         document_assurance_receipts=document_receipts,
         sanity_review_receipt=sanity_receipt,
         production_identity=ProductionIdentity(

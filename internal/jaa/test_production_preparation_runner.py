@@ -125,10 +125,11 @@ def _real_preflight_deployment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> tuple[runner._ProductionPreparationDeployment, dict[str, Path]]:
     data_home = tmp_path / "data-home"
-    admission_root = data_home / "state" / "jaa-production-admissions"
-    admission_root.mkdir(parents=True, mode=0o700)
-    (data_home / "state").chmod(0o700)
-    admission_root.chmod(0o700)
+    data_home.mkdir(mode=0o700)
+    data_state = data_home / "state"
+    data_state.mkdir(mode=0o700)
+    admission_root = data_state / "jaa-production-admissions"
+    admission_root.mkdir(mode=0o700)
     database = admission_root / "admissions.sqlite3"
     connection = sqlite3.connect(database)
     connection.execute("CREATE TABLE fixture (identity TEXT NOT NULL)")
@@ -142,23 +143,27 @@ def _real_preflight_deployment(
     outbox.mkdir(mode=0o700)
     poppler = tmp_path / "poppler"
     poppler.mkdir(mode=0o700)
-    poppler_libraries = tmp_path / "lib" / "x86_64-linux-gnu"
-    poppler_libraries.mkdir(mode=0o700, parents=True)
+    library_root = tmp_path / "lib"
+    library_root.mkdir(mode=0o700)
+    poppler_libraries = library_root / "x86_64-linux-gnu"
+    poppler_libraries.mkdir(mode=0o700)
     codex = tmp_path / "codex"
     codex.write_bytes(b"exact codex")
     codex.chmod(0o755)
+    authority_root = tmp_path / "authority"
+    authority_root.mkdir(mode=0o700)
+    contact_root = tmp_path / "contact"
+    contact_root.mkdir(mode=0o700)
     paths = {
-        "candidate": tmp_path / "authority" / "candidate.json",
-        "contact": tmp_path / "contact" / "contact.json",
-        "public_key": tmp_path / "contact" / "public.pem",
-        "registry": tmp_path / "contact" / "registry.json",
+        "candidate": authority_root / "candidate.json",
+        "contact": contact_root / "contact.json",
+        "public_key": contact_root / "public.pem",
+        "registry": contact_root / "registry.json",
         "codex": codex,
         "database": database,
         "output": tmp_path / "output",
         "recruiter": tmp_path / "recruiter",
     }
-    paths["candidate"].parent.mkdir(mode=0o700)
-    paths["contact"].parent.mkdir(mode=0o700)
     for name in ("candidate", "contact", "public_key", "registry"):
         value = (
             b'{"prior_registry_sha256":null}'

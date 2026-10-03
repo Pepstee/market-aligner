@@ -1,11 +1,11 @@
 {
-  "community_count": 30082,
-  "edge_count": 73770,
-  "node_count": 56644,
+  "community_count": 30049,
+  "edge_count": 73775,
+  "node_count": 56646,
   "outputs": {
-    ".graphify_labels.json": "31985f059acf95992e842478a4b18b039f5ab2120181978ed193c4c76642f82f",
-    "GRAPH_REPORT.md": "8f55a0cefeaf94df70c2bdfe0cc7a5db6505814a80280f91306ed8e0586aae61",
-    "graph.json": "fc3ddfab9b32904928195aefdff0bbb066a32028f25d4e0b2edbb47d72b9005a"
+    ".graphify_labels.json": "fbb0eac39b84b21b01dcef6c123c271f32fc53d7cc8ce5d479edd16dbc755a3a",
+    "GRAPH_REPORT.md": "586fd209c7b1c74a58f3df2675ed780b5a51d599113a1899e0c18113a02fc881",
+    "graph.json": "26d185fc60ffb4fc2bf129e92c95d4b16b47a07e03cd57f2b544941e62d817e7"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "b896d399ff1941e0736aef287aa61f3b816f245e",
+  "source_base_commit": "68fd0e2bd522a997b47dc36c0c848c1d2c9ce003",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -221,7 +221,7 @@
     "internal/jaa/career_automation/testing_adversarial_recruiter.py": "88b89db0889945788ad8699fc6066c687006cb287dc2df78a451bb6a5b1bb1d2",
     "internal/jaa/career_automation/testing_application_archive.py": "e600bba85ab664aa2d653265de77cfdf6439fafcc6eafcd8e34a86d2467dabdd",
     "internal/jaa/career_automation/testing_handoff_contract.py": "8027515896407080499828e2b4137200610dca6545bd9534b7b7b4f7f1cc1957",
-    "internal/jaa/career_automation/testing_sanity_review.py": "35b314970a6eca2c9b2c1123d27408b2260f74f0b9c819cbb72cc1c3c432f58f",
+    "internal/jaa/career_automation/testing_sanity_review.py": "e2a9f580d1cf538f714cc8157c58ab5be34452e60ba1a4928102305f454c911f",
     "internal/jaa/career_automation/three_anchor_cohort_recorder.py": "e6981761ab36510f202a45d2c1595b8a8657257dca3c6bd3f1a001df9a260cae",
     "internal/jaa/career_automation/vacancy_identity.py": "91a110eadbbe6a946472abc63d0224933dee9e89240fd00a5d1279d2671f73a2",
     "internal/jaa/career_automation/workable_live_adapter.py": "68028bb364c8a88ec695c05819a4f2c2463d53eb47e00f08c4012b2d4d928ff8",
@@ -529,7 +529,7 @@
     "internal/jaa/test_gigabyte_current_time_service.py": "7d77ccca9a84a6d11343e0b28dcc7dde6c1d0ba9513b7890d78d5e29b0e029c1",
     "internal/jaa/test_gmail_confirmation.py": "a1ad2ec2ec5ce9bc04ebec9bf6d168fa62ea633ef9b5fc24074dc63e1ccdf584",
     "internal/jaa/test_greenhouse_live_discovery.py": "a67169754a402f974962843215348e920d9aecac87ab5af7c02d1944da05435c",
-    "internal/jaa/test_gutua_greenhouse_session.py": "4e95eef2dbab540d8d03c8f52a817fe87ea6d4f4e73eb7609575ac6eec6dce7b",
+    "internal/jaa/test_gutua_greenhouse_session.py": "fa46a83ec2b7b3d77ffe489d64b2092df5a730c3b8cab7f9cc5f71e899c1a98e",
     "internal/jaa/test_import_legacy_application_archive.py": "6c868c50c7a3011e77d5de62cb4cd6e2b9461d29c10eb9255eb5425a80c0197a",
     "internal/jaa/test_install_market_handoff_config.py": "0899b6472d97b90d6af3c462939a02430c2d443f22534f0c37ef061badeabf21",
     "internal/jaa/test_jaa01_adversarial_runtime.py": "05f1bc558d7bdee2bc47d9e5b9d3057fd34583a703f5e8ac7be2067d579bcbef",
@@ -675,10 +675,10 @@
     "internal/jaa/test_portable_acceptance_runtime_config.py": "8b433dab1f5bdda3edc10a4ba756acf9e3b2a252d48b75eb33cf17c38c0d6a5b",
     "internal/jaa/test_portable_lock_verification.py": "e1622645ca387ee3eb053533fdc62fecfd54192a25648538f6be4eec55aece1b",
     "internal/jaa/test_preview_candidate_selection.py": "5b4708be9f818836b1b4be39996e68b1a2938421f489e6dd8f63ca556fa4af47",
-    "internal/jaa/test_production_ats_executor.py": "0e43f3713c5bebfbe320bf93d6e3b275500a40f21bb4fd9486796f6cb084e735",
+    "internal/jaa/test_production_ats_executor.py": "27978779381fddee86444eaa70f08a798732d31e99783dd24ffdfd83cfd0be1d",
     "internal/jaa/test_production_handoff_runner.py": "2797287cfc2e0a132007307c438370922fdd13dc579bbf65f5a5de353be20656",
     "internal/jaa/test_production_operational_surfaces.py": "6ba2d2722fb94d866f683c3bc2a582387e29f8222f41089a302b7dac90d519bb",
-    "internal/jaa/test_production_preparation_runner.py": "136038578666556d840c7ed2618f8273bc8dcf9d5ee986768390251dce109938",
+    "internal/jaa/test_production_preparation_runner.py": "3123e333343aadd80736d6d5181b765dfd31af82933a15bd12a11093dd6e8e05",
     "internal/jaa/test_production_queue.py": "4938e6ccb2201304b3fec2437af3ee9015ca94691b5f5c1e104e8b6069707718",
     "internal/jaa/test_production_runner.py": "c34d8ddecae9111dfe093159b72a1b6bfcfdf60850d3353cfc1b14ae47ad07c0",
     "internal/jaa/test_protected_corpus_binding.py": "f89867e487a336cd2cbba2af498d32677b2772bd6509ebcd52c7bb94b6af2b65",

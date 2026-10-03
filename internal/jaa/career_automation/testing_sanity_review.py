@@ -36,6 +36,18 @@ class FixturePassBackend(Backend):
             model="scripted-fixture-v1",
         )
 
+    def complete_structured(
+        self,
+        system: str,
+        user: str,
+        temperature: float,
+        *,
+        schema: dict,
+        task: str,
+        image_bytes: tuple[bytes, ...] = (),
+    ) -> LLMResponse:
+        return self.complete(system, user, temperature)
+
 
 def fixture_pass_receipt(
     *,
