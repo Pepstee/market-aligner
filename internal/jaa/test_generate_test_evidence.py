@@ -593,19 +593,19 @@ def test_public_script_writes_hashed_content_revision_bound_and_redacted_receipt
 ) -> None:
     private_path = "/Users/receipt-test-user/private-worktree"
     secret = "TOP-SECRET-RECEIPT-TOKEN"
-    completed = _public_generator(
+    completed = _run_canonical_public_cli(
         tmp_path,
         f"runner diagnostic: {private_path} token={secret}\n"
         "================ 70 passed, 5 skipped in 0.10s ================",
         "================ 65 passed in 0.05s ================",
     )
     assert completed.returncode == 0, completed.stderr
-    root = tmp_path / "isolated-repository"
-    receipt = root / completed.stdout.strip()
-    payload = receipt.read_bytes()
+    assert completed.receipt_path is not None
+    assert completed.receipt_payload is not None
+    payload = completed.receipt_payload
     document = json.loads(payload)
 
-    assert receipt.name == f"sha256-{hashlib.sha256(payload).hexdigest()}.json"
+    assert Path(completed.receipt_path).name == f"sha256-{hashlib.sha256(payload).hexdigest()}.json"
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", document["tested_product_content_revision"])
     assert re.fullmatch(r"[0-9a-f]{40,64}", document["tested_git_parent"])
     assert "tested_source_revision" not in document
@@ -633,14 +633,14 @@ def test_public_script_writes_hashed_content_revision_bound_and_redacted_receipt
 
 
 def test_public_receipt_preserves_subtest_count_separately(tmp_path: Path) -> None:
-    completed = _public_generator(
+    completed = _run_canonical_public_cli(
         tmp_path,
         "================ 219 passed, 25 subtests passed in 0.10s ================",
         "================ 65 passed in 0.05s ================",
     )
     assert completed.returncode == 0, completed.stderr
-    root = tmp_path / "isolated-repository"
-    receipt = json.loads((root / completed.stdout.strip()).read_text(encoding="utf-8"))
+    assert completed.receipt_payload is not None
+    receipt = json.loads(completed.receipt_payload)
     assert receipt["suites"][0]["counts"] == {
         "collected": 219,
         "passed": 219,
@@ -662,28 +662,30 @@ def test_public_script_refuses_every_failing_or_malformed_suite_without_receipt(
     tmp_path: Path, suite: str, output: str
 ) -> None:
     good = "================ 65 passed in 0.01s ================"
-    completed = _public_generator(
+    completed = _run_canonical_public_cli(
         tmp_path, output if suite == "complete" else good, output if suite == "career" else good,
     )
     assert completed.returncode == 1
     assert "test evidence rejected:" in completed.stderr
-    evidence_directory = tmp_path / "isolated-repository" / "runtime_evidence"
-    assert not evidence_directory.exists() or not list(evidence_directory.rglob("*.json"))
+    assert completed.receipt_path is None
+    assert completed.receipt_payload is None
+    assert not list((REPOSITORY / "runtime_evidence" / "pytest").rglob("*.json"))
 
 
 @pytest.mark.parametrize("suite", ["complete", "career"])
 def test_public_script_refuses_nonzero_exit_from_each_suite(tmp_path: Path, suite: str) -> None:
-    root = _public_repository(
+    completed = _run_canonical_public_cli(
         tmp_path,
         "================ 4 passed in 0.01s ================",
         "================ 2 passed in 0.01s ================",
         complete_status=9 if suite == "complete" else 0,
         career_status=9 if suite == "career" else 0,
     )
-    completed = _run_public_generator(root)
     assert completed.returncode == 1
     assert "suite exited with status 9" in completed.stderr
-    assert not (root / "runtime_evidence" / "pytest").exists()
+    assert completed.receipt_path is None
+    assert completed.receipt_payload is None
+    assert not (REPOSITORY / "runtime_evidence" / "pytest").exists()
 
 
 @pytest.mark.parametrize("body,accepted", [

@@ -1,11 +1,11 @@
 {
-  "community_count": 30075,
-  "edge_count": 73756,
+  "community_count": 30068,
+  "edge_count": 73755,
   "node_count": 56644,
   "outputs": {
-    ".graphify_labels.json": "bdfa4be9910b66d6d9386e1ea93b2c74e0b05e4527b75b6348955d92de655f14",
-    "GRAPH_REPORT.md": "80ad968e751655d726621ec401bfb4a47f968c01b0211cb1d8722d2ac62ed8c6",
-    "graph.json": "a72b6e27a4db264669d45d8a0ee3cf551b1a9d8ed900f6c3fba2825d0530756b"
+    ".graphify_labels.json": "7b28829fdf655158fea7ed9aea99fdd3de5dff35dadeebdadd75fd68efa580e0",
+    "GRAPH_REPORT.md": "85c47a765bbe7f8dbcb7f1fb0a49bfa2ccf606626dd27dfc2b26587b918cdd2f",
+    "graph.json": "3fd083f8831b49373b2da35569d41ffed1044e7bbda9f7d9fed60c42b1a11ca4"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "08c517dea3ff40f915d0ea361c7a2170565cdade",
+  "source_base_commit": "106e896aee234e256dafa50b0406a21a1af1df56",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -524,7 +524,7 @@
     "internal/jaa/test_event_receipts.py": "805446f67a009f82ee0a13737f59763c37a9be525ec6cd47efb48b57db7d3ea0",
     "internal/jaa/test_external_document_assurance.py": "a48634392e5654c63c76e58de5587df95eb92aa170fb7d6be0c2b3ae5c86ff87",
     "internal/jaa/test_form_filling_forensics.py": "bf9ccbf39e0281332e48af655821097c0fb0956fdc6e8993c6535a03ce3f0b4a",
-    "internal/jaa/test_generate_test_evidence.py": "b35140aa1d6439f2772597f91e446d48ca09442a1d0304d6ee4731b4b423ad09",
+    "internal/jaa/test_generate_test_evidence.py": "fa9fa6cf905e529b3df81e18c48d792a7e557f9c68b4375bf1b3092ace4d46e3",
     "internal/jaa/test_gigabyte_current_time_broker.py": "1f5f4453d0820772bafd6ead2b62ae266bf9ff68415515144c1dc19985d5048c",
     "internal/jaa/test_gigabyte_current_time_service.py": "7d77ccca9a84a6d11343e0b28dcc7dde6c1d0ba9513b7890d78d5e29b0e029c1",
     "internal/jaa/test_gmail_confirmation.py": "a1ad2ec2ec5ce9bc04ebec9bf6d168fa62ea633ef9b5fc24074dc63e1ccdf584",
