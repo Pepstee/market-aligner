@@ -1,40 +1,40 @@
 # Graph Report - market-aligner  (2026-10-03)
 
 ## Corpus Check
-- 771 files · ~1,070,167 words
+- 771 files · ~1,070,179 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 11 file(s) not represented in the graph (top: (none) 4, .jsonl 4, .lock 2)
 
 ## Summary
-- 56646 nodes · 73775 edges · 30049 communities (658 shown, 29391 thin omitted)
+- 56646 nodes · 73778 edges · 30064 communities (672 shown, 29392 thin omitted)
 - Extraction: 94% EXTRACTED · 6% INFERRED · 0% AMBIGUOUS · INFERRED: 4498 edges (avg confidence: 0.92)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `68fd0e2b`
+- Built from commit: `a35c7529`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - test_jaa05_human_evidence_acceptance.py
-- profiler/store.py
+- market_aligner/cli.py
 - constraints.py
-- capabilities.py
+- gutua_greenhouse_session.py
 - ScoringParams
-- content_hash
+- FactualSentence
 - PipelineState
-- .start
-- test_gutua_greenhouse_session.py
-- external_document_assurance.py
+- FixtureReceipt
+- test_production_runner.py
+- test_external_document_assurance.py
 - ProcessingRefused
-- AshbyOneUseCircuit
+- JAA08ReleaseAuthority
 - geography.py
 - Repair observed Linux browser portability and eligibility descriptor leaks
-- gutua_greenhouse_session.py
+- test_application_quality.py
 - test_jaa08_independent_acceptance.py
 - test_ats_application_authority.py
-- AshbyLiveAdapter
-- test_jaa10_network_witnessed_fixture_negative_controls.py
+- AshbyOneUseCircuit
+- adversarial_rebuild.py
 - status_ingestion_live.py
 - test_candidate_application_factory.py
 - research/store.py
@@ -50,15 +50,15 @@
 - typing
 - test_application_sanity_review.py
 - ._payload
-- cv_generation/service.py
+- test_cv_composition_service.py
 - BrowserWorkflowStore
 - scraper/adapters/ireland_boards.py
-- CalibrationPolicy
+- official_cohort.py
 - str
 - test_jaa15_negative_controls.py
-- ats_forensics.py
+- browser_workflows.py
 - document_quality.py
-- shadow_full_submit_cohort.py
+- test_jaa10_independent_acceptance.py
 - interview_communication.py
 - test_jaa_events_v1.py
 - test_jaa09_real_vacancy_negative_controls.py
@@ -76,19 +76,19 @@
 - hard_metrics_evaluation.py
 - test_workable_walking_skeleton.py
 - test_production_ats_executor.py
-- test_jaa10_shadow_fixture_measures_negative_controls.py
-- prepare_cloudcops_release
+- ShadowObservation
+- cloudcops_canary_release.py
 - eligibility_one
-- replace
-- adversarial_rebuild.py
+- content_hash
+- test_application_evidence_safe_rebuild.py
 - production_handoff_admission_runner.py
 - candidate_contact_authority.py
 - test_jaa11_live_canary_fixture_dry_run_negative_controls.py
 - OpenExistingSeamTests
 - properties
 - properties
-- service/processing.py
-- ApplicationSource
+- assessment/scoring.py
+- replace
 - career_automation/operations.py
 - test_jaa16_operations_live.py
 - _DescriptorSet
@@ -110,7 +110,7 @@
 - ObservationAcquisitionError
 - FIT-001: Evidence-Bound Process-One Contract
 - ApplicationArchiveError
-- ashby_live_adapter.py
+- AshbyNonReleasePreparator
 - LLMClient
 - ObservationRouteManifest
 - crawl.py
@@ -118,13 +118,13 @@
 - test_jaa05_independent_acceptance.py
 - creative_portfolio_assess.json
 - python312-exact-assignment-parent-accounting
-- test_jaa09_real_vacancy_acceptance.py
+- career_automation/migrations.py
 - AssessmentStore
 - core.py
 - protected_corpus_binding.py
 - _flow
-- SecurityPolicyError
-- test_jaa05_package022_liveness_canary_contract.py
+- ScopedTokenAuthority
+- test_jaa05_package020_preserved_supply_audit.py
 - test_jaa10_external_observation_acquisition.py
 - canonical_json
 - run.py
@@ -135,14 +135,14 @@
 - test_jaa04_increment_a_certifier_fail_closed.py
 - status_ingestion.py
 - test_jaa04_official_cohort_config.py
-- official_ats_adapter.py
-- DurableCircuitStore
+- AdapterFixtureObservation
+- durable_circuit_store.py
 - nongreenhouse_fit_projection.py
 - _write_leaf
 - candidate_authority.py
 - _profile
 - .test_event_malformed_shapes_refuse_classification
-- test_jaa10_full_submit_cohort_negative_controls.py
+- shadow_full_submit_cohort.py
 - IngestCliTests
 - gap_optimizer.py
 - _regular_file
@@ -171,23 +171,23 @@
 - ManifestNegativeMatrixTests
 - test_preview_candidate_selection.py
 - test_jaa11_personio_live_adapter.py
-- test_market_aligner_jaa_handoff.py
+- test_local_greenhouse_observation_composes_to_no_submit_chrome_readback
 - NotefolioAdapter
 - FdStabilityCampaignTests
 - RawResponseCache
 - test_jaa05_negative_controls.py
 - authority_provisioning.py
-- types
+- install_gigabyte_current_time.py
 - test_jaa11_live_canary_operator_answer_composition.py
 - PublicationOrderFaultTests
 - operations_live.py
 - test_jaa11_recruitee_live_adapter.py
 - certify_jaa04_increment_a.py
-- human_evidence_ingestion.py
+- ._execute_submit
 - evaluate_hard_metrics
 - ._prepare
 - SaraminAdapter
-- test_jaa04_ambiguity_resume_independent.py
+- test_jaa05_package022_liveness_canary_contract.py
 - test_jaa02_runtime_identity_tamper.py
 - run_jaa05_liveness_canary.py
 - ScraplingClient
@@ -237,7 +237,7 @@
 - StageDPart3C1AClassificationTests
 - Personio and Recruitee adapter reconciliation
 - open_existing_private_data_root
-- Application sanity review
+- test_jaa10_shadow_elapsed_cohort_negative_controls.py
 - production_preparation_runner.py
 - test_jaa10_three_anchor_cohort_recorder_negative_controls.py
 - tracked_source_revision.py
@@ -248,21 +248,21 @@
 - test_skeleton.py
 - test_jaa12_status_store_coordinator.py
 - test_jaa03_historical_receipt.py
-- official_cohort.py
+- seed_cohort.py
 - test_jaa03_receipt_tamper_controls.py
 - _fixture_review
 - production-greenhouse-runner-variants
 - api.py
 - test_jaa11_durable_circuit_acceptance.py
-- collectors/scrapling_worker.py
+- test_jaa10_hard_metrics_evaluation.py
 - JobDatabase
 - test_jaa04_acceptance_boundary.py
 - RevalidationDriftTests
 - SaraminAdapter
 - scoring-numeric-boundary-recovery
-- market_aligner/cli.py
+- benchmark_learning.py
 - test_protected_corpus_binding.py
-- OpportunityGate
+- ServiceTests
 - test_publication_fail_closed.py
 - test_wal_source_preservation.py
 - test_jaa12_status_store_coordinator_negative_controls.py
@@ -282,10 +282,10 @@
 - certify_jaa01_runtime.py
 - FakePage
 - test_jaa14_outcome_feedback_live.py
-- test_every_browser_stage_failure_is_terminally_archived
+- test_jaa10_shadow_observation_ledger_negative_controls.py
 - test_jaa10_linux_network_namespace_witness_negative_controls.py
 - test_runtime_evidence_contract.py
-- evaluate_jaa05_locked_labels.py
+- MatchingPolicy
 - ObservabilityStoreTests
 - test_scrapling_runtime_precedence.py
 - personio_live_adapter.py
@@ -296,7 +296,7 @@
 - Wire creative extraction contracts and offline end-to-end path
 - .test_malformed_row_shapes_conflict_on_both_families
 - test_jaa12_status_evidence_reader_negative_controls.py
-- .__init__
+- Any
 - FollowUpDueLedger
 - .test_parent_blocking_sh_parks_until_child_releases
 - .test_external_provider_seams_explode_zero
@@ -314,17 +314,17 @@
 - _parse_detail
 - _manifest_bytes
 - FlowDefinition
-- test_jaa_module_boundaries.py
-- pathlib
 - test_live_vacancy_discovery.py
+- pathlib
+- classify_live_vacancy_response
 - EditorialStageAdapter
 - WantedAdapter
-- _requirement
-- _assert_canaries_absent
+- test_jaa06_independent_acceptance.py
+- TrustedApplicationArtifactAccessor
 - build_capability_inventory.py
 - ApplicationContractTests
 - skill_normalise.json
-- state/observability.py
+- _require_identifier
 - collect_strings
 - run-pytest-no-skips.py
 - LeverAdapter
@@ -334,17 +334,17 @@
 - Path
 - external_observation_acquisition.py
 - test_assurance_manifest_truth.py
-- LLMReceipt
+- service/processing.py
 - test_jaa10_authenticated_time_witness_negative_controls.py
 - editorial-assignment-lineage-reconciliation
 - Immediate pre-click assurance recomputation
 - Reconcile research and processing donor capabilities
 - _NeverReapedProcess
 - advance_career_pipeline.py
-- ProviderObservationCaptureFailure
+- SecurityPolicyError
 - main
-- test_receipt_proves_private_projection_and_idempotency_without_leaks
-- FlowDefinition
+- _crawl
+- hash_payload
 - ._identity_tamper_proxy
 - verify-gate-environment.py
 - _DuplicateKey
@@ -354,7 +354,7 @@
 - test_runtime_compatibility.py
 - GreenhouseAdapter
 - GreenhouseAdapter
-- production_queue.py
+- VacancyArchiveIdentity
 - RecruiteePreflightReview
 - BudgetedClient
 - _require_identifier
@@ -373,12 +373,12 @@
 - stable_source
 - score_profile.py
 - interview-preparation-lineage-reconciliation
-- .__init__
+- _destination_evidence
 - test_nongreenhouse_provider_alias.py
 - test_jaa01_source_revision_binding.py
-- collectors/adapters/ireland_boards.py
-- AshbyApplication
-- PublicAccessPolicy
+- .__init__
+- _digest
+- accept_jaa_04.py
 - Content-addressed Redacted Forensic Manifest
 - test_jaa_bridge.py
 - certifications_required
@@ -389,16 +389,22 @@
 - greenhouse_live_discovery.py
 - run-protected-evidence-gate.sh
 - SmartRecruitersAdapter
+- _ProviderIdentity
+- Any
+- datetime
+- _Handler
 - _ChromiumNetworkAudit
 - contract_type
 - job_description
 - job_title
 - location
+- .run
 - bootstrap-test-env.sh
 - HTMLParser
 - run-browser-fixture-gate.sh
 - run-generic-gate.sh
 - run-linux-witness-gate.sh
+- WorkdayAdapter
 - _TextExtractor
 - Adapter
 - Backend
@@ -407,29 +413,38 @@
 - greenhouse-preparation-session-variants
 - MockBackend
 - PacedDetails
+- test_jaa04_access_policy_finalizer.py
+- IamExpatNLAdapter
 - Collector
 - job-application-automation
 - market-aligner
+- validate_style_text
 - Protocol
 - ReleaseExecutionAuthority
 - ReleaseGateStore
-- scan
+- WorkdayAdapter
 - RuntimeError
 - ValueError
+- test_run_jaa_certification_profile.py
 - _unresolved_live_record
-- .__init__
+- _probe_umask
+- FlowDefinition
+- ScopedAccessPolicy
+- test_seal_jaa_certification_evidence.py
 - Current canonical architecture
 - exact-assignment-parent-disposition-accounting
 - Non-Greenhouse ascending-fit projection (read-only)
+- market_aligner/__init__.py
 - Vacancy-to-receipt walking skeleton
-- handoff_payload
+- .test_permission_denied_group_signal_kills_and_reaps_direct_child
+- .__init__
 - verify_graphify_freshness.py
 - Reconcile candidate authority variants without broadening approved evidence
 - deterministic-opportunity-enrichment-handoff
 - .__init__
 - Integrate sealed fixture authority and reconcile shadow contracts
 - jaa_core
-- .__init__
+- collectors/adapters/public_uk_boards.py
 - Reconcile CV generation donor variants
 - .__init__
 - .__init__
@@ -524,7 +539,7 @@
 - JAA-04 authentic authority acquisition
 - JAA contact-authority enrollment, 10 August 2026
 - Horizontal model-agnostic LLM service
-- test_jaa04_public_access.py
+- PublicAccessPolicy
 - Fifteen continuous CH IE NL routes
 - Runtime official-authority discovery
 - Production terminal-attempt verification
@@ -30096,91 +30111,91 @@
 - 3-file cycle: `src/market_aligner/collectors/adapters/base.py -> src/market_aligner/collectors/adapters/netherlands_boards.py -> src/market_aligner/collectors/adapters/country_common.py -> src/market_aligner/collectors/adapters/base.py`
 - 3-file cycle: `src/market_aligner/collectors/adapters/base.py -> src/market_aligner/collectors/adapters/switzerland_boards.py -> src/market_aligner/collectors/adapters/country_common.py -> src/market_aligner/collectors/adapters/base.py`
 
-## Communities (30049 total, 29391 thin omitted)
+## Communities (30064 total, 29392 thin omitted)
 
 ### Community 0 - "test_jaa05_human_evidence_acceptance.py"
-Cohesion: 0.08
-Nodes (56): MatchingPolicy, Versioned deterministic decision thresholds., ingest_human_evidence_schema(), Path, Idempotently ingest the human-authored evidence YAML into the JAA-02 graph.…, Verify that every ingested evidence record's content_hash matches…, validate_ingestion_integrity(), _citation_receipt() (+48 more)
+Cohesion: 0.06
+Nodes (70): _assert_all_approved(), _authority_sha256(), _canonical(), _check_no_secret(), _compute_policy_hash(), _hash(), _identifier(), ingest_human_evidence_schema() (+62 more)
 
-### Community 1 - "profiler/store.py"
-Cohesion: 0.05
-Nodes (63): EvidenceItem, _build_manifest(), _canonical_json(), _classify_manifest_bytes(), _close_chain(), CoherentProfileSnapshot, _create_or_verify_text(), DurableInProgressSaveFailed (+55 more)
+### Community 1 - "market_aligner/cli.py"
+Cohesion: 0.02
+Nodes (146): ctypes, 3. Side-effect-free preflight and SQLite mutation boundary, Atomically write the exact wire bytes to the explicitly selected output., write_handoff(), _add_data_home(), build_parser(), _codex_gateway(), _collect_command() (+138 more)
 
 ### Community 2 - "constraints.py"
-Cohesion: 0.08
-Nodes (53): CandidateSourcePolicyReceipt, _canonical_json(), _capability_line_has_valid_tool_usage(), CVConstraintError, CVPolicy, CVPopplerQualityReceipt, _digest(), _fold_display_text() (+45 more)
+Cohesion: 0.09
+Nodes (52): CandidateSourcePolicyReceipt, _canonical_json(), _capability_line_has_valid_tool_usage(), CVConstraintError, CVPopplerQualityReceipt, _digest(), _fold_display_text(), Path (+44 more)
 
-### Community 3 - "capabilities.py"
-Cohesion: 0.07
-Nodes (43): assess_portfolio(), _build_alias_index(), extract_job(), _log_merge(), _mock_assess_portfolio(), _mock_extract_job(), _mock_normalise_skill(), _mock_rate_axes() (+35 more)
+### Community 3 - "gutua_greenhouse_session.py"
+Cohesion: 0.04
+Nodes (82): create_session(), _decision_receipt(), _digest(), _file_sha256(), GreenhouseFormPlan, GutuaGreenhouseSession, display_question(), _json_bytes() (+74 more)
 
 ### Community 4 - "ScoringParams"
 Cohesion: 0.07
 Nodes (22): The established parameter wire projection, shared with handoff export., ScoringParams, _admit_parameter_stage(), _admit_policy_stage(), _admit_semantic_continuation(), checkpoint(), continue_current_semantic_admission(), _Interrupted (+14 more)
 
-### Community 5 - "content_hash"
-Cohesion: 0.03
-Nodes (121): apply_style_proposal(), approved_candidate_outward_text(), _approved_statement_from_bytes(), ApprovedEvidenceSourceContext, assert_employer_facing_framing(), AuthenticatedOutwardRewrite, compile_application_source(), _digest() (+113 more)
+### Community 5 - "FactualSentence"
+Cohesion: 0.05
+Nodes (45): approved_candidate_outward_text(), _approved_statement_from_bytes(), ApprovedEvidenceSourceContext, AuthenticatedOutwardRewrite, compile_application_source(), _digest(), DocumentSection, FactAuthority (+37 more)
 
 ### Community 6 - "PipelineState"
-Cohesion: 0.02
-Nodes (186): Path, career_pipeline_flow(), Return the content-addressed, current orchestration contract. This definition…, _json_value(), main(), _parser(), Any, ArgumentParser (+178 more)
+Cohesion: 0.03
+Nodes (176): career_pipeline_flow(), Return the content-addressed, current orchestration contract. This definition…, _json_value(), main(), _parser(), Any, ArgumentParser, Command-line access to the canonical career lifecycle runtime. (+168 more)
 
-### Community 7 - ".start"
-Cohesion: 0.13
-Nodes (19): _application_page(), _canonical_json(), _content_hash(), _FixtureState, _host_authority(), _host_is_loopback(), _http_origin(), _allowed_request() (+11 more)
+### Community 7 - "FixtureReceipt"
+Cohesion: 0.11
+Nodes (21): _application_page(), _canonical_json(), _content_hash(), FixtureReceipt, _FixtureState, _host_authority(), _host_is_loopback(), _http_origin() (+13 more)
 
-### Community 8 - "test_gutua_greenhouse_session.py"
-Cohesion: 0.02
-Nodes (180): BinaryIO, importlib, VacancyArchiveIdentity, CandidateApplicationPackage, create_session(), _decision_receipt(), _digest(), _file_sha256() (+172 more)
+### Community 8 - "test_production_runner.py"
+Cohesion: 0.03
+Nodes (97): BinaryIO, ArchivedObject, CandidateApplicationPackage, GreenhouseAttemptRecorder, on_console(), on_request(), on_request_failed(), on_response() (+89 more)
 
-### Community 9 - "external_document_assurance.py"
-Cohesion: 0.05
-Nodes (61): assert_application_artifacts(), assert_employer_facing_text(), AssuranceFinding, AssuranceRule, assure_pdf_bytes(), assure_pdf_path(), _atomic_write_json(), _document_kind() (+53 more)
+### Community 9 - "test_external_document_assurance.py"
+Cohesion: 0.04
+Nodes (55): AST, assert_employer_facing_text(), AssuranceFinding, assure_pdf_bytes(), assure_pdf_path(), _atomic_write_json(), _document_kind(), _excerpt() (+47 more)
 
 ### Community 10 - "ProcessingRefused"
 Cohesion: 0.04
 Nodes (104): _AdmissionLease, admit_config_and_databases(), relative_parts(), apply_eligibility_transaction_plan(), apply_transaction_plan(), _assert_reason14_replan_equivalent(), _classify_replay(), provisional() (+96 more)
 
-### Community 11 - "AshbyOneUseCircuit"
-Cohesion: 0.09
-Nodes (16): AshbyCircuitError, AshbyOneUseCircuit, AshbyPreflightReview, _canonical_json(), _content_hash(), _digest(), Connection, Path (+8 more)
+### Community 11 - "JAA08ReleaseAuthority"
+Cohesion: 0.08
+Nodes (21): AshbyApplication, AshbyBoundaryError, AshbyPreflightReview, AshbySchemaError, _content_hash(), _exact_application_url(), JAA08ReleaseAuthority, OfficialSuccessReceipt (+13 more)
 
 ### Community 12 - "geography.py"
 Cohesion: 0.06
-Nodes (39): assess_eligibility(), EligibilityCheck, EligibilityDecision, EligibilityInput, EligibilityPolicy, Deterministic hard-eligibility checks over explicit structured facts.…, Pure decision owner over exact canonical values (contract section 11)., Explain the accepted decision without running another policy. Sponsorship… (+31 more)
+Nodes (40): assess_eligibility(), EligibilityCheck, EligibilityDecision, EligibilityInput, EligibilityPolicy, Deterministic hard-eligibility checks over explicit structured facts.…, Pure decision owner over exact canonical values (contract section 11)., Explain the accepted decision without running another policy. Sponsorship… (+32 more)
 
 ### Community 13 - "Repair observed Linux browser portability and eligibility descriptor leaks"
 Cohesion: 0.01
 Nodes (245): adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted (+237 more)
 
-### Community 14 - "gutua_greenhouse_session.py"
-Cohesion: 0.03
-Nodes (167): ApplicationQualityInput, build_deterministic_preflight_quality_review(), build_editorial_skill_review_receipt(), _captured_bytes(), ApplicationPreflightQualityReview, ApplicationQualityIssue, _canonical_json(), Any (+159 more)
+### Community 14 - "test_application_quality.py"
+Cohesion: 0.05
+Nodes (76): ApplicationQualityInput, build_deterministic_preflight_quality_review(), build_editorial_skill_review_receipt(), _captured_bytes(), ApplicationPreflightQualityReview, ApplicationQualityIssue, _canonical_json(), Any (+68 more)
 
 ### Community 15 - "test_jaa08_independent_acceptance.py"
-Cohesion: 0.08
-Nodes (66): compile_release_manifest(), Compile a pass verdict only when every deterministic gate agrees., ValidationReceipt, verify_release_manifest(), _authorized_release_inputs(), _binding(), _compilation_inputs(), _cv_constraint_arguments() (+58 more)
+Cohesion: 0.06
+Nodes (70): compile_release_manifest(), _deterministic_preconditions(), _digest(), IssuedRelease, Compile a pass verdict only when every deterministic gate agrees., _required(), ValidationReceipt, verify_release_manifest() (+62 more)
 
 ### Community 16 - "test_ats_application_authority.py"
-Cohesion: 0.08
-Nodes (44): AtsAnswerEntry, AtsFieldPlan, AtsFormInventory, build_ats_application_authority(), _build_entries(), _captured_bytes(), compile_ats_answer_entries(), _exact_url() (+36 more)
+Cohesion: 0.07
+Nodes (46): AshbyNonReleasePreparation, Exact reviewed preparation with no release or submission capability., AtsAnswerEntry, AtsFieldPlan, AtsFormInventory, build_ats_application_authority(), _build_entries(), _captured_bytes() (+38 more)
 
-### Community 17 - "AshbyLiveAdapter"
-Cohesion: 0.10
-Nodes (32): AshbyBoundaryError, AshbyLiveAdapter, AshbySchemaError, AshbySubmissionIndeterminateError, _exact_application_url(), InventoryEntry, JAA08ReleaseAuthority, OfficialSuccessReceipt (+24 more)
+### Community 17 - "AshbyOneUseCircuit"
+Cohesion: 0.11
+Nodes (28): AshbyCircuitError, AshbyLiveAdapter, AshbyOneUseCircuit, AshbySubmissionIndeterminateError, _canonical_json(), _digest(), InventoryEntry, Connection (+20 more)
 
-### Community 18 - "test_jaa10_network_witnessed_fixture_negative_controls.py"
-Cohesion: 0.12
-Nodes (36): _canonical_json(), _document_inventory(), _domain_hash(), NetworkWitnessedFixtureObservationReceipt, Canonical, non-certifying receipt for one bounded local fixture run., validate_worker_result(), _composite(), MonkeyPatch (+28 more)
+### Community 18 - "adversarial_rebuild.py"
+Cohesion: 0.05
+Nodes (74): RecruiterAssessmentPackage, RecruiterAssessmentReceipt, verify_recruiter_assessment_receipt(), ProductionRecruiterAssessment, AdversarialRebuildError, _application_fact_coordinates(), _application_improvements(), _application_improvements_by_rank() (+66 more)
 
 ### Community 19 - "status_ingestion_live.py"
 Cohesion: 0.10
 Nodes (37): email, email_parser, email_utils, _assert_identity(), _aware(), _canonical_json(), ClassifiedStatusEvent, _compile_events() (+29 more)
 
 ### Community 20 - "test_candidate_application_factory.py"
-Cohesion: 0.04
-Nodes (121): RecruiterDiagnosticArchiveReceipt, Exact employer fact taken from the currently verified vacancy., VacancyFactAuthority, _approved_statements(), _assert_package_quality(), _authority_document(), build_candidate_application_deployment_binding(), build_candidate_application_package() (+113 more)
+Cohesion: 0.05
+Nodes (93): Exact employer fact taken from the currently verified vacancy., VacancyFactAuthority, _approved_statements(), _assert_package_quality(), _authority_document(), build_candidate_application_package(), _build_candidate_application_source(), profile_fact() (+85 more)
 
 ### Community 21 - "research/store.py"
 Cohesion: 0.07
@@ -30203,8 +30218,8 @@ Cohesion: 0.05
 Nodes (72): _binding_refusals(), _emit_ingest(), _emit_refusal(), _ingest_command(), _emit(), _refuse(), _preflight_refusal(), ValueError (+64 more)
 
 ### Community 26 - "adversarial_recruiter_archive.py"
-Cohesion: 0.14
-Nodes (34): archive_recruiter_diagnostic(), _assessment_from_document(), _create_or_verify(), _digest(), _json_bytes(), _package_hashes(), Path, ValueError (+26 more)
+Cohesion: 0.17
+Nodes (32): archive_recruiter_diagnostic(), _assessment_from_document(), _create_or_verify(), _digest(), _json_bytes(), _package_hashes(), Path, ValueError (+24 more)
 
 ### Community 27 - "ensure_private_directory"
 Cohesion: 0.06
@@ -30220,67 +30235,67 @@ Nodes (3): Part-3C C1: caller-owned score/event read-plan and CAS helpers., Stag
 
 ### Community 30 - "current_time.py"
 Cohesion: 0.06
-Nodes (50): hmac, AuthenticatedCurrentTimeWitness, AuthenticatedTimeEvidence, configured_hmac_current_time_witness(), _current_instant(), CurrentTimeIssuer, CurrentTimeWitnessError, _external_realtime_now() (+42 more)
+Nodes (48): hmac, AuthenticatedCurrentTimeWitness, AuthenticatedTimeEvidence, _current_instant(), CurrentTimeIssuer, CurrentTimeWitnessError, _external_realtime_now(), _external_service_response() (+40 more)
 
 ### Community 31 - "typing"
 Cohesion: 0.02
-Nodes (148): contracts, html, html_parser, AdzunaAdapter, Any, JobUrl, RawPosting, register (+140 more)
+Nodes (138): contracts, html_parser, AdzunaAdapter, Any, JobUrl, RawPosting, register, Adzuna UK API adapter (enabled when API credentials are available). (+130 more)
 
 ### Community 32 - "test_application_sanity_review.py"
-Cohesion: 0.07
-Nodes (75): ApplicationSanityReviewError, build_vacancy_review_material(), ValueError, Review exact data and issue authority only for a certain, finding-free PASS., Issue one receipt for sanity and every declared read-only review criterion., No production authority may be issued for this review attempt., Bind trusted raw vacancy bytes to one exact visible-text projection., review_application_package() (+67 more)
+Cohesion: 0.04
+Nodes (120): ApplicationPreviewReceipt, Review one exact package against sanity and both pinned skills in one call., review_application_package_with_pinned_skills(), _actual_local_synthetic_root(), ApplicationSanityReviewError, build_local_synthetic_review_context(), build_vacancy_review_material(), _combined_provider_schema() (+112 more)
 
 ### Community 33 - "._payload"
 Cohesion: 0.11
 Nodes (7): Part 3A provider-free read-only replay through production seams., Stage envelope + seed one exact self-validating receipt row., Part 3B1 reason-7 raw admission through open_current_raw_admission., Wrapper object adds one level: scalar depth = arrays + 2, so 62 nested arrays…, Wrapper object counts once: {"data": [k ints]} holds k+2 nodes., StageDPart3AReplayTests, StageDPart3B1RawAdmissionTests
 
-### Community 34 - "cv_generation/service.py"
+### Community 34 - "test_cv_composition_service.py"
 Cohesion: 0.05
-Nodes (72): ProductionDetachedRecruiterAssessor, ProductionRecruiterAssessment, ProductionRecruiterAssessorError, Path, ValueError, The production recruiter boundary was unsafe or internally inconsistent., Single-use production seam around the existing detached Codex runtime., RecruiterImprovementBinding (+64 more)
+Nodes (62): build_candidate_application_deployment_binding(), CandidateApplicationDeploymentBinding, MarketApplicationDecisionAuthority, Exact MA eligibility plus conservative JAA evidence selection. Market Aligner…, Return the legacy-shaped deterministic input consumed by the compiler., CandidateContactAuthority, _candidate_editorial_authority(), _input_document() (+54 more)
 
 ### Community 35 - "BrowserWorkflowStore"
-Cohesion: 0.08
-Nodes (29): BrowserWorkflowStore, _canonical_json(), IdempotencyConflictError, LeasedRun, LeaseError, Collection, Connection, Path (+21 more)
+Cohesion: 0.07
+Nodes (31): BrowserWorkflowStore, _canonical_json(), IdempotencyConflictError, LeasedRun, LeaseError, Any, Collection, Connection (+23 more)
 
 ### Community 36 - "scraper/adapters/ireland_boards.py"
 Cohesion: 0.05
-Nodes (64): enrich_jobposting(), get_public(), html_section(), jobposting_json_ld(), location_text(), PacedDetails, Any, Shared HTTP, sitemap and JobPosting helpers for country-board adapters. These… (+56 more)
+Nodes (65): concurrent_futures, enrich_jobposting(), get_public(), html_section(), jobposting_json_ld(), location_text(), PacedDetails, Any (+57 more)
 
-### Community 37 - "CalibrationPolicy"
-Cohesion: 0.05
-Nodes (91): datetime, Replay the downstream ROLE/HIRING publisher-time prerequisite. Only a final,…, _temporal_admission(), calibration_policy_digest(), calibration_policy_from_json(), calibration_policy_json(), CalibrationPolicy, canonical_json() (+83 more)
+### Community 37 - "official_cohort.py"
+Cohesion: 0.04
+Nodes (113): JournalReplayFailure, datetime, RuntimeError, Build an exact JAA-04 queue from live, configured official authorities. The…, A response-less failure retained by a durable request journal., Replay the downstream ROLE/HIRING publisher-time prerequisite. Only a final,…, _temporal_admission(), calibration_policy_digest() (+105 more)
 
 ### Community 39 - "test_jaa15_negative_controls.py"
 Cohesion: 0.07
 Nodes (63): AdapterCandidate, AdapterEvidenceReference, AdapterExpansionEvaluation, AdapterMeasurement, AdapterQualitySnapshot, AdapterValueObservation, _aware(), _aware_iso() (+55 more)
 
-### Community 40 - "ats_forensics.py"
-Cohesion: 0.06
-Nodes (51): ATSForensicReceipt, ATSForensicRecorder, on_console(), on_request(), on_request_failed(), on_response(), _canonical_json(), load_forensic_receipt() (+43 more)
+### Community 40 - "browser_workflows.py"
+Cohesion: 0.09
+Nodes (35): ActionKind, ApprovedValue, BrowserAction, BrowserWorkflow, Enum, str, Declarative, resumable browser-workflow control plane. This module deliberately…, One selector candidate. Position in ``SelectorPlan`` is significant. (+27 more)
 
 ### Community 41 - "document_quality.py"
 Cohesion: 0.08
-Nodes (46): _artifact(), _content_stream(), _extract_pdf_text(), _number(), _pdf_escape(), PdfArtifact, PdfLineBox, _candidate_bin_directories() (+38 more)
+Nodes (46): _artifact(), _build_styled_pdf(), _content_stream(), _extract_pdf_text(), _number(), _pdf_escape(), PdfArtifact, PdfLineBox (+38 more)
 
-### Community 42 - "shadow_full_submit_cohort.py"
-Cohesion: 0.04
-Nodes (79): _employer_fact_is_new(), FixtureReceipt, fixture_submit_event_sha256(), Bind one local fixture submit event to its complete durable context., SubmissionProof, RawRequirementAnchor, _canonical_json(), compile_withheld_shadow_evidence() (+71 more)
+### Community 42 - "test_jaa10_independent_acceptance.py"
+Cohesion: 0.08
+Nodes (35): _canonical_json(), compile_withheld_shadow_evidence(), _content_hash(), _digest(), FrozenShadowContract, MutationObservation, normalized_submit_event_sha256(), normalized_workflow_sha256() (+27 more)
 
 ### Community 43 - "interview_communication.py"
 Cohesion: 0.05
-Nodes (71): _aware(), _candidate_authority(), CandidateStoryAuthority, _canonical_json(), compile_employer_dossier_evidence(), compile_follow_up_draft_plan(), compile_interview_preparation_pack(), compile_local_debrief_evidence() (+63 more)
+Nodes (74): fixture_submit_event_sha256(), Bind one local fixture submit event to its complete durable context., SubmissionProof, _aware(), _candidate_authority(), CandidateStoryAuthority, _canonical_json(), compile_employer_dossier_evidence() (+66 more)
 
 ### Community 44 - "test_jaa_events_v1.py"
 Cohesion: 0.04
-Nodes (85): copy, AdditionalEventChainValidator, build_event_receipt_metadata(), EventReceiptAuthenticator, EventReceiptError, EventReceiptEvidence, EventReceiptReference, EventReceiptRegistryEntry (+77 more)
+Nodes (91): copy, AdditionalEventChainValidator, build_event_receipt_metadata(), EventReceiptAuthenticator, EventReceiptError, EventReceiptEvidence, EventReceiptReference, EventReceiptRegistryEntry (+83 more)
 
 ### Community 45 - "test_jaa09_real_vacancy_negative_controls.py"
-Cohesion: 0.09
-Nodes (59): CorpusAuthorityError, _load_object(), Any, Path, ValueError, Exact, fail-closed authority for the certified JAA-04 Graphcore vacancy. This…, Keep the seed, admitted payload, and body-content identities distinct., Verify and project the exact certified Graphcore JAA-04 authority. (+51 more)
+Cohesion: 0.10
+Nodes (56): CorpusAuthorityError, _load_object(), Any, Path, ValueError, Exact, fail-closed authority for the certified JAA-04 Graphcore vacancy. This…, Keep the seed, admitted payload, and body-content identities distinct., Verify and project the exact certified Graphcore JAA-04 authority. (+48 more)
 
 ### Community 47 - "test_jaa09_negative_controls.py"
-Cohesion: 0.03
-Nodes (121): FixtureVacancy, LocalATSFixture, Threaded loopback HTTP fixture with bounded, in-memory submission state., certified_final_submit_click(), ConsequentialActionError, ExecutedAction, LocalBrowserBoundaryError, LocalBrowserExecutor (+113 more)
+Cohesion: 0.06
+Nodes (63): FixtureVacancy, LocalATSFixture, Threaded loopback HTTP fixture with bounded, in-memory submission state., LocalBrowserExecutor, Execute one leased non-submit workflow action on a Playwright page., Select exactly one resolved source answer by its exact question text., source_form_answer_for_question(), _issued_release_inputs() (+55 more)
 
 ### Community 48 - "public_provider.py"
 Cohesion: 0.05
@@ -30288,7 +30303,7 @@ Nodes (100): Employer-research gate, cited dossier contracts, and durable worker
 
 ### Community 49 - "test_review_material_accessor_contract.py"
 Cohesion: 0.05
-Nodes (82): ProtectedOutboxReviewMaterialAccessor, Resolve review captures through the existing pinned outbox trust boundary., _AdmissionReviewContext, _application_document(), ArchivedReviewMaterial, AssembledReviewMaterial, _decode(), DeterministicPDFTextExtractor (+74 more)
+Nodes (81): ProtectedOutboxReviewMaterialAccessor, Resolve review captures through the existing pinned outbox trust boundary., SelectionPolicyRules, _AdmissionReviewContext, _application_document(), ArchivedReviewMaterial, AssembledReviewMaterial, _decode() (+73 more)
 
 ### Community 50 - "test_jaa15_adapter_acquisition.py"
 Cohesion: 0.10
@@ -30300,7 +30315,7 @@ Nodes (41): assess_fixture_adapter_attempt(), CircuitStateError, A requested tra
 
 ### Community 52 - "JobUrl"
 Cohesion: 0.02
-Nodes (155): AdzunaAdapter, register, Adzuna UK API adapter (enabled when API credentials are available)., ArbeitnowAdapter, Any, register, Arbeitnow's public, paginated European jobs API., AshbyAdapter (+147 more)
+Nodes (174): html, AdzunaAdapter, Any, register, Adzuna UK API adapter (enabled when API credentials are available)., ArbeitnowAdapter, Any, register (+166 more)
 
 ### Community 53 - "StatusEvidenceStore"
 Cohesion: 0.09
@@ -30312,55 +30327,55 @@ Nodes (151): _admit_alignment_stage(), admit_candidate_facts(), admit_wrapper(),
 
 ### Community 55 - "handoff_admission.py"
 Cohesion: 0.05
-Nodes (58): AdmissionContextAuthenticator, _candidate_intent(), _context_document(), _digest(), _evaluation_time(), _exact_mapping(), _handoff_timestamp(), HandoffAdmission (+50 more)
+Nodes (55): AdmissionContextAuthenticator, _candidate_intent(), _context_document(), _digest(), _evaluation_time(), _exact_mapping(), _handoff_timestamp(), HandoffAdmission (+47 more)
 
 ### Community 56 - "market_aligner_handoff.py"
 Cohesion: 0.14
 Nodes (32): main(), _parser(), ArgumentParser, Inspect v1 handoffs and operate the explicitly legacy-only admission path., _code(), _component_map(), decode_canonical_json(), _digest() (+24 more)
 
 ### Community 57 - "hard_metrics_evaluation.py"
-Cohesion: 0.08
-Nodes (63): _build_metric_receipt(), _build_replay_metric_receipt(), _canonical_json(), _derive_from_documents(), _derive_full_submit_from_documents(), _derive_replay_pair(), evaluate_full_submit_hard_metrics(), EvidenceRegistryError (+55 more)
+Cohesion: 0.11
+Nodes (52): _build_metric_receipt(), _build_replay_metric_receipt(), _canonical_json(), _derive_from_documents(), _derive_full_submit_from_documents(), _derive_replay_pair(), evaluate_full_submit_hard_metrics(), EvidenceRegistryError (+44 more)
 
 ### Community 58 - "test_workable_walking_skeleton.py"
-Cohesion: 0.08
-Nodes (29): build_time_receipt(), Canonical helper for configured/test witness implementations., SelectionPolicyRules, canonical_json_bytes(), canonical_sha256(), Return the sole canonical byte representation used by the frozen bundle., build_handoff_fixture(), retain() (+21 more)
+Cohesion: 0.06
+Nodes (47): importlib_resources, build_time_receipt(), configured_hmac_current_time_witness(), Canonical helper for configured/test witness implementations., Compatibility spelling for the explicitly synthetic test factory. It…, A resolver returns only exact object bytes plus exact registry metadata., Read exact object/metadata bytes from the pinned source record., ResolvedReference (+39 more)
 
 ### Community 59 - "test_production_ats_executor.py"
-Cohesion: 0.05
-Nodes (92): AtsFieldOption, FinalClickRevalidationError, The in-primitive checks proved that no final click was attempted., ReleaseExecutionAuthority, canonical_non_secret_form_state(), capture_greenhouse_forensic_observation(), capture_or_recover_greenhouse_forensic_observation(), CertifiedGreenhouseSubmitExecutor (+84 more)
+Cohesion: 0.03
+Nodes (147): _canonical_https_route(), GreenhouseSuccessEvidence, _json_bytes(), datetime, Observed positive provider semantics required after a submit click., Bind observed provider semantics to schema, route, time and visible text., Recheck exact PDFs, semantic sanity, and archive as one boundary., Rebind the durable release archive to every employer-facing byte. (+139 more)
 
-### Community 60 - "test_jaa10_shadow_fixture_measures_negative_controls.py"
+### Community 60 - "ShadowObservation"
+Cohesion: 0.09
+Nodes (49): ShadowObservation, _bind_observations(), _canonical_json(), _canonical_observation(), compile_fixture_measures_report(), _content_hash(), _descriptive_fixture_measures(), _domain_hash() (+41 more)
+
+### Community 61 - "cloudcops_canary_release.py"
 Cohesion: 0.11
-Nodes (41): _bind_observations(), _canonical_json(), _canonical_observation(), compile_fixture_measures_report(), _content_hash(), _descriptive_fixture_measures(), _domain_hash(), FixtureMeasuresError (+33 more)
-
-### Community 61 - "prepare_cloudcops_release"
-Cohesion: 0.12
-Nodes (35): _approved_statements(), _bound(), BoundFile, _canonical_json(), CloudCopsReleaseError, CloudCopsReleaseInputs, _contact_record(), _duplicate_check() (+27 more)
+Nodes (40): _approved_statements(), _bound(), BoundFile, _canonical_json(), CloudCopsReleaseError, CloudCopsReleaseInputs, CloudCopsReleasePreparation, _contact_record() (+32 more)
 
 ### Community 62 - "eligibility_one"
 Cohesion: 0.03
 Nodes (38): Connection, Require current, matching eligibility evidence; never grant release., _require_detailed_eligibility(), clear_faults(), eligibility_one(), install_fault(), Run one serialized provider-free eligibility operation., _cj() (+30 more)
 
-### Community 63 - "replace"
-Cohesion: 0.03
-Nodes (163): Fail closed unless an editorial request exactly projects this receipt., bind_recruiter_improvement(), finalize_rebuilt_cv(), _promote_claims(), _promote_cover_letter_claims(), Run the rebuilt draft through the canonical final CV constraint gate., render_editorial_cv_text(), admit_cover_letter_editorial_composition() (+155 more)
-
-### Community 64 - "adversarial_rebuild.py"
+### Community 63 - "content_hash"
 Cohesion: 0.04
-Nodes (89): AdversarialRecruiterError, assess_application_as_recruiter(), _package_document(), _pdf_text(), ValueError, The assessment could not produce a valid diagnostic receipt., RecruiterAssessmentPackage, RecruiterAssessmentReceipt (+81 more)
+Nodes (131): Resolve one canonical ATS source without granting execution authority., resolve_ats_source_reference(), _structured_answer_values(), CandidateApplicationMaterializationReceipt, Non-release proof that exact authorities produced one application source., Fail closed unless an editorial request exactly projects this receipt., content_hash(), _promote_cover_letter_claims() (+123 more)
+
+### Community 64 - "test_application_evidence_safe_rebuild.py"
+Cohesion: 0.06
+Nodes (59): AdversarialRecruiterError, assess_application_as_recruiter(), _package_document(), _pdf_text(), ValueError, Detached employer-side assessment of an exact application package. The assessor…, The assessment could not produce a valid diagnostic receipt., _reject_constant() (+51 more)
 
 ### Community 65 - "production_handoff_admission_runner.py"
 Cohesion: 0.11
 Nodes (37): _admission_deployment_for_handoff(), _create_or_exact(), existing_exact(), _open_absolute_directory_chain(), _open_existing_private_child(), _open_private_child(), _open_private_directory(), _PinnedProductionPaths (+29 more)
 
 ### Community 66 - "candidate_contact_authority.py"
-Cohesion: 0.07
-Nodes (62): cryptography_hazmat_primitives, cryptography_hazmat_primitives_asymmetric_ed25519, CandidateContactResourceLease, _json_bytes(), load_candidate_contact_authority(), _load_contact_registry(), datetime, Ed25519PublicKey (+54 more)
+Cohesion: 0.04
+Nodes (95): cryptography_hazmat_primitives, cryptography_hazmat_primitives_asymmetric_ed25519, canonical_form_fields(), Preserve source answers unless actual employer fields are explicitly bound., CandidateContactResourceLease, _json_bytes(), load_candidate_contact_authority(), _load_contact_registry() (+87 more)
 
 ### Community 67 - "test_jaa11_live_canary_fixture_dry_run_negative_controls.py"
-Cohesion: 0.17
-Nodes (35): _dry_run(), _evidence(), _hash(), _entries(), parametrize, Fail-closed controls for the JAA-11 ranked-snapshot fixture dry run., test_ambiguous_gate_values_fail_closed(), test_duplicate_identity_or_url_fails_closed() (+27 more)
+Cohesion: 0.16
+Nodes (34): _dry_run(), _hash(), _entries(), parametrize, Fail-closed controls for the JAA-11 ranked-snapshot fixture dry run., test_ambiguous_gate_values_fail_closed(), test_duplicate_identity_or_url_fails_closed(), test_every_selected_entry_gate_fails_closed() (+26 more)
 
 ### Community 68 - "OpenExistingSeamTests"
 Cohesion: 0.08
@@ -30374,13 +30389,13 @@ Nodes (45): additionalProperties, description, type, description, description, t
 Cohesion: 0.05
 Nodes (42): additionalProperties, description, maximum, minimum, type, description, maximum, minimum (+34 more)
 
-### Community 71 - "service/processing.py"
-Cohesion: 0.03
-Nodes (124): csv, difflib, CalibrationPolicy, CalibrationReadiness, Calibration readiness ledger; scoring remains uncalibrated until certified., readiness(), derive_opportunity_axes(), OpportunityAxisDerivation (+116 more)
+### Community 71 - "assessment/scoring.py"
+Cohesion: 0.07
+Nodes (46): csv, matplotlib, CalibrationPolicy, CalibrationReadiness, Calibration readiness ledger; scoring remains uncalibrated until certified., readiness(), aggregate_track(), AssessmentAxes (+38 more)
 
-### Community 72 - "ApplicationSource"
+### Community 72 - "replace"
 Cohesion: 0.03
-Nodes (126): _artifact_payloads(), ArtifactFileReceipt, _external_root(), load_published_artifacts(), _overlaps(), publish_application_artifacts(), PublishedArtifactReceipt, Path (+118 more)
+Nodes (126): _artifact_payloads(), _external_root(), load_published_artifacts(), _overlaps(), publish_application_artifacts(), PublishedArtifactReceipt, Path, Publish once outside Git; exact retries verify rather than overwrite. (+118 more)
 
 ### Community 73 - "career_automation/operations.py"
 Cohesion: 0.10
@@ -30399,8 +30414,8 @@ Cohesion: 0.07
 Nodes (67): _aware(), _canonical_json(), CitedPublicFact, compile_cited_public_fact(), compile_live_interview_preparation_pack(), compile_non_sendable_follow_up_draft(), compile_public_professional_snapshot(), compile_released_candidate_fact() (+59 more)
 
 ### Community 77 - "network_witnessed_fixture.py"
-Cohesion: 0.10
-Nodes (49): Exact tracked source identity bound into a witness., SourceIdentity, _active_python_launcher(), offline_reviewer(), _browser_process_evidence(), _certified_corpus_root(), _cooperative_policy(), _execute_worker() (+41 more)
+Cohesion: 0.07
+Nodes (86): Exact tracked source identity bound into a witness., SourceIdentity, _active_python_launcher(), offline_reviewer(), _browser_process_evidence(), _canonical_json(), _certified_corpus_root(), _cooperative_policy() (+78 more)
 
 ### Community 78 - "fetching.py"
 Cohesion: 0.06
@@ -30427,8 +30442,8 @@ Cohesion: 0.13
 Nodes (52): _bind_native(), _build(), _discovery(), _lever_posting(), _load_evidence(), _mixed_live_discovery(), _observation(), _posting_html() (+44 more)
 
 ### Community 84 - "parse_operator_snapshot_document"
-Cohesion: 0.11
-Nodes (37): intake_operator_document_dry_run(), Validate exact bytes and bind them to a fixture-only composition., parse_operator_snapshot_document(), Validate exact operator bytes and normalize them without selecting., parametrize, Fail-closed controls for exact-byte operator-document intake., test_authority_failures_remain_delegated(), test_authority_inputs_are_keyword_only() (+29 more)
+Cohesion: 0.07
+Nodes (66): intake_operator_document_dry_run(), Witness exact operator bytes against the accepted fixture composition., Validate exact bytes and bind them to a fixture-only composition., compose_operator_document_dry_run(), Compose one validated operator document with a fixture-only dry run., _document_fields(), OperatorSnapshotDocument, parse_operator_snapshot_document() (+58 more)
 
 ### Community 85 - "StageDEnvelopeAuthorityTests"
 Cohesion: 0.14
@@ -30439,20 +30454,20 @@ Cohesion: 0.08
 Nodes (7): FakeAshbyButtonLocator, FakeAshbyCaptureLocator, FakeAshbyControlLocator, FakeAshbyFrameLocator, FakeAshbyPage, FakeAshbySelectorLocator, Closed fake of the live Page surface the preparator may use. There is…
 
 ### Community 87 - "SubprocessPolicy"
-Cohesion: 0.08
-Nodes (14): _BoundedCapture, BoundedSubprocessRunner, _posix_resource_limiter(), apply_limits(), ProcessResult, Immutable resource and input bounds for subprocess execution., Run an explicitly permitted argv under bounded local process controls. This…, SubprocessPolicy (+6 more)
+Cohesion: 0.14
+Nodes (9): BoundedSubprocessRunner, Immutable resource and input bounds for subprocess execution., Run an explicitly permitted argv under bounded local process controls. This…, SubprocessPolicy, BoundedSubprocessTests, skipUnless, shutil_which(), BoundedSubprocessTimeoutFallbackTests (+1 more)
 
 ### Community 88 - "_content_hash"
-Cohesion: 0.07
-Nodes (48): _aware_iso(), CanarySelectionContract, _canonical_json(), _content_hash(), _digest(), _official_https_url(), datetime, Pure-data intake contracts for the narrow JAA-11 live-canary authority. This… (+40 more)
+Cohesion: 0.10
+Nodes (25): ApplicationPackageComposition, Bind fixture-only canary answers to verified application release inputs. This…, _validate_inputs(), _aware_iso(), CanarySelectionContract, _canonical_json(), _content_hash(), _digest() (+17 more)
 
 ### Community 89 - "test_jaa05_quarantine_bundle.py"
-Cohesion: 0.07
-Nodes (64): AcquisitionQuarantineIndex, _canonical_pretty(), _digest(), HoldoutFirewallFailure, _identity_hash(), load_acquisition_quarantine_index(), reject_forbidden(), load_quarantine_bundle() (+56 more)
+Cohesion: 0.04
+Nodes (108): importlib_util, AcquisitionQuarantineIndex, _canonical_pretty(), _digest(), HoldoutFirewallFailure, _identity_hash(), load_acquisition_quarantine_index(), reject_forbidden() (+100 more)
 
 ### Community 90 - "shadow_elapsed_cohort.py"
-Cohesion: 0.07
-Nodes (76): _binding(), _boot_id_bytes(), _canonical_json(), capture_elapsed_time_witness(), _close_core(), close_elapsed_cohort(), _close_with_witness(), _content_hash() (+68 more)
+Cohesion: 0.10
+Nodes (39): _binding(), _canonical_json(), _close_core(), close_elapsed_cohort(), _close_with_witness(), _content_hash(), _digest(), _domain_hash() (+31 more)
 
 ### Community 91 - "ObservationAcquisitionError"
 Cohesion: 0.09
@@ -30464,15 +30479,15 @@ Nodes (35): 10. Processing binding and normalized projection, 11. Single-owner i
 
 ### Community 93 - "ApplicationArchiveError"
 Cohesion: 0.05
-Nodes (126): ApplicationArchive, ApplicationArchiveError, ApplicationArchiveReceipt, ArchivedObject, _atomic_create(), _atomic_create_or_verify(), AttemptArchive, _digest() (+118 more)
+Nodes (120): ApplicationArchive, ApplicationArchiveError, ApplicationArchiveReceipt, _atomic_create(), _atomic_create_or_verify(), AttemptArchive, _digest(), export_application_packet() (+112 more)
 
-### Community 94 - "ashby_live_adapter.py"
-Cohesion: 0.13
-Nodes (19): _AshbyCapturedField, AshbyNonReleasePreparation, AshbyNonReleasePreparator, _captured_text(), _classify_captcha_frames(), _ControlRecord, _dedupe(), _normalize_ashby_capture() (+11 more)
+### Community 94 - "AshbyNonReleasePreparator"
+Cohesion: 0.14
+Nodes (16): _AshbyCapturedField, AshbyNonReleasePreparator, _captured_text(), _classify_captcha_frames(), _ControlRecord, _dedupe(), _normalize_ashby_capture(), _parse_control_row() (+8 more)
 
 ### Community 95 - "LLMClient"
 Cohesion: 0.02
-Nodes (146): DetachedCodexRecruiterBackend, DetachedRecruiterRun, Codex CLI backend with a request-scoped, no-history execution boundary., Run only a package explicitly marked as synthetic and non-candidate., _reject_tool_events(), run_detached_recruiter_assessment(), run_synthetic_recruiter_canary(), _scrubbed_environment() (+138 more)
+Nodes (185): functools, DetachedCodexRecruiterBackend, DetachedRecruiterRun, Codex CLI backend with a request-scoped, no-history execution boundary., Run only a package explicitly marked as synthetic and non-candidate., _reject_tool_events(), run_detached_recruiter_assessment(), run_synthetic_recruiter_canary() (+177 more)
 
 ### Community 96 - "ObservationRouteManifest"
 Cohesion: 0.12
@@ -30487,8 +30502,8 @@ Cohesion: 0.13
 Nodes (18): ObservabilityStore, OutboxMessage, Connection, datetime, Path, Row, Claim one ready message, recovering any expired lease transactionally., Acknowledge a delivery without deleting its durable audit record. (+10 more)
 
 ### Community 99 - "test_jaa05_independent_acceptance.py"
-Cohesion: 0.12
-Nodes (32): candidate_graph_evidence(), Evidence, match_candidate_graph(), match_requirements(), MatchResult, date, Path, A candidate-evidence projection whose authority remains in JAA-02. (+24 more)
+Cohesion: 0.13
+Nodes (32): candidate_graph_evidence(), Evidence, _evidence_payload(), evidence_projection_hash(), match_candidate_graph(), match_requirements(), date, Path (+24 more)
 
 ### Community 100 - "creative_portfolio_assess.json"
 Cohesion: 0.06
@@ -30498,13 +30513,13 @@ Nodes (33): additionalProperties, enum, type, description, description, items, t
 Cohesion: 0.03
 Nodes (69): superseded, quarantined, quarantined, superseded, superseded, superseded, superseded, superseded (+61 more)
 
-### Community 102 - "test_jaa09_real_vacancy_acceptance.py"
-Cohesion: 0.13
-Nodes (37): _seed_candidate_graph(), evaluate_match(), evidence_projection_hash(), InferenceReceipt, matching_input_hash(), MatchProposal, _proposal_hash(), One source-bound, atomic vacancy requirement. (+29 more)
+### Community 102 - "career_automation/migrations.py"
+Cohesion: 0.08
+Nodes (43): Path, apply_jaa_05_migrations(), apply_jaa_08_migrations(), apply_jaa_operational_migrations(), _boundary_digest(), jaa01_installed_schema_digest(), jaa05_installed_schema_digest(), jaa06_installed_schema_digest() (+35 more)
 
 ### Community 103 - "AssessmentStore"
-Cohesion: 0.08
-Nodes (21): owner_private_umask(), Hold the cooperating lock and apply umask 0077 for the scope., validate_profile_id(), Hash every semantic field carried across one refresh-worker lease., Accept a direct refresh or an admitted canonical continuation. The promotion…, research_refresh_bridge_sha256(), research_refresh_preserves_source_authority(), AssessmentStore (+13 more)
+Cohesion: 0.11
+Nodes (14): Hash every semantic field carried across one refresh-worker lease., Accept a direct refresh or an admitted canonical continuation. The promotion…, research_refresh_bridge_sha256(), research_refresh_preserves_source_authority(), AssessmentStore, Path, Row, Atomically bind one current processing result to the handoff gate. (+6 more)
 
 ### Community 104 - "core.py"
 Cohesion: 0.08
@@ -30515,28 +30530,28 @@ Cohesion: 0.20
 Nodes (22): binascii, _fail(), _git(), _lexical_directory(), load_installed_protected_corpus_binding(), protected_corpus_tree_sha256(), ProtectedCorpusBindingError, Path (+14 more)
 
 ### Community 106 - "_flow"
+Cohesion: 0.39
+Nodes (4): FlowStep, One invocation in a directed acyclic workflow., _flow(), FlowDefinitionTests
+
+### Community 107 - "ScopedTokenAuthority"
 Cohesion: 0.21
-Nodes (7): ComponentDefinition, FlowStep, A pinned component implementation and its runtime configuration., One invocation in a directed acyclic workflow., _flow(), FlowDefinitionTests, _trace()
+Nodes (7): AccessDecision, IssuedAccessToken, datetime, A plaintext secret returned once to its caller; repr is always redacted., In-memory token authority that persists only SHA-256 token digests., ScopedTokenAuthority, _utc()
 
-### Community 107 - "SecurityPolicyError"
-Cohesion: 0.12
-Nodes (14): AccessDecision, IssuedAccessToken, datetime, ValueError, Least-privilege subject/resource/action policy carried by one token., A plaintext secret returned once to its caller; repr is always redacted., In-memory token authority that persists only SHA-256 token digests., Raised when untrusted input violates a deterministic security policy. (+6 more)
-
-### Community 108 - "test_jaa05_package022_liveness_canary_contract.py"
-Cohesion: 0.03
-Nodes (93): importlib_util, audit_module(), _digest(), fixture, ModuleType, parametrize, Path, Package 020 offline preserved-supply exhaustion audit controls. (+85 more)
+### Community 108 - "test_jaa05_package020_preserved_supply_audit.py"
+Cohesion: 0.09
+Nodes (22): audit_module(), _digest(), fixture, ModuleType, parametrize, Path, Package 020 offline preserved-supply exhaustion audit controls., test_ambiguous_reserved_and_unsupported_values_are_not_candidates() (+14 more)
 
 ### Community 109 - "test_jaa10_external_observation_acquisition.py"
 Cohesion: 0.10
 Nodes (75): _b64(), _canonical_json(), _clock(), _content_response(), FakeInnerClient, _make_policy(), _make_route_manifest(), _noop_sleeper() (+67 more)
 
 ### Community 110 - "canonical_json"
-Cohesion: 0.06
-Nodes (81): asyncio, main(), _parser(), ArgumentParser, canonical_json(), _artifact_bytes(), build_provider_observation_acceptance_payload(), _canonical_document() (+73 more)
+Cohesion: 0.07
+Nodes (76): base64, main(), _parser(), ArgumentParser, _generate_from_request(), main(), Exact-clean isolated worker for sink-first candidate package generation., _revision_writer() (+68 more)
 
 ### Community 111 - "run.py"
-Cohesion: 0.10
-Nodes (44): main(), Run the LLM and reporting phases after deterministic collection has stopped., from_dict(), Any, Path, Tolerant constructor: ignores unknown keys so old fixtures still load., read_jsonl(), to_dict() (+36 more)
+Cohesion: 0.09
+Nodes (48): extract_job(), Extract a structured job row from a raw posting (JobRow-shaped subset). `raw`…, main(), Run the LLM and reporting phases after deterministic collection has stopped., from_dict(), Any, Path, Tolerant constructor: ignores unknown keys so old fixtures still load. (+40 more)
 
 ### Community 112 - "MilestoneError"
 Cohesion: 0.10
@@ -30563,16 +30578,16 @@ Cohesion: 0.07
 Nodes (48): _aware(), _canonical_json(), censor_status_silence(), classify_status_evidence(), compile_follow_up_intent(), compile_local_export_evidence(), compile_status_timeline(), _content_hash() (+40 more)
 
 ### Community 118 - "test_jaa04_official_cohort_config.py"
-Cohesion: 0.04
-Nodes (83): _public_transport_url(), Validate an anonymous public request URL without making it evidence identity.…, Record response bodies and redirect chains without changing adapters., ResponseRecorder, send(), _timing_evidence(), RobotsReceipt, TermsAttestation (+75 more)
+Cohesion: 0.03
+Nodes (94): _public_transport_url(), Validate an anonymous public request URL without making it evidence identity.…, _atomic_write(), AuditedAccessController, AuditedRobotsClient, build(), DurableRequestJournal, _field() (+86 more)
 
-### Community 119 - "official_ats_adapter.py"
-Cohesion: 0.13
-Nodes (19): Local-only durable JAA-11 circuit state with fail-closed verification. This…, AdapterAttemptResult, AdapterFixtureObservation, _canonical_json(), compile_fixture_evidence(), _content_hash(), _digest(), evaluate_fixture_observation() (+11 more)
+### Community 119 - "AdapterFixtureObservation"
+Cohesion: 0.11
+Nodes (17): AdapterAttemptResult, AdapterFixtureObservation, _canonical_json(), compile_fixture_evidence(), _content_hash(), _digest(), evaluate_fixture_observation(), _fixture_route() (+9 more)
 
-### Community 120 - "DurableCircuitStore"
-Cohesion: 0.17
-Nodes (16): _canonical_json(), CircuitSnapshot, CircuitStoreIdentity, _content_hash(), _database_path(), _digest(), DurableCircuitReceipt, DurableCircuitStore (+8 more)
+### Community 120 - "durable_circuit_store.py"
+Cohesion: 0.18
+Nodes (17): _canonical_json(), CircuitIntegrityError, CircuitSnapshot, CircuitStoreIdentity, _content_hash(), _database_path(), _digest(), DurableCircuitReceipt (+9 more)
 
 ### Community 121 - "nongreenhouse_fit_projection.py"
 Cohesion: 0.06
@@ -30594,17 +30609,17 @@ Nodes (8): ApiSurfaceTests, DurablePhaseNonDowngradeTests, _evidence(), LegacyAn
 Cohesion: 0.09
 Nodes (5): craft(), execute(), make_family_shapes(), mapping_extra(), mapping_missing()
 
-### Community 126 - "test_jaa10_full_submit_cohort_negative_controls.py"
-Cohesion: 0.07
-Nodes (45): _control_vacancy(), _fixture_state(), observe_duplicate_submit(), observe_local_origin_drift(), Observe both wrong-loopback-authority requests returning exact 403s., Observe duplicate submit/review 409s with exactly one receipt retained., _canonical_json(), _content_hash() (+37 more)
+### Community 126 - "shadow_full_submit_cohort.py"
+Cohesion: 0.04
+Nodes (81): _employer_fact_is_new(), InterruptionObservation, _canonical_json(), _certified_corpus(), _claim_population(), compile_full_submit_cohort(), _content_hash(), _control_vacancy() (+73 more)
 
 ### Community 127 - "IngestCliTests"
 Cohesion: 0.07
 Nodes (34): _db_counts(), _discovers_by_board_tag(), FixtureBoard, IngestCliTests, die_after_real_cycle(), build(), contender(), factory() (+26 more)
 
 ### Community 128 - "gap_optimizer.py"
-Cohesion: 0.10
-Nodes (22): CandidateMatchBatch, FitAssessmentReceipt, Gap, GapVerificationReceipt, ImprovementTask, OptimisationPlan, PendingEvidencePromotion, _plan_document() (+14 more)
+Cohesion: 0.11
+Nodes (24): CandidateMatchBatch, FitAssessmentReceipt, Gap, gap_policy_hash(), GapVerificationReceipt, _hash(), ImprovementTask, OptimisationPlan (+16 more)
 
 ### Community 129 - "_regular_file"
 Cohesion: 0.40
@@ -30615,20 +30630,20 @@ Cohesion: 0.08
 Nodes (39): _forensic_command(), Namespace, archive_exact_canary_evidence(), _bounded_text(), CanaryForensicEvent, CanaryForensicEvidenceError, CanaryForensicEvidenceReceipt, _canonical_json() (+31 more)
 
 ### Community 131 - "test_jaa11_durable_circuit_negative_controls.py"
-Cohesion: 0.24
-Nodes (26): CircuitIntegrityError, The durable state cannot be trusted and must be treated as tripped., digest(), new_store(), test_trip_and_reset_proposal_form_one_verified_terminal_chain(), execute(), parametrize, Path (+18 more)
+Cohesion: 0.23
+Nodes (25): The caller attempted to extend an obsolete circuit version., StaleCircuitVersionError, digest(), new_store(), execute(), parametrize, Path, Adversarial controls for the unintegrated durable JAA-11 circuit. (+17 more)
 
 ### Community 132 - "skeleton/scoring.py"
-Cohesion: 0.07
-Nodes (45): CandidateFitProfile, CandidateTrackProfile, skeleton/contracts.py — the frozen seams between modules. These dataclasses ARE…, accessibility(), aggregate_fields(), _aligned(), _entry_count(), field_score() (+37 more)
+Cohesion: 0.08
+Nodes (44): CandidateFitProfile, CandidateTrackProfile, accessibility(), aggregate_fields(), _aligned(), _entry_count(), field_score(), FieldScore (+36 more)
 
 ### Community 133 - "frozen_replay_pair_recorder.py"
 Cohesion: 0.08
 Nodes (62): _build_pair(), _capture_replay_eei(), _capture_replay_execution_identity(), _digest(), FrozenReplayPair, FrozenReplayPairError, _git(), _golden_set_check() (+54 more)
 
 ### Community 134 - "production_handoff.py"
-Cohesion: 0.06
-Nodes (80): ctypes, _build_production_handoff_from_authenticated_time(), _canonical(), _deterministic_handoff_issuance(), _document(), _git_commit(), _instant(), _logical_job_key() (+72 more)
+Cohesion: 0.05
+Nodes (96): _exact_manifest(), _exact_private_file(), HandoffProducerError, HandoffReference, _private_directory(), produce_handoff(), Any, Path (+88 more)
 
 ### Community 135 - ".url"
 Cohesion: 0.13
@@ -30639,12 +30654,12 @@ Cohesion: 0.07
 Nodes (61): acquire_external_time_attestation(), _attestation(), _build_request(), _canonical_json(), _decode_message(), _domain_hash(), _encode_message(), _evidence_core() (+53 more)
 
 ### Community 138 - "opportunity.py"
-Cohesion: 0.14
-Nodes (15): apply_gate(), _basis_points(), decide(), decide_pre_profile_opportunity(), OpportunityDecision, OpportunityPolicy, pre_profile_opportunity_score(), PreProfileOpportunityConfidence (+7 more)
+Cohesion: 0.13
+Nodes (16): apply_gate(), _basis_points(), decide(), decide_pre_profile_opportunity(), OpportunityAxisDerivation, OpportunityDecision, OpportunityPolicy, pre_profile_opportunity_score() (+8 more)
 
 ### Community 139 - "OutboundURLPolicy"
-Cohesion: 0.14
-Nodes (9): OutboundURLPolicy, _public_ip(), Ensure the actual peer is public and one of the validated DNS answers., Strict public-web URL policy with injectable DNS resolution., ValidatedOutboundURL, OutboundURLTests, public_resolver(), IPv4Address (+1 more)
+Cohesion: 0.23
+Nodes (4): OutboundURLPolicy, Strict public-web URL policy with injectable DNS resolution., OutboundURLTests, public_resolver()
 
 ### Community 141 - "StageDPart3C2Increment1Tests"
 Cohesion: 0.16
@@ -30655,24 +30670,24 @@ Cohesion: 0.16
 Nodes (15): StatusObservation, _evidence_and_observation(), InjectedTransactionFault, _populated_store(), MonkeyPatch, parametrize, Path, RuntimeError (+7 more)
 
 ### Community 143 - "test_jaa04_opportunity1_lifecycle_receipt_retest.py"
-Cohesion: 0.20
-Nodes (17): _advance(), CapturedRetriever, _coordinator(), _database(), _offline_receipt_tamper(), Path, Independent, real-worker retest of Opportunity-1 lifecycle provenance., A deterministic public response, persisted through the production cache. (+9 more)
+Cohesion: 0.11
+Nodes (26): EmployerResearchWorker, Production lease worker: claim, retrieve, validate, then complete once., _advance(), CapturedRetriever, _coordinator(), _database(), _offline_receipt_tamper(), Path (+18 more)
 
 ### Community 144 - "test_ma_native_browser_diagnostic.py"
-Cohesion: 0.11
-Nodes (29): functools, llm/schema_loader.py — load the structured-output JSON schemas. The schema…, _capture_exception_chain(), _capture_provider_response(), _capture_setup_failures(), wrapped(), _configure_private_backend_capture(), _json_bytes() (+21 more)
+Cohesion: 0.13
+Nodes (27): _capture_exception_chain(), _capture_provider_response(), _capture_setup_failures(), wrapped(), _configure_private_backend_capture(), _json_bytes(), _make_fixture_contact(), _OneCallBackend (+19 more)
 
 ### Community 145 - "HybridEvidenceIndex"
 Cohesion: 0.18
-Nodes (9): EvidenceDocument, HybridEvidenceIndex, ProjectionManifest, Return a stable, deliberately small lexical representation., BM25 lexical retrieval with optional externally supplied semantic scores., RetrievalResult, tokenize(), BorrowedPatternsIntegrationTests (+1 more)
+Nodes (8): EvidenceDocument, HybridEvidenceIndex, ProjectionManifest, Return a stable, deliberately small lexical representation., BM25 lexical retrieval with optional externally supplied semantic scores., RetrievalResult, tokenize(), HybridEvidenceIndexTests
 
 ### Community 146 - "test_workable_live_adapter.py"
 Cohesion: 0.05
-Nodes (72): CandidateReleaseExecutionAuthority, Bind full candidate-decision requirements without changing the collector., Content-addressed Workable route and reviewed prefill boundary., One actual Workable file control bound to one assured PDF., WorkableReleaseBinding, WorkableUploadBinding, _canonical_json(), _content_hash() (+64 more)
+Nodes (75): CandidateReleaseExecutionAuthority, Bind full candidate-decision requirements without changing the collector., Content-addressed Workable route and reviewed prefill boundary., One actual Workable file control bound to one assured PDF., WorkableReleaseBinding, WorkableUploadBinding, _canonical_json(), _content_hash() (+67 more)
 
 ### Community 147 - "ContractValidationError"
 Cohesion: 0.04
-Nodes (109): _encode_event(), Pattern, canonical_json_bytes(), ContractValidationError, deep_freeze_json(), deep_thaw_json(), digest_bytes(), digest_value() (+101 more)
+Nodes (109): ApplicationHandoff, _encode_event(), Pattern, canonical_json_bytes(), ContractValidationError, deep_freeze_json(), deep_thaw_json(), digest_bytes() (+101 more)
 
 ### Community 148 - "._fetch_public_detail"
 Cohesion: 0.16
@@ -30702,10 +30717,6 @@ Nodes (19): _live_vacancy_index(), _parse_utc(), datetime, Validate one read-onl
 Cohesion: 0.24
 Nodes (25): _application(), _authority(), _canonical(), _contact(), _content_hash(), _duplicate(), FakeGate, _hash() (+17 more)
 
-### Community 155 - "test_market_aligner_jaa_handoff.py"
-Cohesion: 0.05
-Nodes (43): importlib_resources, _exact_manifest(), _exact_private_file(), HandoffProducerError, HandoffReference, _private_directory(), produce_handoff(), Any (+35 more)
-
 ### Community 156 - "NotefolioAdapter"
 Cohesion: 0.22
 Nodes (8): NotefolioAdapter, Any, JobUrl, RawPosting, register, Best-effort dig for the recruit results list inside a __NEXT_DATA__ blob. TODO:…, Render the detail page and pull the recruit JSON / description block., Render the recruit list per term and extract recruit ids/links. Notefolio…
@@ -30716,19 +30727,19 @@ Nodes (5): FdStabilityCampaignTests, faulted(), boom_stat(), skipUnless, action(
 
 ### Community 158 - "RawResponseCache"
 Cohesion: 0.03
-Nodes (185): _OfficialCaptureResearch, ATSAuthorityCanary, ATSRouteAdapter, _build_portable_dossier(), build_reconnaissance_dossier(), canonical_json(), _canonical_public_url(), Citation (+177 more)
+Nodes (179): _OfficialCaptureResearch, ATSAuthorityCanary, ATSRouteAdapter, _build_portable_dossier(), build_reconnaissance_dossier(), canonical_json(), _canonical_public_url(), Citation (+171 more)
 
 ### Community 159 - "test_jaa05_negative_controls.py"
-Cohesion: 0.14
-Nodes (41): FitAssessmentStore, Atomic persistence and lifecycle integration for production JAA-05., TaskEvidence, _approved_gap_material(), _evidence(), _job_at_fit(), _pending_knowledge_gap(), _proposal() (+33 more)
+Cohesion: 0.09
+Nodes (67): _seed_candidate_graph(), InferenceReceipt, matching_input_hash(), MatchProposal, One source-bound, atomic vacancy requirement., Complete provenance for a probabilistic match proposal., Requirement, _requirement_payload() (+59 more)
 
 ### Community 160 - "authority_provisioning.py"
 Cohesion: 0.13
 Nodes (47): adopt_existing_contact_authority(), _bytes(), _candidate_contact(), _create_or_exact(), _device_private_key(), _directory(), _load_existing_contact(), _private_key() (+39 more)
 
-### Community 161 - "types"
-Cohesion: 0.10
-Nodes (38): _broker_unit(), _exact_file(), install(), _legacy_unit(), main(), _nonroot_deployment_verification(), _obtain_deployment_verification(), _prior_runtime_unit() (+30 more)
+### Community 161 - "install_gigabyte_current_time.py"
+Cohesion: 0.14
+Nodes (29): _broker_unit(), _exact_file(), install(), _legacy_unit(), main(), _nonroot_deployment_verification(), _obtain_deployment_verification(), _prior_runtime_unit() (+21 more)
 
 ### Community 162 - "test_jaa11_live_canary_operator_answer_composition.py"
 Cohesion: 0.15
@@ -30750,13 +30761,13 @@ Nodes (17): InventoryEntry, Fill and submit the one exact operator-approved Recr
 Cohesion: 0.23
 Nodes (20): canonical(), canonical_inventory(), CertificationError, certify(), clean_source(), git(), main(), publish() (+12 more)
 
-### Community 167 - "human_evidence_ingestion.py"
-Cohesion: 0.24
-Nodes (16): _assert_all_approved(), _authority_sha256(), _canonical(), _check_no_secret(), _compute_policy_hash(), _hash(), _identifier(), _ingest_one() (+8 more)
+### Community 167 - "._execute_submit"
+Cohesion: 0.10
+Nodes (28): certified_final_submit_click(), ConsequentialActionError, ExecutedAction, FinalClickRevalidationError, LocalBrowserBoundaryError, local_route(), _loopback_url(), MaterializedValue (+20 more)
 
 ### Community 168 - "evaluate_hard_metrics"
-Cohesion: 0.07
-Nodes (56): CandidateStatus, CertificationCandidateError, CertificationCandidateReceipt, compile_certification_candidate(), publish_certification_candidate(), Enum, Path, RuntimeError (+48 more)
+Cohesion: 0.09
+Nodes (42): CandidateStatus, CertificationCandidateError, CertificationCandidateReceipt, compile_certification_candidate(), publish_certification_candidate(), Enum, Path, RuntimeError (+34 more)
 
 ### Community 169 - "._prepare"
 Cohesion: 0.06
@@ -30766,9 +30777,9 @@ Nodes (7): _fit_column_mutation(), mutate(), C2 Increment 3: exact DDL/DML body 
 Cohesion: 0.21
 Nodes (8): Any, JobUrl, RawPosting, register, Query the Open API per keyword under the design job-mid category, paginate, and…, Re-query the Open API for the single posting's metadata and return a C2…, Render the public detail page (detail_mode=browser). No API key needed for this…, SaraminAdapter
 
-### Community 171 - "test_jaa04_ambiguity_resume_independent.py"
-Cohesion: 0.14
-Nodes (22): _bootstrap(), _capture_module(), _GeneratedRoutes, MonkeyPatch, parametrize, Path, Generated-fixture adversarial checks for JAA-04 authority and resumption., Completed dossiers are immutable; only the remaining 26 are fetched once. (+14 more)
+### Community 171 - "test_jaa05_package022_liveness_canary_contract.py"
+Cohesion: 0.09
+Nodes (29): _context(), contract(), _load_module(), module(), fixture, ModuleType, MonkeyPatch, parametrize (+21 more)
 
 ### Community 172 - "test_jaa02_runtime_identity_tamper.py"
 Cohesion: 0.31
@@ -30791,7 +30802,7 @@ Cohesion: 0.21
 Nodes (26): _assert_active_inplace_state(), _certify(), _commit_source_change(), _expect_inplace_status(), _git(), CompletedProcess, fixture, FixtureRequest (+18 more)
 
 ### Community 177 - "test_jaa11_live_canary_authority_negative_controls.py"
-Cohesion: 0.14
+Cohesion: 0.12
 Nodes (24): compile_canary_selection(), evaluate_live_canary_authority(), LiveCanaryAuthorityState, LiveCanaryOperatorAuthority, Evaluate scope availability without opening the release gate., _hash(), _hash_document_without_hash(), Positive controls for the bounded JAA-11 operator-authority intake. (+16 more)
 
 ### Community 178 - "ElementFingerprint"
@@ -30811,8 +30822,8 @@ Cohesion: 0.11
 Nodes (14): _load_full_config(), Any, JobUrl, Path, RawPosting, Fetch one posting's detail and return it as a C2 RawPosting. ``live=False``…, Does this listing entry match any (lower-cased) search term? Default: substring…, Fields to match search terms against. Boards override for their shape. (+6 more)
 
 ### Community 182 - "GmailAPIConfirmationChecker"
-Cohesion: 0.13
-Nodes (20): GmailAPIConfirmationChecker, datetime, Path, Query only provider metadata in a vacancy- and click-scoped time window., Reject injected transports at the consequential release boundary., Rebind returned evidence to the exact clean collector implementation., _sha256(), _source_at() (+12 more)
+Cohesion: 0.11
+Nodes (22): GmailAPIConfirmationChecker, datetime, Path, Query only provider metadata in a vacancy- and click-scoped time window., Reject injected transports at the consequential release boundary., Rebind returned evidence to the exact clean collector implementation., _sha256(), _source_at() (+14 more)
 
 ### Community 183 - "detached-recruiter-full-funnel-and-assignment-lineage"
 Cohesion: 0.03
@@ -30823,16 +30834,16 @@ Cohesion: 0.13
 Nodes (3): Path, test_canonical_files_include_staged_new_sources(), test_required_gmail_lifecycle_capability_is_fail_closed()
 
 ### Community 185 - "test_provider_observation_capture.py"
-Cohesion: 0.12
-Nodes (35): _archive_object(), _bytes(), capture_greenhouse_observation(), _capture_preflight(), collector_source_identity(), CommittedSourceIdentity, exact_committed_source_identity(), _extract_loader_value() (+27 more)
+Cohesion: 0.06
+Nodes (42): _archive_object(), _bytes(), capture_greenhouse_observation(), _capture_preflight(), collector_source_identity(), CommittedSourceIdentity, exact_committed_source_identity(), _extract_loader_value() (+34 more)
 
 ### Community 186 - "ObservabilityStore"
-Cohesion: 0.13
-Nodes (18): ObservabilityStore, OutboxMessage, Connection, datetime, Path, Row, Claim one ready message, recovering any expired lease transactionally., Acknowledge a delivery without deleting its durable audit record. (+10 more)
+Cohesion: 0.16
+Nodes (11): ObservabilityStore, OutboxMessage, Connection, Path, Row, Claim one ready message, recovering any expired lease transactionally., Record failure and schedule an exponential retry, or retain it as dead., A durable message and, when leased, its acknowledgement receipt. (+3 more)
 
 ### Community 187 - "ShadowObservationLedger"
-Cohesion: 0.07
-Nodes (57): _canonical_json(), _canonical_observation(), _content_hash(), _database_path(), _digest(), _domain_hash(), _host_time(), ledger_policy_document() (+49 more)
+Cohesion: 0.11
+Nodes (33): _canonical_json(), _canonical_observation(), _content_hash(), _database_path(), _digest(), _domain_hash(), _host_time(), ledger_policy_document() (+25 more)
 
 ### Community 188 - "generate-test-evidence.py"
 Cohesion: 0.17
@@ -30852,7 +30863,7 @@ Nodes (5): Connection, SQLite-backed one-attempt circuit with no automatic reset
 
 ### Community 193 - "CollectionTests"
 Cohesion: 0.04
-Nodes (28): write_jsonl(), CollectionService, Bounded orchestration around the existing resumable Collector., CollectionTests, adapter_loader(), collector_factory(), discover(), fetch() (+20 more)
+Nodes (23): CollectionService, Bounded orchestration around the existing resumable Collector., CollectionTests, adapter_loader(), collector_factory(), fetch(), fetch(), fetch() (+15 more)
 
 ### Community 194 - "test_live_recertification_semantics.py"
 Cohesion: 0.21
@@ -30939,12 +30950,12 @@ Cohesion: 0.10
 Nodes (3): FakeAshbyCountLocator, FakeLocator, FakePage
 
 ### Community 215 - "reporter.py"
-Cohesion: 0.18
-Nodes (23): ScoredRow, _autosize(), _cell(), eligible_rows(), _freeze_header(), _job_value(), Any, Path (+15 more)
+Cohesion: 0.17
+Nodes (24): skeleton/contracts.py — the frozen seams between modules. These dataclasses ARE…, ScoredRow, _autosize(), _cell(), eligible_rows(), _freeze_header(), _job_value(), Any (+16 more)
 
 ### Community 217 - "blueprints.py"
-Cohesion: 0.19
-Nodes (11): backend_capability_authorizer(), Versioned career-pipeline blueprints and least-privilege backend manifests., Return the default-deny capability boundary for pipeline workers., BackendCapabilityManifest, CapabilityAuthorizer, CapabilityGrant, Pure, deterministic authorization over immutable manifests., One capability and the resources on which it may operate. (+3 more)
+Cohesion: 0.14
+Nodes (14): backend_capability_authorizer(), Versioned career-pipeline blueprints and least-privilege backend manifests., Return the default-deny capability boundary for pipeline workers., BackendCapabilityManifest, CapabilityAuthorizer, CapabilityDecision, CapabilityGrant, Pure, deterministic authorization over immutable manifests. (+6 more)
 
 ### Community 219 - "StageDPart3C1AClassificationTests"
 Cohesion: 0.12
@@ -30958,9 +30969,9 @@ Nodes (45): superseded, superseded, superseded, superseded, superseded, supersed
 Cohesion: 0.08
 Nodes (20): 14.1 Paths, 14.2 Mode/nlink bounds, 14.4 Read-view opening, 14.5 Historical classification (read-only; NO bootstrap), 14.6 New-operation semantic admission, 14.7 Serialization scope, 14.8 Attached-database transaction (ordered), 14.9 Public command and service identity surface (exact) (+12 more)
 
-### Community 222 - "Application sanity review"
-Cohesion: 0.33
-Nodes (5): Application sanity review, Certified purpose and scope, Model boundary and fail-closed behavior, Receipt bindings, Test and smoke evidence
+### Community 222 - "test_jaa10_shadow_elapsed_cohort_negative_controls.py"
+Cohesion: 0.14
+Nodes (36): _boot_id_bytes(), capture_elapsed_time_witness(), ElapsedCohortTimeWitnessError, Capture raw Linux same-boot counters with no caller clock., The local same-boot time witness cannot support the bounded claim., _close_fixture_cohort(), _close(), _forged_ledger_receipt() (+28 more)
 
 ### Community 223 - "production_preparation_runner.py"
 Cohesion: 0.03
@@ -30992,7 +31003,7 @@ Nodes (18): _canonical(), _certify(), _content_hash(), _digest(), _git(), Comple
 
 ### Community 230 - "test_skeleton.py"
 Cohesion: 0.08
-Nodes (40): JobRow, JobUrl, Global dedup / resume key., RawPosting, _equal(), _params(), _profile(), fixture (+32 more)
+Nodes (41): main(), JobRow, JobUrl, Global dedup / resume key., RawPosting, _equal(), _params(), _profile() (+33 more)
 
 ### Community 231 - "test_jaa12_status_store_coordinator.py"
 Cohesion: 0.32
@@ -31002,9 +31013,9 @@ Nodes (14): Return a mutable copy of the frozen, non-authorizing policy., status
 Cohesion: 0.33
 Nodes (11): certified_repository(), _git(), CompletedProcess, fixture, FixtureRequest, Path, Black-box controls for the non-self-invalidating JAA-03 evidence validator., _receipt() (+3 more)
 
-### Community 233 - "official_cohort.py"
-Cohesion: 0.05
-Nodes (61): _atomic_write(), AuditedAccessController, AuditedRobotsClient, build(), _canonical(), DurableRequestJournal, _field(), _fsync_directory() (+53 more)
+### Community 233 - "seed_cohort.py"
+Cohesion: 0.07
+Nodes (69): _canonical(), _normal_url(), _opportunity(), Deterministic, candidate-independent extraction from official content., _authority_citation(), _field(), _hydrate_one(), hydrate_seed() (+61 more)
 
 ### Community 234 - "test_jaa03_receipt_tamper_controls.py"
 Cohesion: 0.27
@@ -31023,16 +31034,16 @@ Cohesion: 0.06
 Nodes (44): Reader, AssessmentPromotion, AssessmentPromotionError, _atomic_exact(), _bytes(), _hash(), promote_current_processing_assessment(), Path (+36 more)
 
 ### Community 238 - "test_jaa11_durable_circuit_acceptance.py"
-Cohesion: 0.23
-Nodes (11): circuit_policy_document(), Return the immutable, non-authorizing local store policy., Path, Positive controls for the unintegrated JAA-11 durable circuit store., test_concurrent_trip_race_records_exactly_one_trip(), race(), test_fresh_store_object_cannot_shadow_persisted_trip(), test_real_sqlite_genesis_is_armed_pinned_and_verifiable() (+3 more)
+Cohesion: 0.22
+Nodes (12): circuit_policy_document(), Return the immutable, non-authorizing local store policy., Path, Positive controls for the unintegrated JAA-11 durable circuit store., test_concurrent_trip_race_records_exactly_one_trip(), race(), test_fresh_store_object_cannot_shadow_persisted_trip(), test_real_sqlite_genesis_is_armed_pinned_and_verifiable() (+4 more)
 
-### Community 239 - "collectors/scrapling_worker.py"
-Cohesion: 0.32
-Nodes (17): _call(), capabilities(), execute(), _fetch(), _hydrate(), _import_ref(), _jsonable(), main() (+9 more)
+### Community 239 - "test_jaa10_hard_metrics_evaluation.py"
+Cohesion: 0.10
+Nodes (25): evidence_registry_document(), evidence_registry_sha256(), EvidenceClass, full_submit_evidence_registry_document(), full_submit_evidence_registry_sha256(), MetricReceipt, MetricStatus, ModelCallAccounting (+17 more)
 
 ### Community 240 - "JobDatabase"
 Cohesion: 0.03
-Nodes (96): FirstJobScopePolicy, from_dict(), Any, Path, T, read_jsonl(), to_dict(), ProcessingService (+88 more)
+Nodes (111): bounded_relative_path(), _fsync_directory_chain(), _open_absolute_directory_no_symlinks(), _open_private_directory(), _open_refresh_object_bucket(), Path, Uncapped parallel collector. No LLM or scoring code is imported here., Open every absolute path component with O_NOFOLLOW. (+103 more)
 
 ### Community 241 - "test_jaa04_acceptance_boundary.py"
 Cohesion: 0.14
@@ -31046,17 +31057,17 @@ Nodes (7): Any, JobUrl, RawPosting, register, Re-query the Open API for the sing
 Cohesion: 0.05
 Nodes (43): adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted (+35 more)
 
-### Community 245 - "market_aligner/cli.py"
-Cohesion: 0.07
-Nodes (44): 3. Side-effect-free preflight and SQLite mutation boundary, Atomically write the exact wire bytes to the explicitly selected output., write_handoff(), _add_data_home(), _assess_command(), build_parser(), _codex_gateway(), _collect_command() (+36 more)
+### Community 245 - "benchmark_learning.py"
+Cohesion: 0.17
+Nodes (21): build_benchmark_manifest(), CVBenchmarkDiagnosticReceipt, CVBenchmarkEntry, CVBenchmarkError, CVBenchmarkFeatures, CVBenchmarkManifest, _digest(), evaluate_cv_benchmark() (+13 more)
 
 ### Community 246 - "test_protected_corpus_binding.py"
 Cohesion: 0.18
 Nodes (24): canonical_json_bytes(), _parse_signed_binding(), Any, Ed25519PublicKey, _verify_signature(), _clear_forbidden_locators(), _ephemeral_key(), _guard_runtime_access() (+16 more)
 
-### Community 247 - "OpportunityGate"
-Cohesion: 0.09
-Nodes (46): OpportunityGate, OpportunityPolicy, _optional_unit(), Any, Validate one current `jobs_scored.jsonl` record., Deterministic admission policy over a precomputed Opportunity score. Fit and…, scored_job_from_payload(), _job() (+38 more)
+### Community 247 - "ServiceTests"
+Cohesion: 0.20
+Nodes (8): FirstJobScopePolicy, ProcessingService, One shard per invocation; repeated invocations resume until no work remains., FixtureSemanticWorker, _processing_fixture(), Path, ServiceTests, process()
 
 ### Community 248 - "test_publication_fail_closed.py"
 Cohesion: 0.16
@@ -31087,16 +31098,16 @@ Cohesion: 0.22
 Nodes (4): Migration, MigrationRunner, Path, MigrationRunnerTests
 
 ### Community 256 - "linux_network_namespace_witness.py"
-Cohesion: 0.11
-Nodes (53): _canonical_json(), _capture_process_state(), _close_unexpected_descriptors(), _cooperative_preflight(), _cooperative_result(), _descendants(), _descriptor_policy(), _evidence_inventory() (+45 more)
+Cohesion: 0.09
+Nodes (62): _canonical_json(), _capture_process_state(), _close_unexpected_descriptors(), _cooperative_preflight(), _cooperative_result(), _descendants(), _descriptor_policy(), _domain_hash() (+54 more)
 
 ### Community 257 - "PersonioOneUseCircuit"
 Cohesion: 0.19
 Nodes (7): OfficialSuccessReceipt, PersonioCircuitError, PersonioOneUseCircuit, Connection, SQLite one-use circuit with no reset path., The durable one-use circuit forbids this attempt., test_circuit_is_durable_across_process_reopen()
 
 ### Community 258 - "ObservabilityStoreTests"
-Cohesion: 0.18
-Nodes (5): One component invocation within an operation trace., Append-only event attached to a trace, with explicit replay identity., SpanRecord, TraceEvent, ObservabilityStoreTests
+Cohesion: 0.14
+Nodes (8): hash_payload(), Return a deterministic SHA-256 digest for a JSON-compatible value., One component invocation within an operation trace., Append-only event attached to a trace, with explicit replay identity., SpanRecord, TraceEvent, ObservabilityStoreTests, _trace()
 
 ### Community 259 - "ELIGIBILITY-001: Evidence-Bound Eligibility Decision Contract"
 Cohesion: 0.04
@@ -31130,24 +31141,24 @@ Nodes (3): FakeLocator, FakePage, FakePage
 Cohesion: 0.27
 Nodes (20): OutcomeFeedbackLedger, Path, Append-only prediction, event, outcome, and evaluation ledger., _binding(), _predict(), datetime, Path, Operational and adversarial acceptance for the live JAA-14 ledger. (+12 more)
 
-### Community 267 - "test_every_browser_stage_failure_is_terminally_archived"
-Cohesion: 0.10
-Nodes (3): parametrize, test_committed_identity_verifies_commit_bytes_and_tree(), test_every_browser_stage_failure_is_terminally_archived()
+### Community 267 - "test_jaa10_shadow_observation_ledger_negative_controls.py"
+Cohesion: 0.19
+Nodes (18): ObservationLedgerStateError, A requested append violates the ledger state machine., parametrize, Path, Adversarial controls for the fixture-only JAA-10 observation ledger., _source_observation(), _store(), test_append_only_triggers_block_direct_update_and_delete() (+10 more)
 
 ### Community 268 - "test_jaa10_linux_network_namespace_witness_negative_controls.py"
-Cohesion: 0.11
-Nodes (30): AddressFamily, CooperativeBrowserExpectation, derive_runtime_tmp_binding(), Derive one short runtime-temp root without caller-selected path input., Exact application result that an integrated v3 witness must bind., accepted(), _clean_repository(), _git() (+22 more)
+Cohesion: 0.10
+Nodes (33): AddressFamily, CooperativeBrowserExpectation, derive_runtime_tmp_binding(), Derive one short runtime-temp root without caller-selected path input., Exact application result that an integrated v3 witness must bind., accepted(), _clean_repository(), _git() (+25 more)
 
 ### Community 269 - "test_runtime_evidence_contract.py"
 Cohesion: 0.18
 Nodes (22): _assert_no_sidecars_or_temporaries(), _assert_v2_evidence_bindings(), _canonical_json_bytes(), _evidence_document(), _public(), CompletedProcess, parametrize, Path (+14 more)
 
-### Community 270 - "evaluate_jaa05_locked_labels.py"
-Cohesion: 0.29
-Nodes (11): evidence_from_mapping(), _evidence_payload(), proposal_from_mapping(), Any, requirement_from_mapping(), evaluate(), main(), _mapping() (+3 more)
+### Community 270 - "MatchingPolicy"
+Cohesion: 0.15
+Nodes (18): evaluate_match(), evidence_from_mapping(), MatchingPolicy, proposal_from_mapping(), _proposal_hash(), Any, Apply the deterministic authority gate to one proposed relationship., Versioned deterministic decision thresholds. (+10 more)
 
 ### Community 271 - "ObservabilityStoreTests"
-Cohesion: 0.18
+Cohesion: 0.20
 Nodes (3): One component invocation within an operation trace., SpanRecord, ObservabilityStoreTests
 
 ### Community 272 - "test_scrapling_runtime_precedence.py"
@@ -31171,8 +31182,8 @@ Cohesion: 0.20
 Nodes (10): items, type, type, benefits, required_software, responsibilities, items, type (+2 more)
 
 ### Community 277 - "test_candidate_release_gate.py"
-Cohesion: 0.11
-Nodes (35): CandidateAuthorityFiles, CandidateAuthorityReleaseGate, _json_bytes(), Connection, datetime, Path, Row, Re-read and deterministically authenticate every release authority object. (+27 more)
+Cohesion: 0.10
+Nodes (38): CandidateAuthorityFiles, CandidateAuthorityReleaseGate, CandidateIssuedRelease, _json_bytes(), Connection, datetime, Path, Row (+30 more)
 
 ### Community 278 - "Wire creative extraction contracts and offline end-to-end path"
 Cohesion: 0.05
@@ -31181,6 +31192,10 @@ Nodes (41): adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted, 
 ### Community 280 - "test_jaa12_status_evidence_reader_negative_controls.py"
 Cohesion: 0.35
 Nodes (11): _populated(), parametrize, Path, Negative controls for JAA-12 durable typed status reads., test_absent_exact_identity_reads_fail_closed(), test_collection_reads_never_cross_application_or_job(), test_direct_sql_tamper_blocks_typed_reads(), test_reader_sees_one_consistent_snapshot_during_reserved_writer() (+3 more)
+
+### Community 281 - "Any"
+Cohesion: 0.11
+Nodes (12): _import_all(), load_adapter(), Any, Path, Does this listing entry match any (lower-cased) search term? Default: substring…, Fields to match search terms against. Boards override for their shape., Map a raw listing entry -> C1. Boards override for their id/url shape., Synthesize a detail URL when the listing doesn't carry one. (+4 more)
 
 ### Community 282 - "FollowUpDueLedger"
 Cohesion: 0.43
@@ -31207,8 +31222,8 @@ Cohesion: 0.20
 Nodes (6): JobDatabase, Connection, JobUrl, Path, RawPosting, Boards whose discovered URLs still need their complete detail page. This makes…
 
 ### Community 288 - "Any"
-Cohesion: 0.19
-Nodes (10): canonical_json(), hash_payload(), _iso(), _json_copy(), Any, Return a deterministic SHA-256 digest for a JSON-compatible value., Insert an operation trace, rejecting identity reuse with different data., Append a span once; conflicting replay identities fail loudly. (+2 more)
+Cohesion: 0.15
+Nodes (12): canonical_json(), ComponentContract, ComponentDefinition, _iso(), _json_copy(), OperationTrace, Any, Serializable input/output and side-effect contract for one component type. (+4 more)
 
 ### Community 289 - "test_generate_test_evidence.py"
 Cohesion: 0.08
@@ -31239,20 +31254,20 @@ Cohesion: 0.20
 Nodes (7): _build_kill_child(), _manifest_bytes(), ManifestCanonicalShapeTests, _parse_manifest(), Kill the writer after each accepted barrier; classify from disk., wait, then terminate/wait, then kill/wait; pipes closed always., SigkillRecoveryCampaignTests
 
 ### Community 298 - "FlowDefinition"
-Cohesion: 0.32
-Nodes (3): FlowDefinition, visit(), Content-addressed, serializable definition of an executable DAG.
+Cohesion: 0.24
+Nodes (4): FlowDefinition, visit(), Content-addressed, serializable definition of an executable DAG., Persist a definition once; content identity makes re-registration safe.
 
-### Community 299 - "test_jaa_module_boundaries.py"
+### Community 299 - "test_live_vacancy_discovery.py"
 Cohesion: 0.20
-Nodes (7): assert_public_module_boundaries(), Path, Machine-checkable ownership and dependency rules for the JAA split., Reject dependencies that reverse the declared three-module layering., test_core_owns_candidate_contact_without_reverse_legacy_import(), test_public_modules_obey_one_way_dependencies(), tomllib
+Nodes (18): Bind a current browser destination to the archived vacancy meaning., verify_vacancy_body_equivalence(), parametrize, test_ats_legal_and_navigation_boilerplate_does_not_change_requirements(), test_benign_unit_case_whitespace_and_punctuation_normalization(), test_cookie_banner_requirement_text_is_not_a_vacancy_constraint(), test_create_responsibility_is_not_mistaken_for_provider_chrome(), test_entity_polarity_unflagged_capability_and_capacity_are_material() (+10 more)
 
 ### Community 300 - "pathlib"
 Cohesion: 0.02
-Nodes (186): argparse, base64, BaseHTTPRequestHandler, collections, contextlib, dataclasses, datetime, email_policy (+178 more)
+Nodes (179): argparse, collections, contextlib, dataclasses, datetime, email_policy, errno, fcntl (+171 more)
 
-### Community 301 - "test_live_vacancy_discovery.py"
-Cohesion: 0.07
-Nodes (52): _atom_sha256s(), AuthorityDestinationResponse, bind_authority_destinations(), classify_live_vacancy_response(), _destination_evidence(), _equivalence_metrics(), _Links, LiveVacancyVerdict (+44 more)
+### Community 301 - "classify_live_vacancy_response"
+Cohesion: 0.21
+Nodes (17): AuthorityDestinationResponse, bind_authority_destinations(), classify_live_vacancy_response(), LiveVacancyVerdict, provider_for_url(), Fetch-bound authority: only native destinations equivalent to the source pass., _response(), test_closed_and_title_mismatch_fail_closed() (+9 more)
 
 ### Community 302 - "EditorialStageAdapter"
 Cohesion: 0.29
@@ -31262,25 +31277,25 @@ Nodes (5): EditorialStageAdapter, EditorialStageSession, Protocol, One invocatio
 Cohesion: 0.26
 Nodes (7): Any, JobUrl, RawPosting, register, True iff the entry's category parent matches the design parent id. Belt-and-…, Page the live list endpoint, keep design jobs, yield C1 records. Wanted's list…, WantedAdapter
 
-### Community 304 - "_requirement"
-Cohesion: 0.50
-Nodes (8): _fact(), _matched(), _requirement(), _support(), test_apply_now_strategy_is_complete_linked_and_reproducible(), test_bridgeable_gap_selects_close_gap_without_document_directives(), test_explicit_eligible_gap_policy_preserves_gaps_and_emits_only_supported_directives(), test_uncovered_structural_requirement_rejects_candidacy()
+### Community 304 - "test_jaa06_independent_acceptance.py"
+Cohesion: 0.07
+Nodes (52): CandidateSupport, compile_application_strategy(), _digest(), EmployerResearchFact, Connection, date, Load only a canonical strategy whose upstream authority is still current., Compile one canonical plan without writing prose or promoting evidence. (+44 more)
 
-### Community 305 - "_assert_canaries_absent"
-Cohesion: 0.39
-Nodes (7): TestCase, _assert_canaries_absent(), _canary_values(), _malicious_worker_mapping(), Path, SimpleNamespace, _response_with_transport_canaries()
+### Community 305 - "TrustedApplicationArtifactAccessor"
+Cohesion: 0.12
+Nodes (11): DeterministicPDFTextExtractor, Protocol, Configured Market-owned accessor; callers cannot provide source text/time., Resolve the exact canonical request into separate protected bytes., Authenticate all metadata proofs against configured protected state., Resolve retained candidate-visible PDF bytes; digest claims are not data., Return the exact retained PDF bytes for this application package., Authenticate the artifact-store binding for the returned bytes. (+3 more)
 
 ### Community 306 - "build_capability_inventory.py"
 Cohesion: 0.13
-Nodes (28): AST, build_inventory(), _candidate_suffix(), _canonical_files(), _canonical_json(), _combined_git_files(), Feature, FeatureRecord (+20 more)
+Nodes (27): build_inventory(), _candidate_suffix(), _canonical_files(), _canonical_json(), _combined_git_files(), Feature, FeatureRecord, _features() (+19 more)
 
 ### Community 308 - "skill_normalise.json"
 Cohesion: 0.12
 Nodes (15): additionalProperties, description, type, description, maximum, minimum, type, description (+7 more)
 
-### Community 309 - "state/observability.py"
-Cohesion: 0.19
-Nodes (11): ComponentContract, OperationTrace, Versioned workflow definitions, operation telemetry, and a durable outbox. The…, Serializable input/output and side-effect contract for one component type., Top-level provenance and performance record for one flow execution., Reject values whose JSON representation would be lossy or non-portable., _require_hash(), _require_identifier() (+3 more)
+### Community 309 - "_require_identifier"
+Cohesion: 0.31
+Nodes (6): Reject values whose JSON representation would be lossy or non-portable., _require_hash(), _require_identifier(), _require_text(), _validate_json(), _validate_operation()
 
 ### Community 311 - "run-pytest-no-skips.py"
 Cohesion: 0.33
@@ -31310,9 +31325,9 @@ Nodes (42): acquire_list_observation(), _canonical_json(), _external_path(), _fs
 Cohesion: 0.35
 Nodes (13): collections_abc, _assert_historical_path_state(), _current_tree_path(), _declared_slice_paths(), _evidence_pointers(), _git(), _manifest(), Truth controls for slice status and external JAA-04 runtime state. (+5 more)
 
-### Community 319 - "LLMReceipt"
-Cohesion: 0.05
-Nodes (75): 10.1 VacancySourceSelector (complete object, exactly five keys), 10.2 Closed source combinations, 10.3 Truth-boundary rule (nonempty selected evidence), 10.4 Normalized types and VacancyFacts object (five keys), 10. Vacancy facts (VacancySourceSelector family), _canonical_text(), CodexGatewayError, CodexSemanticGateway (+67 more)
+### Community 319 - "service/processing.py"
+Cohesion: 0.03
+Nodes (121): difflib, 10.1 VacancySourceSelector (complete object, exactly five keys), 10.2 Closed source combinations, 10.3 Truth-boundary rule (nonempty selected evidence), 10.4 Normalized types and VacancyFacts object (five keys), 10. Vacancy facts (VacancySourceSelector family), derive_opportunity_axes(), OpportunityAxisPolicy (+113 more)
 
 ### Community 320 - "test_jaa10_authenticated_time_witness_negative_controls.py"
 Cohesion: 0.33
@@ -31338,21 +31353,21 @@ Nodes (3): _NeverReapedProcess, Minimal Popen double whose timeout fallback neve
 Cohesion: 0.47
 Nodes (5): build_parser(), _database(), main(), ArgumentParser, Advance the autonomous career control plane without touching scraper state.
 
-### Community 327 - "ProviderObservationCaptureFailure"
-Cohesion: 0.40
-Nodes (4): ProviderObservationCaptureFailure, ProviderObservationCaptureReceipt, RuntimeError, A read-only capture failed after its exact evidence was archived.
+### Community 327 - "SecurityPolicyError"
+Cohesion: 0.22
+Nodes (9): _public_ip(), ValueError, Ensure the actual peer is public and one of the validated DNS answers., Raised when untrusted input violates a deterministic security policy., SecurityPolicyError, _validated_identifier(), ValidatedOutboundURL, IPv4Address (+1 more)
 
 ### Community 328 - "main"
 Cohesion: 0.40
 Nodes (5): main(), _parser(), ArgumentParser, Preserve the exact invoked interpreter spelling without dereferencing it., _runtime_argv()
 
-### Community 329 - "test_receipt_proves_private_projection_and_idempotency_without_leaks"
-Cohesion: 0.70
-Nodes (5): _fixed_source(), MonkeyPatch, Path, test_receipt_proves_private_projection_and_idempotency_without_leaks(), test_wrong_projection_binding_preserves_graph_without_receipt()
+### Community 329 - "_crawl"
+Cohesion: 0.17
+Nodes (9): _all(), _crawl(), _fetch(), Any, Semaphore, Fetch sources, then all discovered native ATS destinations in one session., _Response, _Session (+1 more)
 
-### Community 330 - "FlowDefinition"
-Cohesion: 0.11
-Nodes (17): canonical_json(), ComponentDefinition, FlowDefinition, hash_payload(), _iso(), _json_copy(), OperationTrace, Any (+9 more)
+### Community 330 - "hash_payload"
+Cohesion: 0.19
+Nodes (10): canonical_json(), hash_payload(), OperationTrace, Return a deterministic SHA-256 digest for a JSON-compatible value., Top-level provenance and performance record for one flow execution., Insert an operation trace, rejecting identity reuse with different data., Append a span once; conflicting replay identities fail loudly., Serialize JSON data in the canonical form used for identity and provenance. (+2 more)
 
 ### Community 332 - "verify-gate-environment.py"
 Cohesion: 0.31
@@ -31371,20 +31386,20 @@ Cohesion: 0.06
 Nodes (45): runtime(), BrowserRuntimeIdentity, _certified_chromium_executable(), _fail(), inspect_active_browser(), inspect_runtime(), _installed_chromium_executable(), main() (+37 more)
 
 ### Community 338 - "GreenhouseAdapter"
-Cohesion: 0.35
+Cohesion: 0.36
 Nodes (5): GreenhouseAdapter, _plain(), Any, register, Graduate/entry routes first, then direct title matches, then stretches.
 
 ### Community 339 - "GreenhouseAdapter"
-Cohesion: 0.23
-Nodes (8): GreenhouseAdapter, _plain(), Any, JobUrl, RawPosting, register, Graduate/entry routes first, then direct title matches, then stretches., main()
+Cohesion: 0.20
+Nodes (9): GreenhouseAdapter, _plain(), Any, JobUrl, RawPosting, register, Graduate/entry routes first, then direct title matches, then stretches., main() (+1 more)
 
-### Community 340 - "production_queue.py"
-Cohesion: 0.06
-Nodes (84): Decimal, AscendingProductionQueue, _atomic_create(), build_ascending_queue(), _fit(), _json_bytes(), _main(), _mentions_provider_token() (+76 more)
+### Community 340 - "VacancyArchiveIdentity"
+Cohesion: 0.04
+Nodes (117): asyncio, Decimal, _scan_secret_bytes(), VacancyArchiveIdentity, _require_lowest_ranked_market_handoff(), AscendingProductionQueue, _atomic_create(), build_ascending_queue() (+109 more)
 
 ### Community 343 - "_require_identifier"
-Cohesion: 0.25
-Nodes (7): visit(), Reject values whose JSON representation would be lossy or non-portable., _require_hash(), _require_identifier(), _require_text(), _validate_json(), _validate_operation()
+Cohesion: 0.31
+Nodes (6): Reject values whose JSON representation would be lossy or non-portable., _require_hash(), _require_identifier(), _require_text(), _validate_json(), _validate_operation()
 
 ### Community 345 - "_parser"
 Cohesion: 0.67
@@ -31430,6 +31445,10 @@ Nodes (46): Profiler instrument — the v1 guided-pass questionnaire encoded as 
 Cohesion: 0.05
 Nodes (37): superseded, superseded, superseded, superseded, superseded, superseded, superseded, superseded (+29 more)
 
+### Community 359 - "_destination_evidence"
+Cohesion: 0.22
+Nodes (13): _atom_sha256s(), _destination_evidence(), _equivalence_metrics(), _material_requirement_atoms(), _material_spans(), _normal_requirement_text(), _normal_text(), _page_identity() (+5 more)
+
 ### Community 360 - "test_nongreenhouse_provider_alias.py"
 Cohesion: 0.24
 Nodes (24): _build(), _native_posting(), _obs(), _only_alias(), Path, Adversarial matrix for the provider-native alias binding of aggregator keys.…, test_alias_colliding_with_native_opportunity_fails_closed(), test_alias_keeps_live_partition_exact() (+16 more)
@@ -31438,17 +31457,13 @@ Nodes (24): _build(), _native_posting(), _obs(), _only_alias(), Path, Adversaria
 Cohesion: 0.14
 Nodes (45): _assert_only_status_path(), _assert_regular_state(), _assert_snapshot_restored(), _assert_source_binding(), _certify(), _create_generated_receipt(), _git(), _head() (+37 more)
 
-### Community 362 - "collectors/adapters/ireland_boards.py"
-Cohesion: 0.05
-Nodes (56): concurrent_futures, math, enrich_jobposting(), get_public(), html_section(), jobposting_json_ld(), location_text(), PacedDetails (+48 more)
+### Community 363 - "_digest"
+Cohesion: 0.26
+Nodes (8): CompensationBinding, date, Deterministically derived annual GBP answer with source identities., _compensation(), _digest(), test_compensation_is_deterministic_and_cannot_be_overridden(), test_resume_hash_mismatch_is_rejected_before_browser_or_database(), test_selected_canary_cannot_claim_absent_uk_work_rights()
 
-### Community 363 - "AshbyApplication"
-Cohesion: 0.24
-Nodes (9): AshbyApplication, CompensationBinding, date, Deterministically derived annual GBP answer with source identities., _compensation(), _digest(), test_compensation_is_deterministic_and_cannot_be_overridden(), test_resume_hash_mismatch_is_rejected_before_browser_or_database() (+1 more)
-
-### Community 364 - "PublicAccessPolicy"
-Cohesion: 0.03
-Nodes (102): build_inventory(), canonical_bytes(), _fsync_directory(), publish_by_pointer(), Any, Path, Fail-closed, content-addressed publication for acquired JAA-04 corpora., Inventory all evidence bytes, excluding the inventory and its receipt. (+94 more)
+### Community 364 - "accept_jaa_04.py"
+Cohesion: 0.06
+Nodes (57): build_inventory(), canonical_bytes(), _fsync_directory(), publish_by_pointer(), Any, Path, Fail-closed, content-addressed publication for acquired JAA-04 corpora., Inventory all evidence bytes, excluding the inventory and its receipt. (+49 more)
 
 ### Community 365 - "Content-addressed Redacted Forensic Manifest"
 Cohesion: 0.67
@@ -31486,21 +31501,77 @@ Nodes (13): classify_greenhouse_response(), greenhouse_requisition_id(), Greenho
 Cohesion: 0.44
 Nodes (4): _plain(), Any, register, SmartRecruitersAdapter
 
+### Community 375 - "_ProviderIdentity"
+Cohesion: 0.18
+Nodes (4): _Links, _ProviderIdentity, visit(), HTMLParser
+
+### Community 376 - "Any"
+Cohesion: 0.28
+Nodes (5): ComponentDefinition, _iso(), _json_copy(), Any, A pinned component implementation and its runtime configuration.
+
+### Community 377 - "datetime"
+Cohesion: 0.27
+Nodes (8): datetime, Acknowledge a delivery without deleting its durable audit record., Explicitly revive a retained dead message after operator intervention., Return an aware UTC timestamp., Atomically move a running trace to an immutable terminal result., Durably enqueue a message before attempting any external delivery., _require_utc(), utc_now()
+
+### Community 378 - "_Handler"
+Cohesion: 0.18
+Nodes (7): BaseHTTPRequestHandler, append_page_marker(), _Handler, install_page_marker(), OnePageSpider, Any, Spider
+
+### Community 384 - ".run"
+Cohesion: 0.18
+Nodes (4): _BoundedCapture, _posix_resource_limiter(), apply_limits(), ProcessResult
+
+### Community 390 - "WorkdayAdapter"
+Cohesion: 0.22
+Nodes (7): Any, JobUrl, register, WorkdayAdapter, scan(), collect_locations(), is_uk_location()
+
 ### Community 396 - "greenhouse-preparation-session-variants"
 Cohesion: 0.05
 Nodes (37): superseded, superseded, superseded, superseded, superseded, superseded, superseded, superseded (+29 more)
 
+### Community 399 - "test_jaa04_access_policy_finalizer.py"
+Cohesion: 0.40
+Nodes (10): _draft(), CompletedProcess, parametrize, Path, Offline negative controls for human-authored JAA-04 policy finalization., _record(), _run(), test_finalizer_only_packages_exact_human_authored_records() (+2 more)
+
+### Community 400 - "IamExpatNLAdapter"
+Cohesion: 0.25
+Nodes (7): _get(), IamExpatNLAdapter, _location(), _nested_jobposting(), Any, register, Decode Next.js script props whose ``children`` is JSON-LD text.
+
 ### Community 401 - "Collector"
 Cohesion: 0.02
-Nodes (96): bounded_relative_path(), Collector, past_deadline(), submit_next(), _fsync_directory_chain(), _open_absolute_directory_no_symlinks(), _open_private_directory(), _open_refresh_object_bucket() (+88 more)
+Nodes (67): Collector, past_deadline(), submit_next(), Any, Exception, Space this board's fetch starts by ``delay_seconds``. Returns False when the…, Uncapped parallel collector with durable resume state and fair fetching., Report local collection prerequisites only. Runs :meth:`plan` first so… (+59 more)
 
-### Community 408 - "scan"
-Cohesion: 0.50
-Nodes (3): scan(), collect_locations(), is_uk_location()
+### Community 404 - "validate_style_text"
+Cohesion: 0.36
+Nodes (9): assert_employer_facing_framing(), Fail closed on any employer-facing text that argues against the candidate., validate_style_text(), parametrize, Contracts for the employer-facing framing guard. Operator doctrine ratified…, test_real_minimising_text_is_rejected(), test_rejection_explains_itself_and_quotes_the_offending_span(), test_strong_supported_claims_are_accepted() (+1 more)
+
+### Community 408 - "WorkdayAdapter"
+Cohesion: 0.24
+Nodes (6): Any, register, WorkdayAdapter, scan(), collect_locations(), is_uk_location()
+
+### Community 411 - "test_run_jaa_certification_profile.py"
+Cohesion: 0.47
+Nodes (8): _fake_document(), _patch_profile(), MonkeyPatch, Path, test_executable_allows_and_binds_repository_venv_launcher(), test_executable_rejects_arbitrary_symlink(), test_execute_records_failure_without_execution_receipt(), test_execute_records_passed_test_and_binds_receipt()
 
 ### Community 412 - "_unresolved_live_record"
 Cohesion: 0.09
 Nodes (28): _bounded_sha256(), _bounded_status(), _canonical_host(), _clean_text(), _enforce_unresolved_allowlist(), _final_url_host(), Return a bounded, control-free trimmed string, or ``None`` if malformed. A non-…, Return a plausible HTTP status integer, or ``None``. ``bool`` is a subclass of… (+20 more)
+
+### Community 413 - "_probe_umask"
+Cohesion: 0.33
+Nodes (4): OwnerPrivateUmaskTests, worker(), _probe_umask(), Read the current umask without leaving it changed.
+
+### Community 414 - "FlowDefinition"
+Cohesion: 0.32
+Nodes (3): FlowDefinition, visit(), Content-addressed, serializable definition of an executable DAG.
+
+### Community 415 - "ScopedAccessPolicy"
+Cohesion: 0.38
+Nodes (3): Least-privilege subject/resource/action policy carried by one token., ScopedAccessPolicy, ScopedTokenTests
+
+### Community 416 - "test_seal_jaa_certification_evidence.py"
+Cohesion: 0.67
+Nodes (5): MonkeyPatch, Path, test_seal_rejects_changed_or_extra_critical_evidence(), test_seal_writes_exact_validated_noncertifying_config(), _write_root()
 
 ### Community 417 - "Current canonical architecture"
 Cohesion: 0.08
@@ -31517,10 +31588,6 @@ Nodes (19): Authoritative-queue hardening (closes `JAA_3DCF741_NONGREENHOUSE_PRO
 ### Community 421 - "Vacancy-to-receipt walking skeleton"
 Cohesion: 0.10
 Nodes (20): Read-only JAA-00 independent certification, Brownfield extension and certification strategy, Candidate fact, evidence and claim graph, Event-led deterministic application state machine, Qualified interviews per truthful eligible application, Non-bypassable product release invariants, Vacancy-to-receipt walking skeleton, Evidence-gated gap improvement optimiser (+12 more)
-
-### Community 424 - "handoff_payload"
-Cohesion: 0.50
-Nodes (4): ApplicationHandoff, handoff_payload(), Any, Return the retained v0 inspection mapping without promoting it to v1.
 
 ### Community 425 - "verify_graphify_freshness.py"
 Cohesion: 0.29
@@ -31541,6 +31608,10 @@ Nodes (33): adopted_adapted, adopted_adapted, adopted_adapted, adopted_adapted, 
 ### Community 432 - "jaa_core"
 Cohesion: 0.19
 Nodes (16): Application State, Artiom Gutu CV Policy, Browser Environment Bootstrap, Candidate Evidence, CandidateContact, cv_generation, CV Validation Receipt, Downward-only Dependencies (+8 more)
+
+### Community 433 - "collectors/adapters/public_uk_boards.py"
+Cohesion: 0.14
+Nodes (14): _canonical_links(), _first_tag_text(), GuardianJobsAdapter, JobsAcUkAdapter, NHSJobsAdapter, _PublicDetailMixin, Any, register (+6 more)
 
 ### Community 434 - "Reconcile CV generation donor variants"
 Cohesion: 0.06
@@ -31575,12 +31646,12 @@ Cohesion: 0.12
 Nodes (15): 1. Drafter/reviewer separation, 2. Relevance-weighted CV cutting, 3. Mandatory PDF verification loop, 4. ATS text-layer verification, 5. Exact submitted-artifact archive, 6. Interview and outcome continuity, 7. Supply-chain and prompt-injection guards, Acceptance tests for the later application compiler (+7 more)
 
 ### Community 453 - "test_jaa10_linux_network_namespace_witness.py"
-Cohesion: 0.09
-Nodes (23): _domain_hash(), LinuxNetworkNamespaceWitness, NetworkNamespaceWitnessReceipt, Immutable canonical witness bytes with exhaustive validation., Content-addressed receipt binding a witness and execution result., accepted_witness(), _mutated_document(), test_canonical_witness_mutations_fail_closed() (+15 more)
+Cohesion: 0.16
+Nodes (10): accepted_witness(), fixture, MonkeyPatch, parametrize, Path, TempPathFactory, Positive controls for the standalone Linux network witness., _synthetic_source() (+2 more)
 
 ### Community 455 - "evidence.py"
-Cohesion: 0.15
-Nodes (26): Match, _decode_ascii_escape(), _decode_base64(), _decode_url_scan_layer(), _normal_key(), _protected_roots(), public_listing_bytes(), Any (+18 more)
+Cohesion: 0.06
+Nodes (62): Match, _decode_ascii_escape(), _decode_base64(), _decode_url_scan_layer(), _normal_key(), _protected_roots(), public_listing_bytes(), Any (+54 more)
 
 ### Community 456 - "Exact final PDF assurance"
 Cohesion: 0.22
@@ -31595,8 +31666,8 @@ Cohesion: 0.31
 Nodes (12): _is_ancestor(), MonkeyPatch, parametrize, Path, Independent gate binding the checked-in JAA-01 receipt to the current product…, _receipt(), _runtime(), _sha256() (+4 more)
 
 ### Community 466 - "test_jaa11_live_canary_application_package.py"
-Cohesion: 0.16
-Nodes (20): compose_application_package_dry_run(), Compose one verified fixture-only package without issuing a token., OperatorAnswerComposition, _flip_first_nibble(), parametrize, Fail-closed controls for fixture-only application-package composition., test_boundary_flips_are_rejected(), test_exact_types_reject_dict_impostors_and_subclasses() (+12 more)
+Cohesion: 0.19
+Nodes (19): compose_application_package_dry_run(), Compose one verified fixture-only package without issuing a token., _flip_first_nibble(), parametrize, Fail-closed controls for fixture-only application-package composition., test_boundary_flips_are_rejected(), test_exact_types_reject_dict_impostors_and_subclasses(), test_package_hash_tampering_is_rejected() (+11 more)
 
 ### Community 468 - "JAA-08 Release Authority"
 Cohesion: 0.25
@@ -31870,9 +31941,9 @@ Nodes (3): JAA contact-authority enrollment, 10 August 2026, Result, Runtime con
 Cohesion: 0.50
 Nodes (4): Deterministic scoring in the skeleton, Frozen C1-C4 module contracts, Horizontal model-agnostic LLM service, Skeleton, scraper, profiler, LLM and outputs modular design
 
-### Community 726 - "test_jaa04_public_access.py"
-Cohesion: 0.06
-Nodes (86): PublicRetrievalAttempt, PublicRetrievalExhausted, RuntimeError, Immutable, byte-resolvable evidence for one policy-gated fetch stage., All ordinary public transports failed, with immutable attempt evidence., Policy-gated adapter over static and ordinary browser rendering., Return immutable typed evidence for every transport stage attempted., Recognise an ordinary HTML renderer shell with no useful content. (+78 more)
+### Community 726 - "PublicAccessPolicy"
+Cohesion: 0.04
+Nodes (118): PublicRetrievalAttempt, PublicRetrievalExhausted, RuntimeError, Immutable, byte-resolvable evidence for one policy-gated fetch stage., All ordinary public transports failed, with immutable attempt evidence., Policy-gated adapter over static and ordinary browser rendering., Return immutable typed evidence for every transport stage attempted., ScraplingPublicRetriever (+110 more)
 
 ### Community 737 - "Fifteen continuous CH IE NL routes"
 Cohesion: 0.50
@@ -32733,22 +32804,22 @@ Nodes (3): adopted_adapted, <file>, Restore offline adapter resources in install
 ## Knowledge Gaps
 - **31858 isolated node(s):** `$schema`, `title`, `description`, `type`, `additionalProperties` (+31853 more)
   These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 36261 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **29391 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **29392 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `CareerDatabase` connect `PipelineState` to `content_hash`, `test_jaa04_opportunity1_lifecycle_receipt_retest.py`, `HybridEvidenceIndex`, `RawResponseCache`, `test_jaa05_negative_controls.py`, `CalibrationPolicy`, `shadow_full_submit_cohort.py`, `test_jaa04_ambiguity_resume_independent.py`, `pathlib`, `test_jaa09_negative_controls.py`, `prepare_cloudcops_release`, `advance_career_pipeline.py`, `ApplicationSource`, `network_witnessed_fixture.py`, `test_jaa04_admission_evidence.py`, `test_jaa05_independent_acceptance.py`, `test_jaa09_real_vacancy_acceptance.py`, `PublicAccessPolicy`, `OpportunityGate`?**
+- **Why does `CareerDatabase` connect `PipelineState` to `test_jaa05_independent_acceptance.py`, `advance_career_pipeline.py`, `official_cohort.py`, `replace`, `browser_workflows.py`, `pathlib`, `network_witnessed_fixture.py`, `accept_jaa_04.py`, `test_jaa04_opportunity1_lifecycle_receipt_retest.py`, `test_jaa06_independent_acceptance.py`, `test_jaa04_admission_evidence.py`, `shadow_full_submit_cohort.py`, `cloudcops_canary_release.py`, `RawResponseCache`, `test_jaa05_negative_controls.py`?**
   _High betweenness centrality (0.003) - this node is a cross-community bridge._
-- **Why does `ApplicationArtifacts` connect `ApplicationSource` to `adversarial_rebuild.py`, `candidate_contact_authority.py`, `JAA08ReleaseAuthority`, `cv_generation/service.py`, `content_hash`, `test_gutua_greenhouse_session.py`, `document_quality.py`, `pathlib`, `gutua_greenhouse_session.py`, `test_ats_application_authority.py`, `AshbyLiveAdapter`, `personio_live_adapter.py`, `test_candidate_application_factory.py`, `test_candidate_release_gate.py`, `ApplicationArchiveError`, `test_production_ats_executor.py`, `PersonioLiveAdapter`, `ashby_live_adapter.py`?**
+- **Why does `ApplicationArtifacts` connect `pathlib` to `gutua_greenhouse_session.py`, `test_production_runner.py`, `JAA08ReleaseAuthority`, `test_application_quality.py`, `test_ats_application_authority.py`, `personio_live_adapter.py`, `adversarial_rebuild.py`, `test_candidate_application_factory.py`, `test_candidate_release_gate.py`, `document_quality.py`, `test_production_ats_executor.py`, `cloudcops_canary_release.py`, `content_hash`, `candidate_contact_authority.py`, `replace`, `_content_hash`, `ApplicationArchiveError`, `AshbyNonReleasePreparator`, `JAA08ReleaseAuthority`, `PersonioLiveAdapter`?**
   _High betweenness centrality (0.003) - this node is a cross-community bridge._
 - **Why does `JobDatabase` connect `JobDatabase` to `pathlib`, `run.py`, `Collector`?**
   _High betweenness centrality (0.003) - this node is a cross-community bridge._
 - **What connects `$schema`, `title`, `description` to the rest of the system?**
   _31858 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `test_jaa05_human_evidence_acceptance.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.07656341320864991 - nodes in this community are weakly interconnected._
-- **Should `profiler/store.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.048539518900343644 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.06316590563165905 - nodes in this community are weakly interconnected._
+- **Should `market_aligner/cli.py` be split into smaller, more focused modules?**
+  _Cohesion score 0.023591087811271297 - nodes in this community are weakly interconnected._
 - **Should `constraints.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.08085317460317461 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.08633879781420765 - nodes in this community are weakly interconnected._

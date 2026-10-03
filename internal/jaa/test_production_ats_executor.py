@@ -54,6 +54,7 @@ from career_automation.production_attempt import (
     GreenhouseAttemptRecorder,
     ProductionIdentity,
 )
+from career_automation.production_form_binding import approved_authority_values
 from career_automation.testing_sanity_review import fixture_pass_receipt
 from test_jaa08_independent_acceptance import (
     _fixture_now,
@@ -397,8 +398,9 @@ def _prepared_authority(
         ("email", "contact.email"),
         ("phone", "contact.phone"),
         ("city", "contact.city"),
-        ("cover_note", "answers.full"),
+        ("cover_note", "answer.delivery-example"),
     )
+    field_answer_bindings = (("cover_note", "delivery-example"),)
     consent_states = (("consent", True),)
     success_observation = (
         json.dumps(
@@ -489,6 +491,7 @@ def _prepared_authority(
         artifacts=artifacts,
         questions=questions,
         state_root=tmp_path,
+        field_answer_bindings=field_answer_bindings,
     )
     vacancy = VacancyArchiveIdentity(
         job_key=source.job_key,
@@ -525,7 +528,9 @@ def _prepared_authority(
     page.locator('input[name="email"]').fill(contact.email)
     page.locator('input[name="phone"]').fill(contact.phone)
     page.locator('input[name="city"]').fill(contact.city)
-    page.locator('textarea[name="cover_note"]').fill(artifacts.editable.answers_text)
+    page.locator('textarea[name="cover_note"]').fill(
+        approved_authority_values(source, artifacts)["answer.delivery-example"]
+    )
     page.locator('input[name="resume"]').set_input_files(str(cv_path))
     if "cover_letter" in attached_roles:
         page.locator('input[name="cover_letter"]').set_input_files(str(cover_path))

@@ -1,11 +1,11 @@
 {
-  "community_count": 30049,
-  "edge_count": 73775,
+  "community_count": 30064,
+  "edge_count": 73778,
   "node_count": 56646,
   "outputs": {
-    ".graphify_labels.json": "fbb0eac39b84b21b01dcef6c123c271f32fc53d7cc8ce5d479edd16dbc755a3a",
-    "GRAPH_REPORT.md": "586fd209c7b1c74a58f3df2675ed780b5a51d599113a1899e0c18113a02fc881",
-    "graph.json": "26d185fc60ffb4fc2bf129e92c95d4b16b47a07e03cd57f2b544941e62d817e7"
+    ".graphify_labels.json": "65a9e8b96f0238b328693cfccc7b76d0f2a7b78b70751aa9f9aaa1c035c6fdae",
+    "GRAPH_REPORT.md": "957238462f97b2be25be076911900742b8bf7c51af07b2a53d981137ec7029a5",
+    "graph.json": "80ef282451f74d8105e9c001409a1d80e20cbe4c8808d556a551309c01be18cb"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "68fd0e2bd522a997b47dc36c0c848c1d2c9ce003",
+  "source_base_commit": "a35c75292a1f46674ee295ca03cdc9d46d046e9e",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -675,7 +675,7 @@
     "internal/jaa/test_portable_acceptance_runtime_config.py": "8b433dab1f5bdda3edc10a4ba756acf9e3b2a252d48b75eb33cf17c38c0d6a5b",
     "internal/jaa/test_portable_lock_verification.py": "e1622645ca387ee3eb053533fdc62fecfd54192a25648538f6be4eec55aece1b",
     "internal/jaa/test_preview_candidate_selection.py": "5b4708be9f818836b1b4be39996e68b1a2938421f489e6dd8f63ca556fa4af47",
-    "internal/jaa/test_production_ats_executor.py": "27978779381fddee86444eaa70f08a798732d31e99783dd24ffdfd83cfd0be1d",
+    "internal/jaa/test_production_ats_executor.py": "036ea894615c98bd7928cf34f0a6b8961841ea8225108817d27fd718fe43105a",
     "internal/jaa/test_production_handoff_runner.py": "2797287cfc2e0a132007307c438370922fdd13dc579bbf65f5a5de353be20656",
     "internal/jaa/test_production_operational_surfaces.py": "6ba2d2722fb94d866f683c3bc2a582387e29f8222f41089a302b7dac90d519bb",
     "internal/jaa/test_production_preparation_runner.py": "3123e333343aadd80736d6d5181b765dfd31af82933a15bd12a11093dd6e8e05",
