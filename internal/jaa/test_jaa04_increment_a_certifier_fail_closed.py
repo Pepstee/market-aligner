@@ -98,6 +98,22 @@ JAA03_README_COMMIT_SEQUENCE = (("internal/jaa/README.md", "modified"),)
 TEST_EVIDENCE_GENERATOR_COMMIT_SEQUENCE = (
     ("internal/jaa/README.md", "modified"),
 )
+TEST_EVIDENCE_RECEIPT_SIDECAR_PATH = (
+    "internal/jaa/runtime_evidence/pytest/synthetic-product-revision-sidecar.json"
+)
+TEST_EVIDENCE_CONTENT_COMMIT_SEQUENCE = (
+    ("internal/jaa/README.md", "modified"),
+    (TEST_EVIDENCE_RECEIPT_SIDECAR_PATH, "added"),
+    ("internal/jaa/scripts/certify_jaa04_increment_a.py", "modified"),
+    ("internal/jaa/test_jaa04_increment_a_authority_canaries.py", "modified"),
+    ("internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml", "modified"),
+    ("internal/jaa/README.md", "modified"),
+    ("internal/jaa/scripts/certify_jaa04_increment_a.py", "modified"),
+)
+TEST_EVIDENCE_SYMLINK_COMMIT_SEQUENCE = (
+    ("internal/jaa/README.md", "modified"),
+    ("internal/jaa/README.md", "symlink"),
+)
 JAA03_REHASHED_RECEIPT_COMMIT_SEQUENCE = (
     (JAA03_REHASHED_RECEIPT_COMMIT, "replaced"),
 )
@@ -108,10 +124,12 @@ JAA03_INDEPENDENT_ACCEPTANCE_COMMIT_SEQUENCE = (
 )
 PERMITTED_MUTATION_PATHS = ALLOWED_MUTATIONS | {
     "internal/jaa/README.md",
+    "internal/jaa/untracked-product-executable.py",
     "internal/jaa/scripts/jaa04_increment_a_test_inventory.json",
     "internal/jaa/test_jaa04_sidecar_temporal_semantics.py",
     "internal/jaa/baseline_adoption/cli.py",
     "internal/jaa/runtime_evidence/JAA-00-online-snapshot.yaml",
+    TEST_EVIDENCE_RECEIPT_SIDECAR_PATH,
     JAA02_INITIAL_RECEIPT_PATH,
     JAA02_CONFLICT_RECEIPT_PATH,
     JAA02_RECEIPT_MUTATION,
@@ -401,6 +419,8 @@ def _committed_inplace_branch(
                 TEST_EVIDENCE_GENERATOR_COMMIT_SEQUENCE,
                 JAA03_REHASHED_RECEIPT_COMMIT_SEQUENCE,
                 JAA03_INDEPENDENT_ACCEPTANCE_COMMIT_SEQUENCE,
+                TEST_EVIDENCE_CONTENT_COMMIT_SEQUENCE,
+                TEST_EVIDENCE_SYMLINK_COMMIT_SEQUENCE,
             )
             if (
                 commit_sequence not in permitted_sequences
@@ -584,6 +604,31 @@ def _git_path_blob_sha256(revision: str, path: str) -> str | None:
     return _git_blob_sha256(f"{revision}:{path}")
 
 
+def _git_path_mode(revision: str, path: str) -> str | None:
+    listed = _run(
+        REPOSITORY_ROOT,
+        "git",
+        "ls-tree",
+        "-r",
+        "-z",
+        revision,
+        "--",
+        path,
+    )
+    if listed.returncode != 0:
+        raise RuntimeError("cannot inspect exact fixture path mode in Git tree")
+    rows = [row for row in listed.stdout.split("\0") if row]
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise RuntimeError("Git tree mode lookup returned an unexpected path count")
+    metadata, separator, actual_path = rows[0].partition("\t")
+    fields = metadata.split()
+    if not separator or actual_path != path or len(fields) != 3:
+        raise RuntimeError("Git tree mode lookup returned an unexpected path")
+    return fields[0]
+
+
 def _is_jaa02_receipt_path(path: str) -> bool:
     return re.fullmatch(
         r"internal/jaa/runtime_evidence/jaa02/sha256-[0-9a-f]{64}\.json",
@@ -672,7 +717,12 @@ def _commit_path_change(
     case: str,
     *,
     preexisting_added: bool = False,
+    result_mode: int | None = None,
 ) -> None:
+    if result_mode is not None and (
+        operation != "modified" or result_mode not in {0o644, 0o755}
+    ):
+        _abort_suite("fixture mode change is outside its exact supported form")
     if not _mutation_path_allowed(path, state.allowed_mutations):
         _abort_suite("fixture mutation path is not allowlisted")
     commit_index = len(state.commit_records)
@@ -689,6 +739,7 @@ def _commit_path_change(
     target = _safe_mutation_target(path)
     parent_head = state.head
     parent_blob_sha256 = _git_path_blob_sha256(parent_head, path)
+    parent_mode = _git_path_mode(parent_head, path) if result_mode is not None else None
     if preexisting_added and (
         _git("status", "--porcelain", "--untracked-files=all").splitlines()
         != [f"?? {path}"]
@@ -717,6 +768,12 @@ def _commit_path_change(
             _abort_suite("fixture addition target already exists in the admitted source")
     else:
         _abort_suite("fixture mutation operation is not permitted")
+    if result_mode is not None and (
+        parent_mode not in {"100644", "100755"}
+        or ("100755" if target.stat().st_mode & 0o111 else "100644") != parent_mode
+        or ("100755" if result_mode & 0o111 else "100644") == parent_mode
+    ):
+        _abort_suite("fixture mode mutation differs from the exact tracked mode")
     if operation == "deleted" and content is not None:
         _abort_suite("fixture deletion unexpectedly supplied replacement bytes")
     if operation != "deleted" and content is None:
@@ -733,7 +790,11 @@ def _commit_path_change(
         _abort_suite("receipt path is not bound to its exact content hash")
     try:
         if operation == "modified":
+            _assert_admission(state.branch, state.head, False)
             target.write_bytes(content or b"")
+            if result_mode is not None:
+                _assert_admission(state.branch, state.head, True)
+                target.chmod(result_mode)
         elif operation == "symlink":
             target.unlink()
             _assert_admission(state.branch, state.head, True)
@@ -770,6 +831,7 @@ def _commit_path_change(
             not target.is_file()
             or target.is_symlink()
             or hashlib.sha256(target.read_bytes()).hexdigest() != result_blob_sha256
+            or (result_mode is not None and stat.S_IMODE(target.stat().st_mode) != result_mode)
         ):
             _abort_suite("fixture working bytes differ from the exact admitted content")
     _assert_admission(state.branch, state.head, True)
@@ -799,6 +861,13 @@ def _commit_path_change(
             content is not None
             and operation != "symlink"
             and hashlib.sha256(target.read_bytes()).hexdigest() != result_blob_sha256
+        )
+        or (
+            result_mode is not None
+            and _git("ls-files", "--stage", "-z", "--", path)
+            .partition("\t")[0]
+            .split()[0]
+            != ("100755" if result_mode & 0o111 else "100644")
         )
         or (content is None and target.exists())
     ):
@@ -837,6 +906,11 @@ def _commit_path_change(
         != [f"{expected_diff}\t{path}"]
         or _git_path_blob_sha256(parent_head, path) != parent_blob_sha256
         or _git_path_blob_sha256(new_head, path) != result_blob_sha256
+        or (
+            result_mode is not None
+            and _git_path_mode(new_head, path)
+            != ("100755" if result_mode & 0o111 else "100644")
+        )
         or _git("status", "--porcelain", "--untracked-files=all")
     ):
         _abort_suite("fixture commit changed more than the exact intended path")
@@ -844,6 +918,15 @@ def _commit_path_change(
 
 def _commit_mutation(state: _FixtureBranch, path: str, content: str, case: str) -> None:
     _commit_path_change(state, path, "modified", content.encode("utf-8"), case)
+
+
+def _commit_mode_change(state: _FixtureBranch, path: str, mode: int, case: str) -> None:
+    target = _safe_mutation_target(path)
+    if not target.is_file() or target.is_symlink():
+        _abort_suite("fixture mode target is not a regular file")
+    _commit_path_change(
+        state, path, "modified", target.read_bytes(), case, result_mode=mode
+    )
 
 
 def _commit_added_file(state: _FixtureBranch, path: str, content: bytes, case: str) -> None:
@@ -1188,9 +1271,17 @@ def _commit_rehashed_receipt_replacement(
 
 @contextmanager
 def _temporarily_dirty_tracked_path_on_branch(
-    state: _FixtureBranch, path: str, suffix: bytes
+    state: _FixtureBranch,
+    path: str,
+    suffix: bytes,
+    *,
+    mode: int | None = None,
 ) -> Iterator[Path]:
-    if not _mutation_path_allowed(path, state.allowed_mutations) or not suffix:
+    if (
+        not _mutation_path_allowed(path, state.allowed_mutations)
+        or (not suffix and mode is None)
+        or (mode is not None and mode not in {0o644, 0o664, 0o755, 0o775})
+    ):
         _abort_suite("temporary dirty path is outside the exact fixture scope")
     _assert_admission(state.branch, state.head, False)
     target = _safe_mutation_target(path)
@@ -1199,28 +1290,36 @@ def _temporarily_dirty_tracked_path_on_branch(
         _abort_suite("temporary dirty path is not an exact tracked regular file")
     original = target.read_bytes()
     original_mode = stat.S_IMODE(target.stat().st_mode)
+    if mode == original_mode:
+        _abort_suite("temporary mode does not differ from the exact tracked mode")
     if hashlib.sha256(original).hexdigest() != base_blob_sha256:
         _abort_suite("temporary dirty path differs from its admitted base blob")
     if _git("status", "--porcelain", "--untracked-files=all"):
         _abort_suite("temporary dirty path requires a clean branch")
     changed_bytes = original + suffix
     changed_sha256 = hashlib.sha256(changed_bytes).hexdigest()
+    changed_mode = original_mode if mode is None else mode
     write_started = False
     try:
-        _assert_admission(state.branch, state.head, False)
-        descriptor = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
-        write_started = True
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(changed_bytes)
-            stream.flush()
-            os.fsync(stream.fileno())
+        if suffix:
+            _assert_admission(state.branch, state.head, False)
+            descriptor = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+            write_started = True
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(changed_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+        if mode is not None:
+            _assert_admission(state.branch, state.head, write_started)
+            target.chmod(mode)
+            write_started = True
         if (
             _git("status", "--porcelain", "--untracked-files=all").splitlines()
             != [f" M {path}"]
             or not target.is_file()
             or target.is_symlink()
             or hashlib.sha256(target.read_bytes()).hexdigest() != changed_sha256
-            or stat.S_IMODE(target.stat().st_mode) != original_mode
+            or stat.S_IMODE(target.stat().st_mode) != changed_mode
         ):
             _abort_suite("temporary dirty path is not the exact admitted append")
         _assert_admission(state.branch, state.head, True)
@@ -1233,7 +1332,7 @@ def _temporarily_dirty_tracked_path_on_branch(
                 not target.is_file()
                 or target.is_symlink()
                 or hashlib.sha256(target.read_bytes()).hexdigest() != changed_sha256
-                or stat.S_IMODE(target.stat().st_mode) != original_mode
+                or stat.S_IMODE(target.stat().st_mode) != changed_mode
                 or _git("status", "--porcelain", "--untracked-files=all").splitlines()
                 != [f" M {path}"]
             ):
@@ -1242,6 +1341,7 @@ def _temporarily_dirty_tracked_path_on_branch(
             try:
                 descriptor = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
                 with os.fdopen(descriptor, "wb") as stream:
+                    os.fchmod(stream.fileno(), original_mode)
                     stream.write(original)
                     stream.flush()
                     os.fsync(stream.fileno())
@@ -1457,7 +1557,11 @@ def _uncommitted_control_file(
     state: _FixtureBranch,
     path: str,
     content: bytes,
+    *,
+    mode: int = 0o600,
 ) -> Iterator[Path]:
+    if mode not in {0o600, 0o755}:
+        _abort_suite("uncommitted control mode is outside its exact supported form")
     temporary_jaa02_conflict = (
         path == JAA02_CONFLICT_RECEIPT_PATH
         and state.commit_sequence == JAA02_DELETE_RECEIPT_SEQUENCE
@@ -1475,12 +1579,13 @@ def _uncommitted_control_file(
             descriptor = os.open(
                 target,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
+                mode,
             )
         except OSError:
             _abort_suite("cannot create exact uncommitted dirty-state control")
         created = True
         with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), mode)
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
@@ -1492,6 +1597,7 @@ def _uncommitted_control_file(
             or not target.is_file()
             or target.is_symlink()
             or hashlib.sha256(target.read_bytes()).hexdigest() != expected_sha256
+            or stat.S_IMODE(target.stat().st_mode) != mode
         ):
             _abort_suite("dirty-state control is not the exact single untracked file")
         yield target
@@ -1503,6 +1609,7 @@ def _uncommitted_control_file(
                 not target.is_file()
                 or target.is_symlink()
                 or hashlib.sha256(target.read_bytes()).hexdigest() != expected_sha256
+                or stat.S_IMODE(target.stat().st_mode) != mode
                 or _git("status", "--porcelain", "--untracked-files=all").splitlines()
                 != expected_status
             ):
