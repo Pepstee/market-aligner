@@ -70,11 +70,11 @@ def _write_admission_fixture(
     stored_producer: str | None = None,
     canonical: bool = True,
     context_sha256: str | None = None,
+    handoff_root_sha256: str = "4" * 64,
 ) -> None:
-    handoff_root = "4" * 64
     context = {
         "environment": "production",
-        "handoff_root_sha256": handoff_root,
+        "handoff_root_sha256": handoff_root_sha256,
         "producer_commit_sha": context_producer,
         "producer_product": "market-aligner",
         "source_record_sha256": "3" * 64,
@@ -103,7 +103,7 @@ def _write_admission_fixture(
             "market-aligner",
             "production",
             runner.PRODUCTION_HANDOFF_TRUST_ROOT_ID,
-            handoff_root,
+            handoff_root_sha256,
         ),
     )
     connection.commit()
@@ -672,6 +672,7 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
         "resume_writer", "humanizer", "cover_letter_writer", "cover_letter_humanizer"
     ]
     assert captured["environment"] == "production"
+    assert captured["input_materializer"].materialization_only is False
     assert captured["editorial_runtime"].document_kind == "cv"
     assert captured["cover_letter_editorial_runtime"].document_kind == "cover_letter"
     assert captured["editorial_runtime"] is not captured["cover_letter_editorial_runtime"]
@@ -752,6 +753,49 @@ def test_poppler_substitution_rejects_before_provider_availability(
     with pytest.raises(runner.ProductionPreparationDeploymentError, match="Poppler"):
         runner._run_production_preparation("app_" + "1" * 64, deployment)
     assert calls == {"adapter": 0, "recruiter": 0}
+
+
+@pytest.mark.parametrize(
+    ("authority", "change", "message"),
+    (
+        ("candidate", "missing", "compiled authority file is unavailable"),
+        ("candidate", "tampered", "compiled authority file identity differs"),
+        ("contact", "missing", "compiled authority file is unavailable"),
+        ("contact", "tampered", "compiled authority file identity differs"),
+    ),
+)
+def test_materialization_only_still_rejects_missing_or_tampered_shared_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    authority: str,
+    change: str,
+    message: str,
+) -> None:
+    deployment, paths = _real_preflight_deployment(monkeypatch, tmp_path)
+    calls = {"materializer": 0}
+    monkeypatch.setattr(
+        runner,
+        "installed_production_preparation_deployment",
+        lambda: deployment,
+    )
+    monkeypatch.setattr(
+        runner,
+        "prepare_admitted_market_application_from_authorities",
+        lambda **kwargs: calls.__setitem__("materializer", calls["materializer"] + 1),
+    )
+    path = paths[authority]
+    if change == "missing":
+        path.unlink()
+    else:
+        original = path.read_bytes()
+        path.write_bytes(bytes((original[0] ^ 1,)) + original[1:])
+        path.chmod(0o600)
+
+    with pytest.raises(runner.ProductionPreparationDeploymentError, match=message):
+        runner.run_production_market_materialization(
+            application_id="app_" + "1" * 64
+        )
+    assert calls["materializer"] == 0
 
 
 def test_pinned_file_rejects_hash_mode_link_and_symlink_substitution(

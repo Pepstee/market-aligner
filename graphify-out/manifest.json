@@ -4014,9 +4014,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/market_aligner_preparation.py": {
-    "mtime": 1790562678.4465065,
-    "seen": 1790775868.5198374,
-    "ast_hash": "eeeaf104af12abc20c95059e11f7c50a",
+    "mtime": 1791240857.9520345,
+    "seen": 1791241456.8542461,
+    "ast_hash": "986ff710c2cd64d42fddfac208405875",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_handoff_admission_runner.py": {
@@ -4032,9 +4032,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_preparation_runner.py": {
-    "mtime": 1790690356.288101,
-    "seen": 1790775868.5198543,
-    "ast_hash": "5c785f4bf77f17184f68519d35d3a80d",
+    "mtime": 1791240983.7480412,
+    "seen": 1791241456.8542643,
+    "ast_hash": "ce4fae84f608cee82fb73eb4aba84c75",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_recruiter_assessor.py": {
@@ -4224,9 +4224,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_production_preparation_runner.py": {
-    "mtime": 1791003235.9694853,
-    "seen": 1791003564.00636,
-    "ast_hash": "ccb2be7fe1c43d28e0e94db3db38a27f",
+    "mtime": 1791241270.604042,
+    "seen": 1791241456.8546243,
+    "ast_hash": "b657051f60e4f7527c62ce14af394eeb",
     "semantic_hash": ""
   },
   "internal/jaa/test_workable_live_adapter.py": {
@@ -4296,9 +4296,9 @@
     "semantic_hash": ""
   },
   "tests/test_market_aligner_jaa_handoff.py": {
-    "mtime": 1790113918.045165,
-    "seen": 1790775868.5204225,
-    "ast_hash": "13d9e9d2d40e935098d7d10eef3a55fd",
+    "mtime": 1791241140.2240496,
+    "seen": 1791241456.8547487,
+    "ast_hash": "e4499493282990b93ebb300296c017bb",
     "semantic_hash": ""
   },
   "tests/test_production_handoff.py": {

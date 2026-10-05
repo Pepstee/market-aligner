@@ -243,6 +243,7 @@ class CanonicalPreparationInputMaterializer:
     company_name: str | None = None
     candidate_authority_bytes: bytes | None = None
     contact_authority_bytes: bytes | None = None
+    materialization_only: bool = False
 
     def __call__(
         self,
@@ -357,59 +358,62 @@ class CanonicalPreparationInputMaterializer:
             candidate_authority_bytes=self.candidate_authority_bytes,
             contact_authority_bytes=self.contact_authority_bytes,
         )
-        heading_by_id = {
-            sentence_id: section.heading
-            for section in materialization.source.cv_sections
-            for sentence_id in section.sentence_ids
-        }
-        categories = {
-            "Professional Summary": "summary",
-            "Core Capabilities": "capability_domain",
-            "Projects": "project",
-            "Experience": "experience",
-            "Education": "education",
-        }
-        claims = tuple(
-            ApprovedCVClaim(
-                claim_id=str(row["sentence_id"]),
-                text=str(row["text"]),
-                text_sha256=str(row["text_sha256"]),
-                evidence_ids=tuple(str(value) for value in row["evidence_ids"]),
-                category=categories[heading_by_id[str(row["sentence_id"])]],
+        request = None
+        cover_request = None
+        if not self.materialization_only:
+            heading_by_id = {
+                sentence_id: section.heading
+                for section in materialization.source.cv_sections
+                for sentence_id in section.sentence_ids
+            }
+            categories = {
+                "Professional Summary": "summary",
+                "Core Capabilities": "capability_domain",
+                "Projects": "project",
+                "Experience": "experience",
+                "Education": "education",
+            }
+            claims = tuple(
+                ApprovedCVClaim(
+                    claim_id=str(row["sentence_id"]),
+                    text=str(row["text"]),
+                    text_sha256=str(row["text_sha256"]),
+                    evidence_ids=tuple(str(value) for value in row["evidence_ids"]),
+                    category=categories[heading_by_id[str(row["sentence_id"])]],
+                )
+                for row in materialization.receipt.fact_bindings
+                if row["document_kind"] == "cv"
             )
-            for row in materialization.receipt.fact_bindings
-            if row["document_kind"] == "cv"
-        )
-        request = build_editorial_request(
-            authority=_candidate_editorial_authority(
-                candidate_name=contact_authority.contact.full_name,
-                candidate_city=contact_authority.contact.city,
-                source_sha256=deployment_binding.candidate_authority_file_sha256,
-            ),
-            role_title=role_title,
-            company_name=company_name,
-            vacancy_sha256=raw_listing_sha256,
-            approved_claims=claims,
-        )
-        cover_claims = tuple(
-            ApprovedCoverLetterClaim(
-                claim_id=str(row["sentence_id"]),
-                text=str(row["text"]),
-                text_sha256=str(row["text_sha256"]),
-                evidence_ids=tuple(str(value) for value in row["evidence_ids"]),
-                fact_kind=str(row["fact_kind"]),
-                section_heading=str(row["section_heading"]),
+            request = build_editorial_request(
+                authority=_candidate_editorial_authority(
+                    candidate_name=contact_authority.contact.full_name,
+                    candidate_city=contact_authority.contact.city,
+                    source_sha256=deployment_binding.candidate_authority_file_sha256,
+                ),
+                role_title=role_title,
+                company_name=company_name,
+                vacancy_sha256=raw_listing_sha256,
+                approved_claims=claims,
             )
-            for row in materialization.receipt.fact_bindings
-            if row["document_kind"] == "cover_letter"
-        )
-        cover_request = build_cover_letter_editorial_request(
-            authority=request.authority,
-            role_title=role_title,
-            company_name=company_name,
-            vacancy_sha256=raw_listing_sha256,
-            approved_claims=cover_claims,
-        )
+            cover_claims = tuple(
+                ApprovedCoverLetterClaim(
+                    claim_id=str(row["sentence_id"]),
+                    text=str(row["text"]),
+                    text_sha256=str(row["text_sha256"]),
+                    evidence_ids=tuple(str(value) for value in row["evidence_ids"]),
+                    fact_kind=str(row["fact_kind"]),
+                    section_heading=str(row["section_heading"]),
+                )
+                for row in materialization.receipt.fact_bindings
+                if row["document_kind"] == "cover_letter"
+            )
+            cover_request = build_cover_letter_editorial_request(
+                authority=request.authority,
+                role_title=role_title,
+                company_name=company_name,
+                vacancy_sha256=raw_listing_sha256,
+                approved_claims=cover_claims,
+            )
         listing_text = verified.raw_listing_bytes.decode("utf-8")
         if hashlib.sha256(listing_text.encode()).hexdigest() != raw_listing_sha256:
             raise ValueError("canonical materializer listing differs from vacancy")

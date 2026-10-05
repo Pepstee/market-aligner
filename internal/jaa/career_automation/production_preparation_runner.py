@@ -1123,31 +1123,32 @@ def _run_production_preparation(
         for name in (PUBLIC_KEY_ENV, REGISTRY_ENV, "JAA_POPPLER_BIN")
     }
     try:
-        for name, expected in PRODUCTION_POPPLER_SHA256.items():
+        if not materialization_only:
+            for name, expected in PRODUCTION_POPPLER_SHA256.items():
+                resources.pin_file(
+                    deployment.poppler_bin / name,
+                    expected_sha256=expected,
+                    expected_mode=0o755,
+                    expected_uid=os.geteuid(),
+                    executable=True,
+                    label="Poppler",
+                )
+            for name, expected in PRODUCTION_POPPLER_LIBRARY_SHA256.items():
+                resources.pin_file(
+                    deployment.poppler_library_directory / name,
+                    expected_sha256=expected,
+                    expected_mode=0o644,
+                    expected_uid=os.geteuid(),
+                    label="Poppler library",
+                )
             resources.pin_file(
-                deployment.poppler_bin / name,
-                expected_sha256=expected,
+                deployment.codex_binary,
+                expected_sha256=PRODUCTION_CODEX_BINARY_SHA256,
                 expected_mode=0o755,
-                expected_uid=os.geteuid(),
+                expected_uid=PRODUCTION_CODEX_OWNER_UID,
                 executable=True,
-                label="Poppler",
+                label="Codex",
             )
-        for name, expected in PRODUCTION_POPPLER_LIBRARY_SHA256.items():
-            resources.pin_file(
-                deployment.poppler_library_directory / name,
-                expected_sha256=expected,
-                expected_mode=0o644,
-                expected_uid=os.geteuid(),
-                label="Poppler library",
-            )
-        resources.pin_file(
-            deployment.codex_binary,
-            expected_sha256=PRODUCTION_CODEX_BINARY_SHA256,
-            expected_mode=0o755,
-            expected_uid=PRODUCTION_CODEX_OWNER_UID,
-            executable=True,
-            label="Codex",
-        )
         for path, expected in (
             (
                 deployment.candidate_authority_path,
@@ -1250,7 +1251,8 @@ def _run_production_preparation(
         resources.verify()
         os.environ[PUBLIC_KEY_ENV] = str(deployment.contact_public_key_path)
         os.environ[REGISTRY_ENV] = str(deployment.contact_registry_path)
-        os.environ["JAA_POPPLER_BIN"] = str(deployment.poppler_bin)
+        if not materialization_only:
+            os.environ["JAA_POPPLER_BIN"] = str(deployment.poppler_bin)
         candidate_bytes = resources.file_bytes(deployment.candidate_authority_path)
         contact_lease = CandidateContactResourceLease(
             authority_path=deployment.contact_authority_path,
@@ -1261,21 +1263,24 @@ def _run_production_preparation(
             registry_bytes=resources.file_bytes(deployment.contact_registry_path),
             registry_chain=registry_chain,
         )
-        codex_descriptor = resources.file_descriptor(deployment.codex_binary)
-        poppler_runtime = pinned_poppler_runtime(
-            {
-                name: resources.file_descriptor(deployment.poppler_bin / name)
-                for name in PRODUCTION_POPPLER_SHA256
-            },
-            PRODUCTION_POPPLER_SHA256,
-            library_descriptors={
-                name: resources.file_descriptor(
-                    deployment.poppler_library_directory / name
-                )
-                for name in PRODUCTION_POPPLER_LIBRARY_SHA256
-            },
-            expected_library_sha256=PRODUCTION_POPPLER_LIBRARY_SHA256,
-        )
+        codex_descriptor = None
+        poppler_runtime = None
+        if not materialization_only:
+            codex_descriptor = resources.file_descriptor(deployment.codex_binary)
+            poppler_runtime = pinned_poppler_runtime(
+                {
+                    name: resources.file_descriptor(deployment.poppler_bin / name)
+                    for name in PRODUCTION_POPPLER_SHA256
+                },
+                PRODUCTION_POPPLER_SHA256,
+                library_descriptors={
+                    name: resources.file_descriptor(
+                        deployment.poppler_library_directory / name
+                    )
+                    for name in PRODUCTION_POPPLER_LIBRARY_SHA256
+                },
+                expected_library_sha256=PRODUCTION_POPPLER_LIBRARY_SHA256,
+            )
 
         editorial_runtime = None
         cover_letter_editorial_runtime = None
@@ -1334,6 +1339,7 @@ def _run_production_preparation(
                 candidate_authority_path=deployment.candidate_authority_path,
                 candidate_authority_bytes=candidate_bytes,
                 contact_authority_bytes=contact_lease.authority_bytes,
+                materialization_only=materialization_only,
             ),
             environment="production",
             editorial_runtime=editorial_runtime,
