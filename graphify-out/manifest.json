@@ -306,9 +306,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/candidate_application_factory.py": {
-    "mtime": 1790887605.6917014,
-    "seen": 1790888148.0108433,
-    "ast_hash": "92f3891a5d5f857d6b826dec3362aaa4",
+    "mtime": 1791242762.3200085,
+    "seen": 1791243043.5029051,
+    "ast_hash": "7d73ab4f38ba807556a152f5cf19867f",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/candidate_authority.py": {
@@ -2298,9 +2298,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_candidate_application_factory.py": {
-    "mtime": 1790916528.6272333,
-    "seen": 1790917186.9896066,
-    "ast_hash": "4d930b999143235c83dab98d5fb218f1",
+    "mtime": 1791242876.4840152,
+    "seen": 1791243043.5032213,
+    "ast_hash": "ec06ea22500d1389ffc1d4ad78ed0980",
     "semantic_hash": ""
   },
   "internal/jaa/test_candidate_authority.py": {

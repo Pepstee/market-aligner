@@ -775,6 +775,43 @@ def test_generation_composes_verified_nonlegacy_profile_by_evidence_kind(
     )
 
 
+def test_rendered_summary_positions_candidate_with_bound_profile_fact(
+    tmp_path: Path,
+) -> None:
+    package = build_candidate_application_package(
+        **_synthetic_composition_inputs(tmp_path)
+    )
+    source = package.source
+    summary = next(
+        section
+        for section in source.cv_sections
+        if section.heading == "Professional Summary"
+    )
+    summary_fact = next(
+        fact for fact in source.facts if fact.sentence_id == summary.sentence_ids[0]
+    )
+    summary_slot = next(
+        slot for slot in source.style_slots if slot.slot_id == summary.style_slot_ids[0]
+    )
+
+    assert summary_slot.text == (
+        "As a candidate for this role, I bring relevant work in:"
+    )
+    assert summary_fact.text == summary_fact.approved_source_text
+    assert summary_fact.authority.candidate_evidence_id.startswith(
+        "SYNTHETIC-PORTFOLIO-"
+    )
+    for rendered in (
+        package.artifacts.editable.cv_text,
+        package.artifacts.cv_pdf.extracted_text,
+    ):
+        flattened = " ".join(rendered.split())
+        assert flattened.count(summary_slot.text) == 1
+        assert flattened.count(summary_fact.text) == 1
+        assert flattened.index(summary_slot.text) < flattened.index(summary_fact.text)
+        assert "Software Engineer" not in flattened
+
+
 def test_generic_package_relocates_verified_capability_fact_verbatim(
     tmp_path: Path,
 ) -> None:

@@ -1724,6 +1724,16 @@ def _build_candidate_application_source(
                 summary_fact
             )
 
+    summary_positioning = (
+        _slot(
+            "cv",
+            "candidate_summary_positioning",
+            "As a candidate for this role, I bring relevant work in:",
+        )
+        if cv_sections_by_heading.get("Professional Summary")
+        else None
+    )
+
     if not legacy_profile and not cv_sections_by_heading.get("Core Capabilities"):
         capability_fact = _select_profile_capability_fact(
             cv_sections_by_heading,
@@ -1918,6 +1928,9 @@ def _build_candidate_application_source(
         DocumentSection(
             heading,
             tuple(row.sentence_id for row in cv_sections_by_heading[heading]),
+            (summary_positioning.slot_id,)
+            if heading == "Professional Summary" and summary_positioning is not None
+            else (),
         )
         for heading in PROFILE_CV_SECTION_ORDER
         if cv_sections_by_heading.get(heading)
@@ -1941,6 +1954,7 @@ def _build_candidate_application_source(
         contact=contact,
         facts=facts,
         style_slots=(
+            *((summary_positioning,) if summary_positioning is not None else ()),
             letter_open,
             letter_close,
         ),
