@@ -139,6 +139,100 @@ def test_runner_uses_default_without_legacy_variables_and_only_recertifier_gets_
     assert all(str(source) not in command and str(evidence) not in command for command in calls[1:])
 
 
+def test_current_greenhouse_scope_is_separate_and_records_one_local_canary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = _load_runner(monkeypatch)
+    binding = {"source": {"head": "a" * 40}, "runtime": {"python": "fixture"}}
+    monkeypatch.setattr(runner, "_execution_binding", lambda: binding)
+    monkeypatch.setattr(runner, "OUTPUT_PARENT", tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "load_runtime_config",
+        lambda *_args, **_kwargs: pytest.fail("current scope must not load historical config"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "default_config_path",
+        lambda: pytest.fail("current scope must not inspect historical config"),
+    )
+    monkeypatch.setattr(
+        runner.sys,
+        "argv",
+        [str(RUNNER), "--scope", "current-greenhouse-mvp"],
+    )
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def successful_native_result(basetemp: Path) -> None:
+        destination = basetemp / "test_native_prepare_release_one_call_local_diagnostic0"
+        destination.mkdir(parents=True)
+        document = {
+            "status": "prepared_no_submit",
+            "attempt_id": "synthetic-attempt",
+            "provider_dispatches": 1,
+            "provider_responses": 1,
+            "provider_response_capture_status": "written",
+            "provider_response_sha256": "b" * 64,
+            "sanity_receipt_sha256": "c" * 64,
+            "native_fill_returned": True,
+            "prepared_returned": True,
+            "attempt_finalized": True,
+            "external_network_requests": 0,
+            "intercepted_post_attempts": 0,
+            "external_submission": 0,
+            "terminal_archive_roles": ["submission.result"],
+            "default_production_verifier_rejected_actual_diagnostic_receipt": True,
+        }
+        runner._write_private(
+            destination / "safe-result.json",
+            (json.dumps(document, sort_keys=True) + "\n").encode(),
+        )
+
+    def observe(command, **kwargs):
+        argv = tuple(command)
+        calls.append((argv, kwargs))
+        environment = kwargs["env"]
+        assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
+        assert environment["PYTHONPATH"] == os.pathsep.join(
+            (str(runner.PROJECT_ROOT / "src"), str(runner.ROOT))
+        )
+        assert kwargs["cwd"] == runner.ROOT
+        if runner.CURRENT_MVP_NATIVE_TEST in argv:
+            assert environment["MA_RUN_NATIVE_BROWSER_DIAGNOSTIC"] == "1"
+            successful_native_result(Path(argv[argv.index("--basetemp") + 1]))
+            output = "1 passed in 0.1s\n"
+        else:
+            assert "MA_RUN_NATIVE_BROWSER_DIAGNOSTIC" not in environment
+            assert all(node in argv for node in runner.CURRENT_MVP_FUNCTIONAL_TESTS)
+            output = "19 passed in 0.1s\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", observe)
+    assert runner.main() == 0
+    assert len(calls) == 2
+    assert runner.CURRENT_MVP_NATIVE_TEST in calls[1][0]
+    assert "recertify-sources" not in calls[0][0]
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "current_functional_scope_pass_historical_unproven"
+    assert summary["historical_certification"] == "unproven_not_run"
+    assert summary["external_application"] == "not_performed"
+    assert summary["release_claim"] is False
+    evidence = Path(summary["evidence_directory"])
+    assert stat.S_IMODE(evidence.stat().st_mode) == 0o700
+    record = json.loads((evidence / "result.json").read_text(encoding="utf-8"))
+    assert [entry["exit_code"] for entry in record["commands"]] == [0, 0]
+    assert record["commands"][1]["native_result"]["provider_dispatches"] == 1
+    for name in (
+        "argv.json",
+        "functional.stdout.log",
+        "functional.stderr.log",
+        "native.stdout.log",
+        "native.stderr.log",
+        "result.json",
+    ):
+        assert stat.S_IMODE((evidence / name).stat().st_mode) == 0o600
+
+
 @pytest.mark.parametrize(
     ("document", "reason"),
     [

@@ -1,11 +1,11 @@
 {
-  "community_count": 30058,
-  "edge_count": 73786,
-  "node_count": 56649,
+  "community_count": 30051,
+  "edge_count": 73828,
+  "node_count": 56664,
   "outputs": {
-    ".graphify_labels.json": "387a2420da04f70488d4f5b9dc11910eaf2f5848f05b4a0f18b895c96d4be7f8",
-    "GRAPH_REPORT.md": "c2068282a37c6054ac022bc7b7cb985cd2e6ca7881d90086e3d7a4d684a38a52",
-    "graph.json": "ec3686e381d290864cc7383aa48742245f61efdc37ce2e240b62fda181f71b31"
+    ".graphify_labels.json": "e6d3a25024ee850cc2fb12ab938739cbea263c3ca48b0eaf41113c47380bb2ad",
+    "GRAPH_REPORT.md": "3800fe68a0dc83004cfd712a556a825ebc35c36c6047a868e797395ab655c21b",
+    "graph.json": "60c17ad8093140b596f7db32fbf8e3d0468861f0107fd8283a6ca50fa01aabf3"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "2be4bd3413f9d469061ee3f5f953d2cd76f83e59",
+  "source_base_commit": "46312d54d9bae9cf7fd9d7f8aa5f96c03c82e757",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -458,7 +458,7 @@
     "internal/jaa/scripts/run-linux-witness-gate.sh": "3ff04d7fa7139dfa8f5fcf0d0d20d59f264ce7f6a7830ac9e4c4863faf5f8c81",
     "internal/jaa/scripts/run-protected-evidence-gate.sh": "bfa6f43b93e50d7793647502dd68638b357d4bceb3632451d7e9095f622eff08",
     "internal/jaa/scripts/run-pytest-no-skips.py": "c0c128f92c29c9d3e9b1ea8caf202fdcae9bb42e8c5bdd870711a96b68eadb3d",
-    "internal/jaa/scripts/run_acceptance.py": "0930e22ff62b405b6755ae09ed2cc346cf83a8b273d323f8f218481f35ad959a",
+    "internal/jaa/scripts/run_acceptance.py": "3cfe6eba82c21ab8349cf862691325300c62966544f706f76bfecc784a47fd8f",
     "internal/jaa/scripts/run_acceptance.sh": "c384cb1fa533096fd4f60e6e064b15455c53a4e9d1de90b34a33abfed6ea45f8",
     "internal/jaa/scripts/run_acceptance_declaration.py": "6d512b654f5870ebabeb348e38b927b51448357c8097ce2c1526475b1dd810bc",
     "internal/jaa/scripts/run_application_sanity_live_smoke.py": "2c6140a8900289cea986a6ffa56c6a36e5f177d9526912c8f86bbe7dd1f111e5",
@@ -672,7 +672,7 @@
     "internal/jaa/test_ma_native_browser_diagnostic.py": "7414a2eb3ef2e2ea0da2bc0a6bcf2a9b42ab72bd1548294c1a2b76cac3c7e3b7",
     "internal/jaa/test_nongreenhouse_fit_projection.py": "13d601e30c8b4d232c63f319cb39c2b16200d51d4270a8bcaa5c7bfb458fb26c",
     "internal/jaa/test_nongreenhouse_provider_alias.py": "98b57c26cb4251c8c35b4e6e5004fdf3ff616bad419450de669f8de298bd1aea",
-    "internal/jaa/test_portable_acceptance_runtime_config.py": "a20bba2c46b44661bfdd94f41b10a20cd2abd4a1c233fdb3e1eecfc5b5be69d2",
+    "internal/jaa/test_portable_acceptance_runtime_config.py": "90b70366d14a3c991ffb6c17a9f04d3b04eb4fc026994bf8a592cbbba2d9fcfe",
     "internal/jaa/test_portable_lock_verification.py": "e1622645ca387ee3eb053533fdc62fecfd54192a25648538f6be4eec55aece1b",
     "internal/jaa/test_preview_candidate_selection.py": "5b4708be9f818836b1b4be39996e68b1a2938421f489e6dd8f63ca556fa4af47",
     "internal/jaa/test_production_ats_executor.py": "036ea894615c98bd7928cf34f0a6b8961841ea8225108817d27fd718fe43105a",
