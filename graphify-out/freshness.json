@@ -4,8 +4,8 @@
   "node_count": 56672,
   "outputs": {
     ".graphify_labels.json": "a0a38f74a122d265e28eb433ad5187e4be776d4f510bb9511f528d8048094c4d",
-    "GRAPH_REPORT.md": "47b654efa16569dd6171f1ff5b1ceca95dfb93fd9d8bfc4475fdfafd1b403d23",
-    "graph.json": "834277aae46d13b19d9db6268981f590ca14455fc26acd1cade8801129c294b5"
+    "GRAPH_REPORT.md": "7114c4ba40a974c318641468f3a1eba59e5270a2b90700aca23898d2a0dc9053",
+    "graph.json": "cf84e7f2bc0a6faaa164bdae456226f0b45957709885996640ff6352afc0768c"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "43ba20f328f7fbf387b58520c46d4003b9cfecdf",
+  "source_base_commit": "021feb25e4664d53b03c59e6bb144c8c9cab2e8c",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -755,7 +755,7 @@
     "src/market_aligner/collectors/adapters/workable.py": "402da722031250877cc9a6f8deb6a8c31ca84b1c8ea25d58350aa361c1293229",
     "src/market_aligner/collectors/adapters/workday.py": "d88c6dc6a204e6a92cd44a9c92bd04350692a6649981d290569a6315949a078e",
     "src/market_aligner/collectors/engine.py": "b85f97e1bd90add6b99299f081c2034e324d26fdb88d92c33bd286d6446a71d4",
-    "src/market_aligner/collectors/evidence.py": "e8a47dd35e876b2c813cb7fb4bb0a289ce0a1fb8e8c477ebf22333a7fb2c3a88",
+    "src/market_aligner/collectors/evidence.py": "e2253940ae9ab1dca04ef9521964317e3120169b5208dd8ce6c2ee3dacf11e20",
     "src/market_aligner/collectors/fetch_control.py": "5c34e881ca7f4db0ae99d54ba847ee9c7daeb65d43b02f2682f8510e79fbfc53",
     "src/market_aligner/collectors/scrapling_client.py": "2bba7295c08923eb4891ed9f9f67f2ad183b6bd3d0c5f58c648e908e04b59d56",
     "src/market_aligner/collectors/scrapling_worker.py": "fd044b20267df3c9a2e74f37eb07e37ea0182f8ef59d3b75737e5c86a9df3572",
@@ -816,7 +816,7 @@
     "tests/test_candidate_intent.py": "1e8858207ab47018c230fda163a3ba5e8501d8d3f2edb5842a69b559e77c970b",
     "tests/test_capability_inventory.py": "ee43f004b64aa2b69bd27e4c9e2b2a7dfbcadd430e46631a64f2f58e39eb155f",
     "tests/test_collection.py": "b638191baebf61bfd115d951846460baf785ed0f394114770767ef41273a09f7",
-    "tests/test_collector_evidence.py": "1a5dee12fee3bc27927fe39944b9b8a97c2673a15441f86ca11e4246c9866e9b",
+    "tests/test_collector_evidence.py": "8d1016af83a62bb057b00ca66fbac93ab369985ec7b736f35af8da4196dce65a",
     "tests/test_config.py": "bb5d7d812d7c3f6e56571fe0431ee72dc13f7f3329a63ec0bcc52f64e08dd599",
     "tests/test_fetch_control.py": "3fc4cca7d40442812ae51ea7f3b0cef8ed814fbbbbf270772bd06f4939308ea3",
     "tests/test_graphify_freshness.py": "7e3969d8ae8ef074007396993d22943b5a558d5713da5bb18805bc273034f913",

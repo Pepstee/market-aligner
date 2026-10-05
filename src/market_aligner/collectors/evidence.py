@@ -169,12 +169,16 @@ def _url_scan_variants(value: str) -> tuple[str, ...]:
     return tuple(variants)
 
 
-def _scan_embedded_urls(value: str) -> None:
+def _scan_embedded_urls(value: str, *, allow_http: bool = False) -> None:
     for variant in _url_scan_variants(value):
         for match in _ABSOLUTE_URL.finditer(variant):
-            _validate_url_candidate(match.group(1).rstrip(".,);}"))
+            _validate_url_candidate(
+                match.group(1).rstrip(".,);}"), allow_http=allow_http
+            )
         for match in _PROTOCOL_RELATIVE_URL.finditer(variant):
-            _validate_url_candidate(f"https:{match.group(1).rstrip('.,);}')}")
+            _validate_url_candidate(
+                f"https:{match.group(1).rstrip('.,);}')}", allow_http=allow_http
+            )
 
 
 def _scan_public_value(value: Any, *, protected_roots: tuple[str, ...], path: str) -> None:
@@ -200,10 +204,10 @@ def _scan_public_value(value: Any, *, protected_roots: tuple[str, ...], path: st
             raise ContractValidationError(
                 "public listing contains plaintext transport diagnostics"
             )
-        _scan_embedded_urls(value)
+        _scan_embedded_urls(value, allow_http=True)
 
 
-def _validate_url_candidate(url: str) -> None:
+def _validate_url_candidate(url: str, *, allow_http: bool = False) -> None:
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in url):
         raise ContractValidationError("public listing URL contains a control character")
     try:
@@ -213,15 +217,19 @@ def _validate_url_candidate(url: str) -> None:
         parts.port
     except (TypeError, ValueError) as exc:
         raise ContractValidationError("public listing URL is malformed") from exc
+    allowed_schemes = {"https", "http"} if allow_http else {"https"}
     if (
-        parts.scheme.casefold() != "https"
+        parts.scheme.casefold() not in allowed_schemes
         or not parts.netloc
         or not hostname
         or parts.username is not None
         or parts.password is not None
         or "@" in parts.netloc
     ):
-        raise ContractValidationError("public listing URL must be credential-free HTTPS")
+        schemes = "HTTP or HTTPS" if allow_http else "HTTPS"
+        raise ContractValidationError(
+            f"public listing URL must be credential-free {schemes}"
+        )
     hostname_text = hostname.rstrip(".").casefold()
     if hostname_text == "localhost" or hostname_text.endswith(".localhost"):
         raise ContractValidationError("public listing URL host must be public")

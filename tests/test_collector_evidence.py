@@ -292,6 +292,8 @@ class CollectorEvidenceBoundaryTests(unittest.TestCase):
 
         safe_controls = (
             b'<a href="https://jobs.example.test/vacancy?ref=public#description">role</a>',
+            b'<a href="http://jobs.example.test/vacancy">public listing</a>',
+            b"See http%3A%2F%2Fjobs.example.test%2Fvacancy in the description.",
             b"See https://[2606:4700:4700::1111].",
             b"https://jobs.example.test/vacancy?ref=ordinary%20public%20value",
             b"Safe prose about HTTP 2, arithmetic 1 // 2, and the C++ // operator.",
@@ -354,6 +356,7 @@ class CollectorEvidenceBoundaryTests(unittest.TestCase):
         self,
     ) -> None:
         unsafe = (
+            "http://jobs.example.test/v",
             "https://alice%3Asession-secret%40example.test/v",
             "https://alice:session-secret%40example.test/v",
             "https://jobs.example.test/v#token%3Dsecret-value",
@@ -364,6 +367,7 @@ class CollectorEvidenceBoundaryTests(unittest.TestCase):
             "https://[::1]/v",
             r"https:\\alice:session-secret@example.test/v",
             "https://jobs.example.test/v?next=http%253A%252F%252Falice%253Asession-secret%2540example.test/private",
+            "https://jobs.example.test/v?next=http%3A%2F%2Fpublic.example.test%2Fvacancy",
             _percent_layers(
                 "https://alice:session-secret@example.test/v", 5
             ).decode("ascii"),

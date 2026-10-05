@@ -4560,9 +4560,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/collectors/evidence.py": {
-    "mtime": 1790113918.037165,
-    "seen": 1790775868.520365,
-    "ast_hash": "01742aa595cff301097de5aaa13cb37e",
+    "mtime": 1791243975.4639904,
+    "seen": 1791244650.4018035,
+    "ast_hash": "fcc5f1417366b2af53e475d6c426fb84",
     "semantic_hash": ""
   },
   "src/market_aligner/llm/structured.py": {
@@ -4620,9 +4620,9 @@
     "semantic_hash": ""
   },
   "tests/test_collector_evidence.py": {
-    "mtime": 1788246507.3491135,
-    "seen": 1790775868.520414,
-    "ast_hash": "f8c41f862a57c7700db223f184d34ee4",
+    "mtime": 1791243975.4959905,
+    "seen": 1791244650.4018602,
+    "ast_hash": "ba9b0020a03fb4923faf9c8adf2ec8b1",
     "semantic_hash": ""
   },
   "tests/test_config.py": {
