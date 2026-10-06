@@ -50,6 +50,7 @@ from .handoff_admission import (
     CURRENT_RUNTIME_TRUST_ROOT_ID,
     HandoffAdmissionStore,
     ProtectedLocalOutbox,
+    VerifiedApplicationInput,
     _parse_current_runtime_handoff,
 )
 from .market_aligner_preparation import (
@@ -148,6 +149,12 @@ _HANDOFF_AUTHORITY_PATHS = (
     "internal/jaa/career_automation/production_handoff_admission_runner.py",
     "internal/jaa/career_automation/current_time.py",
     "internal/jaa/career_automation/authenticated_time_witness.py",
+)
+_CURRENT_RUNTIME_READER_PATHS = frozenset(
+    {
+        "internal/jaa/career_automation/handoff_admission.py",
+        "internal/jaa/career_automation/production_handoff_admission_runner.py",
+    }
 )
 
 
@@ -1247,15 +1254,144 @@ def _current_runtime_source_record(
     )
 
 
-def _require_compatible_admitted_producer(
+def require_consumer_compatibility(
+    *,
+    admitted_commit: str,
+    current_commit: str,
+    ancestor_status: int,
+    diff_status: int,
+    changed_paths: tuple[str, ...],
+    protected_paths: frozenset[str],
+    reader_paths: frozenset[str],
+    current_runtime: bool = False,
+    current_bundle_revalidated: bool = False,
+) -> str:
+    commit_hex = frozenset("0123456789abcdef")
+
+    def check_path(path: str) -> None:
+        if type(path) is not str or not path or "\x00" in path:
+            raise ValueError("invalid path entry")
+
+    def check_commit(value: str) -> None:
+        if (
+            type(value) is not str
+            or len(value) != 40
+            or any(character not in commit_hex for character in value)
+        ):
+            raise ValueError("invalid commit identifier")
+
+    if type(current_runtime) is not bool or type(current_bundle_revalidated) is not bool:
+        raise ValueError("invalid mode flags")
+    check_commit(admitted_commit)
+    check_commit(current_commit)
+    if type(ancestor_status) is not int or ancestor_status not in (0, 1):
+        raise ValueError("invalid ancestor status")
+    if type(diff_status) is not int or diff_status != 0:
+        raise ValueError("invalid diff status")
+    if type(changed_paths) is not tuple:
+        raise ValueError("invalid changed paths")
+    seen: set[str] = set()
+    for path in changed_paths:
+        check_path(path)
+        if path in seen:
+            raise ValueError("invalid changed paths")
+        seen.add(path)
+    if type(protected_paths) is not frozenset or type(reader_paths) is not frozenset:
+        raise ValueError("invalid path configuration")
+    for path in protected_paths:
+        check_path(path)
+    for path in reader_paths:
+        check_path(path)
+    if not reader_paths or not reader_paths < protected_paths:
+        raise ValueError("invalid reader scope")
+    if not seen <= protected_paths:
+        raise ValueError("changed paths outside protected scope")
+    if admitted_commit == current_commit:
+        if ancestor_status != 0 or diff_status != 0 or seen:
+            raise ValueError("inconsistent same-commit report")
+        return "same_commit"
+    if ancestor_status != 0:
+        raise ValueError("admitted producer is not an ancestor of current commit")
+    if not seen:
+        return "unchanged_authority"
+    if not current_runtime:
+        raise ValueError("protected change requires current reader mode")
+    if seen <= reader_paths and current_bundle_revalidated:
+        return "current_reader_revalidated"
+    raise ValueError("current reader compatibility not established")
+
+
+def _require_admitted_producer_ancestor(
     *,
     repository_descriptor: int,
     admitted_producer_commit: str,
     current_commit: str,
 ) -> None:
+    commit_hex = frozenset("0123456789abcdef")
     if (
-        len(admitted_producer_commit) != 40
+        type(admitted_producer_commit) is not str
+        or len(admitted_producer_commit) != 40
+        or any(character not in commit_hex for character in admitted_producer_commit)
+        or type(current_commit) is not str
+        or len(current_commit) != 40
+        or any(character not in commit_hex for character in current_commit)
+    ):
+        raise ProductionPreparationDeploymentError("producer commit identity is malformed")
+    try:
+        repository = _descriptor_directory_path(repository_descriptor)
+    except OSError as exc:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer repository lease is unavailable on this host"
+        ) from exc
+    try:
+        ancestor = subprocess.run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                admitted_producer_commit,
+                current_commit,
+            ],
+            cwd=repository,
+            check=False,
+            capture_output=True,
+            pass_fds=(repository_descriptor,),
+        )
+    except (OSError, ValueError) as exc:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer compatibility cannot be verified"
+        ) from exc
+    if ancestor.returncode == 1:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer is not an ancestor of current commit"
+        )
+    if ancestor.returncode != 0:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer compatibility cannot be verified"
+        )
+    try:
+        _require_descriptor_path_identity(repository_descriptor, repository)
+    except OSError as exc:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer repository lease changed during verification"
+        ) from exc
+
+
+def _require_compatible_admitted_producer(
+    *,
+    repository_descriptor: int,
+    admitted_producer_commit: str,
+    current_commit: str,
+    current_runtime: bool = False,
+    verified_current_input: VerifiedApplicationInput | None = None,
+    expected_application_id: str | None = None,
+    expected_handoff_root_sha256: str | None = None,
+) -> None:
+    if (
+        type(admitted_producer_commit) is not str
+        or len(admitted_producer_commit) != 40
         or any(c not in "0123456789abcdef" for c in admitted_producer_commit)
+        or type(current_commit) is not str
         or len(current_commit) != 40
         or any(c not in "0123456789abcdef" for c in current_commit)
     ):
@@ -1282,11 +1418,13 @@ def _require_compatible_admitted_producer(
             capture_output=True,
             pass_fds=(repository_descriptor,),
         )
-        authority_diff = subprocess.run(
+        protected_diff = subprocess.run(
             [
                 "git",
                 "diff",
-                "--quiet",
+                "--name-only",
+                "-z",
+                "--no-renames",
                 admitted_producer_commit,
                 current_commit,
                 "--",
@@ -1301,20 +1439,108 @@ def _require_compatible_admitted_producer(
         raise ProductionPreparationDeploymentError(
             "admitted producer compatibility cannot be verified"
         ) from exc
+    if ancestor.returncode == 1:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer is not an ancestor of current commit"
+        )
     if ancestor.returncode != 0:
         raise ProductionPreparationDeploymentError(
-            "admitted producer is not an ancestor of the current repository"
+            "admitted producer compatibility cannot be verified"
         )
-    if authority_diff.returncode != 0:
+    if protected_diff.returncode != 0:
         raise ProductionPreparationDeploymentError(
-            "handoff authority changed after the admitted producer commit"
+            "admitted producer compatibility cannot be verified"
         )
+    raw_paths = protected_diff.stdout
+    if raw_paths and not raw_paths.endswith(b"\x00"):
+        raise ProductionPreparationDeploymentError(
+            "admitted producer compatibility cannot be verified"
+        )
+    try:
+        changed_paths = tuple(
+            value.decode("utf-8", "strict")
+            for value in raw_paths.split(b"\x00")
+            if value
+        )
+    except UnicodeDecodeError as exc:
+        raise ProductionPreparationDeploymentError(
+            "admitted producer compatibility cannot be verified"
+        ) from exc
+    current_bundle_revalidated = (
+        type(verified_current_input) is VerifiedApplicationInput
+        and verified_current_input.application_id == expected_application_id
+        and verified_current_input.application_id != ""
+        and verified_current_input.admission_kind == ADMISSION_KIND_CURRENT_RUNTIME
+        and verified_current_input.environment == CURRENT_RUNTIME_ENVIRONMENT
+        and verified_current_input.authority_scope == CURRENT_RUNTIME_AUTHORITY_SCOPE
+        and verified_current_input.current_boundary == "strategy"
+        and verified_current_input.handoff_root_sha256 == expected_handoff_root_sha256
+        and type(expected_handoff_root_sha256) is str
+        and len(expected_handoff_root_sha256) == 64
+        and all(
+            character in "0123456789abcdef"
+            for character in expected_handoff_root_sha256
+        )
+    )
+    try:
+        require_consumer_compatibility(
+            admitted_commit=admitted_producer_commit,
+            current_commit=current_commit,
+            ancestor_status=ancestor.returncode,
+            diff_status=protected_diff.returncode,
+            changed_paths=changed_paths,
+            protected_paths=frozenset(_HANDOFF_AUTHORITY_PATHS),
+            reader_paths=_CURRENT_RUNTIME_READER_PATHS,
+            current_runtime=current_runtime,
+            current_bundle_revalidated=current_bundle_revalidated,
+        )
+    except ValueError as exc:
+        if changed_paths and not current_runtime:
+            raise ProductionPreparationDeploymentError(
+                "handoff authority changed after the admitted producer commit"
+            ) from exc
+        raise ProductionPreparationDeploymentError(str(exc)) from exc
     try:
         _require_descriptor_path_identity(repository_descriptor, repository)
     except OSError as exc:
         raise ProductionPreparationDeploymentError(
             "admitted producer repository lease changed during verification"
         ) from exc
+
+
+def _current_runtime_strategy_input(
+    *,
+    store: HandoffAdmissionStore,
+    application_id: str,
+    adapter: ProtectedLocalOutbox,
+    repository_root: Path,
+    repository_descriptor: int,
+    admitted_producer_commit: str,
+    current_commit: str,
+) -> VerifiedApplicationInput:
+    verified = store.for_boundary(application_id, "strategy")
+    if type(verified) is not VerifiedApplicationInput:
+        raise ProductionPreparationDeploymentError(
+            "current runtime strategy input is not verified"
+        )
+    handoff = _parse_current_runtime_handoff(adapter.handoff_bytes)
+    verified_current_commit = _git_commit(
+        repository_root, repository_descriptor=repository_descriptor
+    )
+    if verified_current_commit != current_commit:
+        raise ProductionPreparationDeploymentError(
+            "repository commit changed during admitted bundle revalidation"
+        )
+    _require_compatible_admitted_producer(
+        repository_descriptor=repository_descriptor,
+        admitted_producer_commit=admitted_producer_commit,
+        current_commit=verified_current_commit,
+        current_runtime=True,
+        verified_current_input=verified,
+        expected_application_id=application_id,
+        expected_handoff_root_sha256=handoff.root_sha256,
+    )
+    return verified
 
 
 def _normalized_device(value: int) -> int:
@@ -1716,11 +1942,18 @@ def _run_production_preparation(
         admitted_source = _source_record_for_application(
             pinned_database, application_id
         )
-        _require_compatible_admitted_producer(
-            repository_descriptor=pinned.repository_descriptor,
-            admitted_producer_commit=admitted_source.producer_commit_sha,
-            current_commit=current_commit,
-        )
+        if deployment.current_runtime:
+            _require_admitted_producer_ancestor(
+                repository_descriptor=pinned.repository_descriptor,
+                admitted_producer_commit=admitted_source.producer_commit_sha,
+                current_commit=current_commit,
+            )
+        else:
+            _require_compatible_admitted_producer(
+                repository_descriptor=pinned.repository_descriptor,
+                admitted_producer_commit=admitted_source.producer_commit_sha,
+                current_commit=current_commit,
+            )
         source_record = admitted_source.source_record_sha256
         bundle_descriptor = pinned.open_bundle(source_record)
         if after_preflight_hook is not None:
@@ -1763,10 +1996,19 @@ def _run_production_preparation(
         contact_provenance = None
         current_contact_bindings = None
         if deployment.current_runtime:
+            verified_current_input = _current_runtime_strategy_input(
+                store=store,
+                application_id=application_id,
+                adapter=adapter,
+                repository_root=deployment.repository_root,
+                repository_descriptor=pinned.repository_descriptor,
+                admitted_producer_commit=admitted_source.producer_commit_sha,
+                current_commit=current_commit,
+            )
             contact_provenance, current_contact_bindings = (
                 _load_pinned_current_contact_provenance(
                     deployment=deployment,
-                    verified=store.for_boundary(application_id, "strategy"),
+                    verified=verified_current_input,
                     candidate_authority_bytes=candidate_bytes,
                 )
             )

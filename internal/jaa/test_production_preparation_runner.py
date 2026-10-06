@@ -481,6 +481,225 @@ def test_admitted_producer_rejects_authority_change_and_nonancestor(
         os.close(descriptor)
 
 
+def _verified_current_strategy_input(
+    application_id: str,
+    handoff_root_sha256: str,
+) -> runner.VerifiedApplicationInput:
+    return runner.VerifiedApplicationInput(
+        application_id=application_id,
+        admission_kind=runner.ADMISSION_KIND_CURRENT_RUNTIME,
+        environment=runner.CURRENT_RUNTIME_ENVIRONMENT,
+        authority_scope=runner.CURRENT_RUNTIME_AUTHORITY_SCOPE,
+        handoff_root_sha256=handoff_root_sha256,
+        vacancy_source_identity="source-identity",
+        profile_id="profile-test",
+        profile_version="v1",
+        candidate_authority_sha256="a" * 64,
+        job_key="greenhouse:example:1",
+        vacancy_snapshot_sha256="b" * 64,
+        raw_listing_sha256="c" * 64,
+        raw_listing_bytes=b"listing",
+        requirements_sha256="d" * 64,
+        requirements_bytes=b"requirements",
+        canonical_url="https://example.test/jobs/1",
+        company_name="Example",
+        role_title="Engineer",
+        location={},
+        admission_receipt_sha256="e" * 64,
+        current_boundary="strategy",
+        current_boundary_receipt_sha256="f" * 64,
+    )
+
+
+def test_current_reader_change_requires_revalidated_original_bundle(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.name", "Artiom Gutu")
+    _git(repository, "config", "user.email", "gutu.artiom444@gmail.com")
+    producer = repository / runner._HANDOFF_AUTHORITY_PATHS[0]
+    reader_names = tuple(sorted(runner._CURRENT_RUNTIME_READER_PATHS))
+    producer.parent.mkdir(parents=True)
+    for reader_name in reader_names:
+        (repository / reader_name).parent.mkdir(parents=True, exist_ok=True)
+    producer.write_text("original producer\n")
+    for reader_name in reader_names:
+        (repository / reader_name).write_text("original reader\n")
+    _git(repository, "add", runner._HANDOFF_AUTHORITY_PATHS[0], *reader_names)
+    _git(repository, "commit", "-qm", "admitted producer")
+    admitted = _git(repository, "rev-parse", "HEAD")
+    for reader_name in reader_names:
+        (repository / reader_name).write_text("compatible current reader\n")
+    _git(repository, "add", *reader_names)
+    _git(repository, "commit", "-qm", "current reader repair")
+    current = _git(repository, "rev-parse", "HEAD")
+    application_id = "app_" + "1" * 64
+    handoff_root_sha256 = "2" * 64
+    verified = _verified_current_strategy_input(
+        application_id, handoff_root_sha256
+    )
+    descriptor = os.open(repository, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(
+            runner.ProductionPreparationDeploymentError,
+            match="current reader compatibility not established",
+        ):
+            runner._require_compatible_admitted_producer(
+                repository_descriptor=descriptor,
+                admitted_producer_commit=admitted,
+                current_commit=current,
+                current_runtime=True,
+                expected_application_id=application_id,
+                expected_handoff_root_sha256=handoff_root_sha256,
+            )
+        runner._require_compatible_admitted_producer(
+            repository_descriptor=descriptor,
+            admitted_producer_commit=admitted,
+            current_commit=current,
+            current_runtime=True,
+            verified_current_input=verified,
+            expected_application_id=application_id,
+            expected_handoff_root_sha256=handoff_root_sha256,
+        )
+        with pytest.raises(
+            runner.ProductionPreparationDeploymentError,
+            match="handoff authority changed",
+        ):
+            runner._require_compatible_admitted_producer(
+                repository_descriptor=descriptor,
+                admitted_producer_commit=admitted,
+                current_commit=current,
+            )
+        producer.write_text("changed producer\n")
+        _git(repository, "add", runner._HANDOFF_AUTHORITY_PATHS[0])
+        _git(repository, "commit", "-qm", "producer mutation")
+        changed_producer = _git(repository, "rev-parse", "HEAD")
+        with pytest.raises(
+            runner.ProductionPreparationDeploymentError,
+            match="current reader compatibility not established",
+        ):
+            runner._require_compatible_admitted_producer(
+                repository_descriptor=descriptor,
+                admitted_producer_commit=admitted,
+                current_commit=changed_producer,
+                current_runtime=True,
+                verified_current_input=verified,
+                expected_application_id=application_id,
+                expected_handoff_root_sha256=handoff_root_sha256,
+            )
+    finally:
+        os.close(descriptor)
+
+
+def test_consumer_compatibility_helper_fails_closed_on_invalid_reports() -> None:
+    admitted = "a" * 40
+    current = "b" * 40
+    protected = frozenset(runner._HANDOFF_AUTHORITY_PATHS)
+    readers = runner._CURRENT_RUNTIME_READER_PATHS
+    assert readers == frozenset(
+        {
+            "internal/jaa/career_automation/handoff_admission.py",
+            "internal/jaa/career_automation/production_handoff_admission_runner.py",
+        }
+    )
+    common = {
+        "admitted_commit": admitted,
+        "current_commit": current,
+        "ancestor_status": 0,
+        "diff_status": 0,
+        "changed_paths": tuple(sorted(readers)),
+        "protected_paths": protected,
+        "reader_paths": readers,
+        "current_runtime": True,
+        "current_bundle_revalidated": True,
+    }
+    assert runner.require_consumer_compatibility(**common) == (
+        "current_reader_revalidated"
+    )
+    for change in (
+        {"current_runtime": False},
+        {"current_bundle_revalidated": False},
+        {"changed_paths": (runner._HANDOFF_AUTHORITY_PATHS[0],)},
+        {"changed_paths": ("untracked-protected.py",)},
+        {"ancestor_status": 1},
+        {"diff_status": 1},
+        {"current_runtime": 1},
+        {"ancestor_status": True},
+        {"changed_paths": [next(iter(readers))]},
+        {"changed_paths": (next(iter(readers)), next(iter(readers)))},
+    ):
+        with pytest.raises(ValueError):
+            runner.require_consumer_compatibility(**(common | change))
+    assert runner.require_consumer_compatibility(
+        admitted_commit=admitted,
+        current_commit=admitted,
+        ancestor_status=0,
+        diff_status=0,
+        changed_paths=(),
+        protected_paths=protected,
+        reader_paths=readers,
+        current_runtime=False,
+    ) == "same_commit"
+
+
+def test_current_strategy_boundary_precedes_compatibility_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application_id = "app_" + "3" * 64
+    handoff_root_sha256 = "4" * 64
+    verified = _verified_current_strategy_input(
+        application_id, handoff_root_sha256
+    )
+    events: list[str] = []
+
+    class _Store:
+        def for_boundary(self, requested_application_id: str, boundary: str):
+            assert requested_application_id == application_id
+            assert boundary == "strategy"
+            events.append("authenticated_boundary")
+            return verified
+
+    class _Adapter:
+        handoff_bytes = b"authenticated current handoff"
+
+    class _Handoff:
+        root_sha256 = handoff_root_sha256
+
+    monkeypatch.setattr(
+        runner,
+        "_parse_current_runtime_handoff",
+        lambda raw: _Handoff(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_git_commit",
+        lambda path, **kwargs: "5" * 40,
+    )
+
+    def require_compatibility(**kwargs):
+        assert kwargs["verified_current_input"] is verified
+        events.append("compatibility")
+
+    monkeypatch.setattr(
+        runner,
+        "_require_compatible_admitted_producer",
+        require_compatibility,
+    )
+    result = runner._current_runtime_strategy_input(
+        store=_Store(),
+        application_id=application_id,
+        adapter=_Adapter(),
+        repository_root=Path("/registered/canon"),
+        repository_descriptor=9,
+        admitted_producer_commit="6" * 40,
+        current_commit="5" * 40,
+    )
+    assert result is verified
+    assert events == ["authenticated_boundary", "compatibility"]
+
+
 def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
