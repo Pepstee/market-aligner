@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "1795054d19c495f8f2b1d4c5d1c9caa63a2ce596",
+  "source_base_commit": "a0a7ae9268217a213565308b8692306f18943de7",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -817,11 +817,13 @@
     "tests/test_applications_contract.py": "b3d4b25ac9436dcae91478164f613d219b7ac654156dead96a80404da5d6f071",
     "tests/test_assessment.py": "cce883efbad9f0f2e79b013daba5ccebb5c63f6e603abfe3bcae3dac2e87e590",
     "tests/test_candidate_intent.py": "1e8858207ab47018c230fda163a3ba5e8501d8d3f2edb5842a69b559e77c970b",
+    "tests/test_candidate_policy_extraction.py": "76a884c05897cf3b0dcb7b51e8ec1808815304ad61717f88add347e36ea9b311",
     "tests/test_capability_inventory.py": "ee43f004b64aa2b69bd27e4c9e2b2a7dfbcadd430e46631a64f2f58e39eb155f",
     "tests/test_collection.py": "b638191baebf61bfd115d951846460baf785ed0f394114770767ef41273a09f7",
     "tests/test_collector_evidence.py": "8d1016af83a62bb057b00ca66fbac93ab369985ec7b736f35af8da4196dce65a",
     "tests/test_config.py": "bb5d7d812d7c3f6e56571fe0431ee72dc13f7f3329a63ec0bcc52f64e08dd599",
     "tests/test_current_activation.py": "b8a85aecd7c174a343b1e919473304f1d70f6097846e4694ede552dab75d21ca",
+    "tests/test_current_eligibility_receipt.py": "1b33843e5d458f53ff3f1dc182556a4451549b92316667e532724f6a779ed8f8",
     "tests/test_current_fact_packet.py": "13c152ab8517542be2f96accd24ad55d0abd2f975db93138bc0d7ab815b865df",
     "tests/test_current_profile_fact_selection.py": "25dcc0ea823b3e39afd6fdc401534ee31aa3532bdfa5a62e04206a12c8acf207",
     "tests/test_fetch_control.py": "3fc4cca7d40442812ae51ea7f3b0cef8ed814fbbbbf270772bd06f4939308ea3",
