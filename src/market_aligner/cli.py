@@ -25,9 +25,12 @@ from market_aligner.profiler.importers import (
     project_canonical_authority,
 )
 from market_aligner.profiler.current_activation import (
+    PinnedCurrentActivationArtifact,
     PinnedRecoveryInputs,
     compile_current_profile_activation,
+    compile_current_profile_projection,
     write_current_activation_artifact,
+    write_current_profile_projection_documents,
 )
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
@@ -216,6 +219,71 @@ def _activate_recovered_profile_command(args: argparse.Namespace) -> int:
                 "provider_invocations": activation["provider_receipt"]["transport"][
                     "invocation_count"
                 ],
+                "application_authority": False,
+                "release_authority": False,
+                "submission_authority": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _project_current_activation_command(args: argparse.Namespace) -> int:
+    store = ProfileStore.open_existing(args.data_home)
+    with PinnedRecoveryInputs(
+        data_home=store.paths.root,
+        manifest_relative_path=args.manifest_relative_path,
+        expected_manifest_sha256=args.manifest_sha256,
+        approval_id=args.approval_id,
+    ) as recovered:
+        with PinnedCurrentActivationArtifact(
+            data_home=store.paths.root,
+            profile_id=args.profile_id,
+            artifact_name=args.activation_name,
+            expected_sha256=args.activation_file_sha256,
+        ) as activation:
+            snapshot = store.coherent_snapshot(
+                args.profile_id, require_committed_generation=True
+            )
+            try:
+                documents = compile_current_profile_projection(
+                    profile_id=args.profile_id,
+                    activation_bytes=activation.raw_bytes,
+                    expected_activation_sha256=activation.sha256,
+                    manifest_bytes=recovered.manifest_bytes,
+                    expected_manifest_sha256=args.manifest_sha256,
+                    approval_id=args.approval_id,
+                    recovered_profile_bytes=recovered.files[
+                        "candidate_profile_and_job_preferences"
+                    ],
+                    recovered_evidence_bytes=recovered.files[
+                        "existing_profile_claims_and_provenance"
+                    ],
+                    snapshot=snapshot,
+                )
+                recovered.revalidate()
+                activation.revalidate()
+                snapshot.revalidate()
+                written = write_current_profile_projection_documents(
+                    data_home=store.paths.root,
+                    profile_id=args.profile_id,
+                    documents=documents,
+                )
+                recovered.revalidate()
+                activation.revalidate()
+                snapshot.revalidate()
+            finally:
+                snapshot.close()
+    print(
+        json.dumps(
+            {
+                "status": "projected_non_authoritative",
+                "profile_id": args.profile_id,
+                "activation_file_sha256": activation.sha256,
+                "activation_sha256": activation.document["activation_sha256"],
+                "documents": written,
+                "new_provider_invocations": 0,
                 "application_authority": False,
                 "release_authority": False,
                 "submission_authority": False,
@@ -1157,6 +1225,22 @@ def build_parser() -> argparse.ArgumentParser:
     activate_recovered.add_argument("--codex-binary", type=Path)
     _add_data_home(activate_recovered)
     activate_recovered.set_defaults(handler=_activate_recovered_profile_command)
+
+    project_activation = profile_commands.add_parser(
+        "project-current-activation",
+        help=(
+            "Revalidate a saved current-facts activation and emit a private, "
+            "non-authoritative projection without another provider call."
+        ),
+    )
+    project_activation.add_argument("--profile-id", required=True)
+    project_activation.add_argument("--activation-name", required=True)
+    project_activation.add_argument("--activation-file-sha256", required=True)
+    project_activation.add_argument("--manifest-relative-path", required=True)
+    project_activation.add_argument("--manifest-sha256", required=True)
+    project_activation.add_argument("--approval-id", required=True)
+    _add_data_home(project_activation)
+    project_activation.set_defaults(handler=_project_current_activation_command)
 
     assess = commands.add_parser("assess", help="Assess one vacancy for an opaque profile ID.")
     assess.add_argument("--profile-id", required=True)

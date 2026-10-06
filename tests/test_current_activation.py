@@ -415,3 +415,121 @@ def test_activation_artifact_is_private_create_only_and_hash_bound(tmp_path: Pat
     assert json.loads(written) == document
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert path.stat().st_uid == os.getuid()
+
+
+def test_project_current_activation_cli_revalidates_and_emits_private_bundle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store, manifest_bytes, profile_bytes, evidence_bytes, relative_manifest = _fixture(
+        tmp_path
+    )
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    binary = tmp_path / "codex"
+    binary.write_bytes(b"synthetic codex executable")
+    runner = ActivationRunner(_response())
+    gateway = CodexSemanticGateway(
+        model="synthetic-model",
+        codex_binary=str(binary),
+        environment={"HOME": str(tmp_path), "PATH": "/usr/bin"},
+        runner=runner,
+    )
+    with PinnedRecoveryInputs(
+        data_home=store.paths.root,
+        manifest_relative_path=relative_manifest,
+        expected_manifest_sha256=manifest_sha256,
+        approval_id=_APPROVAL,
+    ) as recovered:
+        snapshot = store.coherent_snapshot(
+            _PROFILE_ID, require_committed_generation=True
+        )
+        try:
+            activation_document = compile_current_profile_activation(
+                profile_id=_PROFILE_ID,
+                manifest_bytes=recovered.manifest_bytes,
+                expected_manifest_sha256=manifest_sha256,
+                approval_id=_APPROVAL,
+                recovered_profile_bytes=profile_bytes,
+                recovered_evidence_bytes=evidence_bytes,
+                snapshot=snapshot,
+                gateway=gateway,
+            )
+            active_hashes = dict(snapshot.hashes)
+        finally:
+            snapshot.close()
+    activation_path, activation_file_sha256 = write_current_activation_artifact(
+        data_home=store.paths.root,
+        profile_id=_PROFILE_ID,
+        document=activation_document,
+    )
+    projection_namespace = store.paths.outputs / "current-profile-projections"
+    assert not projection_namespace.exists()
+
+    from market_aligner.cli import build_parser
+
+    arguments = build_parser().parse_args(
+        [
+            "profiles",
+            "project-current-activation",
+            "--profile-id",
+            _PROFILE_ID,
+            "--activation-name",
+            activation_path.name,
+            "--activation-file-sha256",
+            activation_file_sha256,
+            "--manifest-relative-path",
+            relative_manifest,
+            "--manifest-sha256",
+            manifest_sha256,
+            "--approval-id",
+            _APPROVAL,
+            "--data-home",
+            str(store.paths.root),
+        ]
+    )
+    assert arguments.handler(arguments) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "projected_non_authoritative"
+    assert output["activation_file_sha256"] == activation_file_sha256
+    assert output["activation_sha256"] == activation_document["activation_sha256"]
+    assert output["new_provider_invocations"] == 0
+    assert output["application_authority"] is False
+    assert output["release_authority"] is False
+    assert output["submission_authority"] is False
+    assert runner.calls == 1
+
+    document_paths = {
+        key: Path(value["path"])
+        for key, value in output["documents"].items()
+    }
+    assert set(document_paths) == {
+        "evidence_packet_bytes",
+        "candidate_projection_bytes",
+        "candidate_authority_bytes",
+        "profile_projection_receipt_bytes",
+    }
+    assert len({path.parent for path in document_paths.values()}) == 1
+    assert {path.parent for path in document_paths.values()} == {activation_path.parent}
+    for key, path in document_paths.items():
+        assert path.name.startswith("projection-")
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == output["documents"][key][
+            "sha256"
+        ]
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.stat().st_uid == os.getuid()
+    assert not projection_namespace.exists()
+    assert stat.S_IMODE(activation_path.parent.stat().st_mode) == 0o700
+    packet = json.loads(document_paths["evidence_packet_bytes"].read_bytes())
+    authority = json.loads(document_paths["candidate_authority_bytes"].read_bytes())
+    receipt = json.loads(
+        document_paths["profile_projection_receipt_bytes"].read_bytes()
+    )
+    assert packet["statements"] == activation_document["factual_packet"]["statements"]
+    assert authority["profile_binding"] == {
+        "profile_id": _PROFILE_ID,
+        "profile_sha256": active_hashes["profile_sha256"],
+        "evidence_ledger_sha256": active_hashes["evidence_ledger_sha256"],
+    }
+    assert receipt["authority_sha256"] == output["documents"][
+        "candidate_authority_bytes"
+    ]["sha256"]

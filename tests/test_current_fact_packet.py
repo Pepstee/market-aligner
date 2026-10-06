@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 
 import pytest
 
-from market_aligner.profiler.fact_packet import compile_selected_facts
+from market_aligner.profiler.fact_packet import (
+    compile_selected_facts,
+    serialize_projection_documents,
+    validate_current_profile_binding,
+    validate_current_profile_projection_receipt,
+)
 
 
 def _inputs():
@@ -143,6 +149,173 @@ def test_compile_selected_facts_rejects_empty_selection_and_non_builtin_containe
     records[0]["evidence_id"] = StringSubclass("ev-project")
     with pytest.raises(ValueError, match="^current_fact_packet_invalid$"):
         compile_selected_facts(records, selection, excluded, hashes)
+
+
+def test_projection_documents_bind_profile_and_ledger_to_live_receipt():
+    profile_id = "prf_" + "7" * 32
+    profile_sha256 = "8" * 64
+    evidence_ledger_sha256 = "9" * 64
+    activation_sha256 = "a" * 64
+    source_hashes = {
+        "recovery_manifest": "b" * 64,
+        "profile": "c" * 64,
+        "evidence": "d" * 64,
+    }
+    records = [
+        {
+            "evidence_id": "ev-project",
+            "kind": "project",
+            "claim": "A supported synthetic project statement.",
+            "status": "verified",
+        }
+    ]
+    selection = [
+        {
+            "evidence_id": "ev-project",
+            "proof_class": "work_artifact",
+            "document_targets": ["cv"],
+        }
+    ]
+    packet_bytes, bindings = compile_selected_facts(
+        records, selection, [], source_hashes
+    )
+    original_inputs = deepcopy(
+        (records, selection, bindings, source_hashes)
+    )
+
+    documents = serialize_projection_documents(
+        profile_id=profile_id,
+        activation_sha256=activation_sha256,
+        packet_bytes=packet_bytes,
+        bindings=bindings,
+        source_hashes=source_hashes,
+        profile_sha256=profile_sha256,
+        evidence_ledger_sha256=evidence_ledger_sha256,
+    )
+
+    assert (records, selection, bindings, source_hashes) == original_inputs
+    authority = json.loads(documents["candidate_authority_bytes"])
+    receipt = json.loads(documents["profile_projection_receipt_bytes"])
+    assert authority["profile_binding"] == {
+        "profile_id": profile_id,
+        "profile_sha256": profile_sha256,
+        "evidence_ledger_sha256": evidence_ledger_sha256,
+    }
+    assert authority["application_authority"] is False
+    assert authority["release_authority"] is False
+    assert authority["submission_authority"] is False
+    validate_current_profile_binding(
+        receipt,
+        authority,
+        profile_id=profile_id,
+        profile_sha256=profile_sha256,
+        evidence_ledger_sha256=evidence_ledger_sha256,
+    )
+    validated = validate_current_profile_projection_receipt(
+        documents["profile_projection_receipt_bytes"],
+        profile_id=profile_id,
+        activation_sha256=activation_sha256,
+        evidence_packet_bytes=packet_bytes,
+        candidate_projection_bytes=documents["candidate_projection_bytes"],
+        candidate_authority_bytes=documents["candidate_authority_bytes"],
+        profile_sha256=profile_sha256,
+        evidence_ledger_sha256=evidence_ledger_sha256,
+    )
+    assert validated == receipt
+    for field, replacement in (
+        ("profile_id", "prf_" + "6" * 32),
+        ("profile_sha256", "e" * 64),
+        ("evidence_ledger_sha256", "f" * 64),
+    ):
+        tampered_receipt = deepcopy(receipt)
+        tampered_receipt[field] = replacement
+        with pytest.raises(ValueError, match="^current_profile_binding_invalid$"):
+            validate_current_profile_binding(
+                tampered_receipt,
+                authority,
+                profile_id=profile_id,
+                profile_sha256=profile_sha256,
+                evidence_ledger_sha256=evidence_ledger_sha256,
+            )
+    with pytest.raises(ValueError, match="^current_profile_binding_invalid$"):
+        validate_current_profile_binding(
+            receipt,
+            authority,
+            profile_id=profile_id,
+            profile_sha256="e" * 64,
+            evidence_ledger_sha256=evidence_ledger_sha256,
+        )
+    with pytest.raises(ValueError, match="^current_profile_projection_receipt_invalid$"):
+        validate_current_profile_projection_receipt(
+            documents["profile_projection_receipt_bytes"],
+            profile_id=profile_id,
+            activation_sha256=activation_sha256,
+            evidence_packet_bytes=packet_bytes,
+            candidate_projection_bytes=documents["candidate_projection_bytes"],
+            candidate_authority_bytes=documents["candidate_authority_bytes"],
+            profile_sha256="e" * 64,
+            evidence_ledger_sha256=evidence_ledger_sha256,
+        )
+
+
+def test_current_profile_binding_rejects_dict_subclasses():
+    class DictSubclass(dict):
+        pass
+
+    profile_id = "prf_" + "7" * 32
+    source_hashes = {
+        "recovery_manifest": "b" * 64,
+        "profile": "c" * 64,
+        "evidence": "d" * 64,
+    }
+    records = [
+        {
+            "evidence_id": "ev-project",
+            "kind": "project",
+            "claim": "A supported synthetic project statement.",
+            "status": "verified",
+        }
+    ]
+    packet_bytes, bindings = compile_selected_facts(
+        records,
+        [
+            {
+                "evidence_id": "ev-project",
+                "proof_class": "work_artifact",
+                "document_targets": ["cv"],
+            }
+        ],
+        [],
+        source_hashes,
+    )
+    documents = serialize_projection_documents(
+        profile_id=profile_id,
+        activation_sha256="a" * 64,
+        packet_bytes=packet_bytes,
+        bindings=bindings,
+        source_hashes=source_hashes,
+        profile_sha256="8" * 64,
+        evidence_ledger_sha256="9" * 64,
+    )
+    authority = json.loads(documents["candidate_authority_bytes"])
+    receipt = json.loads(documents["profile_projection_receipt_bytes"])
+    with pytest.raises(ValueError, match="^current_profile_binding_invalid$"):
+        validate_current_profile_binding(
+            DictSubclass(receipt),
+            authority,
+            profile_id=profile_id,
+            profile_sha256="8" * 64,
+            evidence_ledger_sha256="9" * 64,
+        )
+    authority["profile_binding"] = DictSubclass(authority["profile_binding"])
+    with pytest.raises(ValueError, match="^current_profile_binding_invalid$"):
+        validate_current_profile_binding(
+            receipt,
+            authority,
+            profile_id=profile_id,
+            profile_sha256="8" * 64,
+            evidence_ledger_sha256="9" * 64,
+        )
     records, selection, excluded, hashes = _inputs()
     selection[0]["evidence_id"] = []
     with pytest.raises(ValueError, match="^current_fact_packet_invalid$"):

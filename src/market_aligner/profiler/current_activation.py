@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import uuid
 from dataclasses import asdict
@@ -12,9 +13,16 @@ from pathlib import Path
 from typing import Any
 
 from market_aligner.config import ProductPaths, open_existing_private_data_root
-from market_aligner.llm.codex_gateway import CodexSemanticGateway
-from market_aligner.llm.contracts import LLMReceipt, canonical_hash
-from market_aligner.profiler.fact_packet import compile_selected_facts
+from market_aligner.llm.codex_gateway import (
+    CURRENT_FACT_SELECTION_PROMPT_VERSION,
+    CodexSemanticGateway,
+    PROVIDER_IDENTITY,
+)
+from market_aligner.llm.contracts import LLMReceipt, LLMTransportReceipt, canonical_hash
+from market_aligner.profiler.fact_packet import (
+    compile_selected_facts,
+    serialize_projection_documents,
+)
 from market_aligner.profiler.recovery_manifest import select_recovered_input_descriptors
 from market_aligner.profiler.store import (
     MAX_EVIDENCE_BYTES,
@@ -33,14 +41,40 @@ _EVIDENCE_DESCRIPTOR_KIND = "existing_profile_claims_and_provenance"
 _INVALID = "current_profile_activation_invalid"
 _MAX_RECOVERY_MANIFEST_BYTES = 65_536
 _MAX_PROFILE_SELECTION_CONTEXT_BYTES = 16_384
+_MAX_CURRENT_ACTIVATION_BYTES = 8_388_608
 _REQUIRED_DESCRIPTOR_KINDS = (
     _PROFILE_DESCRIPTOR_KIND,
     _EVIDENCE_DESCRIPTOR_KIND,
+)
+_CURRENT_ACTIVATION_NAME = re.compile(r"activation-[0-9a-f]{32}\.json\Z")
+_INVALID_PROJECTION = "current_profile_projection_invalid"
+_CURRENT_INVALIDATING_RELATIONSHIPS = frozenset(
+    {"retracts", "corrects", "contradicts", "limits"}
+)
+_CURRENT_NONINVALIDATING_RELATIONSHIPS = frozenset({"unresolved", "not_applicable"})
+_CURRENT_REQUIRED_CORRECTION_KINDS = frozenset(
+    {"correction", "retraction", "negative_evidence", "work_history_correction"}
 )
 
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _canonical_document_bytes(value: object) -> bytes:
+    try:
+        return (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise ValueError(_INVALID_PROJECTION) from None
 
 
 def _profile_selection_context(snapshot: Any) -> tuple[dict[str, Any], str]:
@@ -244,6 +278,500 @@ class PinnedRecoveryInputs:
 
     def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
         self.close()
+
+
+class PinnedCurrentActivationArtifact:
+    """Retain and revalidate one private activation artifact without following links."""
+
+    def __init__(
+        self,
+        *,
+        data_home: str | Path | None,
+        profile_id: str,
+        artifact_name: str,
+        expected_sha256: str,
+    ) -> None:
+        self._root_chain = None
+        self._directories: list[_RetainedDirectory] = []
+        self._fd: int | None = None
+        self._identity: tuple | None = None
+        self._parent_fd: int | None = None
+        self._name: str | None = None
+        self.raw_bytes = b""
+        self.sha256 = expected_sha256
+        self.document: dict[str, Any] = {}
+        try:
+            validate_profile_id(profile_id)
+            if (
+                type(artifact_name) is not str
+                or _CURRENT_ACTIVATION_NAME.fullmatch(artifact_name) is None
+                or type(expected_sha256) is not str
+                or len(expected_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in expected_sha256)
+            ):
+                raise ValueError(_INVALID_PROJECTION)
+            self._root_chain = open_existing_private_data_root(data_home)
+            parent_fd = self._root_chain.deepest_fd
+            for name, label in (
+                ("outputs", "data_home/outputs"),
+                ("current-profile-facts", "current profile fact artifacts"),
+                (profile_id, "current profile fact profile directory"),
+            ):
+                directory = _RetainedDirectory(
+                    parent_fd=parent_fd,
+                    name=name,
+                    path_label=label,
+                    private=True,
+                )
+                directory.initial_proof()
+                self._directories.append(directory)
+                parent_fd = directory.fd
+            self._parent_fd = parent_fd
+            self._name = artifact_name
+            data, identity, fd = _open_verified_leaf(
+                parent_fd, artifact_name, _MAX_CURRENT_ACTIVATION_BYTES
+            )
+            self._fd = fd
+            self._identity = identity
+            self.raw_bytes = data
+            if _sha256(data) != expected_sha256:
+                raise ValueError(_INVALID_PROJECTION)
+            document = _strict_json_loads(data)
+            if (
+                type(document) is not dict
+                or _canonical_document_bytes(document) != data
+            ):
+                raise ValueError(_INVALID_PROJECTION)
+            self.document = document
+            self.revalidate()
+        except BaseException:
+            self.close()
+            raise
+
+    def revalidate(self) -> None:
+        if (
+            self._root_chain is None
+            or self._fd is None
+            or self._identity is None
+            or self._parent_fd is None
+            or self._name is None
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        self._root_chain.revalidate()
+        for directory in self._directories:
+            directory.revalidate()
+        current = _pread_exact_bounded(
+            self._fd,
+            maximum=len(self.raw_bytes),
+            label="current activation artifact",
+            dir_fd=self._parent_fd,
+            name=self._name,
+            expected_identity=self._identity,
+        )
+        if current != self.raw_bytes or _sha256(current) != self.sha256:
+            raise ValueError(_INVALID_PROJECTION)
+
+    def close(self) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        for directory in reversed(self._directories):
+            directory.close()
+        self._directories.clear()
+        if self._root_chain is not None:
+            self._root_chain.close()
+            self._root_chain = None
+
+    def __enter__(self) -> "PinnedCurrentActivationArtifact":
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
+        self.close()
+
+
+def _validated_activation_selection(
+    selection: object,
+    records: list[dict[str, str]],
+    source_hashes: dict[str, str],
+) -> tuple[bytes, list[dict[str, str]]]:
+    if (
+        type(selection) is not dict
+        or set(selection) != {"selection", "excluded_ids", "correction_assessments"}
+        or type(selection["selection"]) is not list
+        or type(selection["excluded_ids"]) is not list
+        or type(selection["correction_assessments"]) is not list
+    ):
+        raise ValueError(_INVALID_PROJECTION)
+    by_id = {record["evidence_id"]: record for record in records}
+    selected_ids = {
+        row.get("evidence_id")
+        for row in selection["selection"]
+        if type(row) is dict and type(row.get("evidence_id")) is str
+    }
+    excluded_ids = selection["excluded_ids"]
+    if (
+        len(selected_ids) != len(selection["selection"])
+        or any(type(value) is not str for value in excluded_ids)
+        or len(set(excluded_ids)) != len(excluded_ids)
+        or selected_ids & set(excluded_ids)
+        or selected_ids | set(excluded_ids) != set(by_id)
+    ):
+        raise ValueError(_INVALID_PROJECTION)
+    assessed_ids: set[str] = set()
+    affected_ids: set[str] = set()
+    for assessment in selection["correction_assessments"]:
+        if (
+            type(assessment) is not dict
+            or set(assessment)
+            != {"source_evidence_id", "relationship", "affected_evidence_ids"}
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        source_id = assessment["source_evidence_id"]
+        relationship = assessment["relationship"]
+        affected = assessment["affected_evidence_ids"]
+        if (
+            type(source_id) is not str
+            or source_id not in by_id
+            or source_id in assessed_ids
+            or source_id in selected_ids
+            or source_id not in excluded_ids
+            or type(relationship) is not str
+            or relationship
+            not in _CURRENT_INVALIDATING_RELATIONSHIPS
+            | _CURRENT_NONINVALIDATING_RELATIONSHIPS
+            or type(affected) is not list
+            or any(type(value) is not str for value in affected)
+            or len(set(affected)) != len(affected)
+            or any(value not in by_id or value == source_id for value in affected)
+            or (
+                relationship in _CURRENT_INVALIDATING_RELATIONSHIPS
+                and not affected
+            )
+            or (
+                relationship in _CURRENT_NONINVALIDATING_RELATIONSHIPS
+                and affected
+            )
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        assessed_ids.add(source_id)
+        if relationship in _CURRENT_INVALIDATING_RELATIONSHIPS:
+            affected_ids.update(affected)
+    required_assessments = {
+        record["evidence_id"]
+        for record in records
+        if record["kind"].strip().casefold()
+        in _CURRENT_REQUIRED_CORRECTION_KINDS
+    }
+    if (
+        not required_assessments <= assessed_ids
+        or not required_assessments <= set(excluded_ids)
+        or selected_ids & affected_ids
+    ):
+        raise ValueError(_INVALID_PROJECTION)
+    try:
+        return compile_selected_facts(
+            records,
+            selection["selection"],
+            excluded_ids,
+            source_hashes,
+        )
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise ValueError(_INVALID_PROJECTION) from None
+
+
+def _validate_current_activation_provider_receipt(
+    value: object,
+    *,
+    records: list[dict[str, str]],
+    profile_context: dict[str, Any],
+    profile_context_sha256: str,
+    selection: dict[str, Any],
+) -> None:
+    if type(value) is not dict or set(value) != set(LLMReceipt.__dataclass_fields__):
+        raise ValueError(_INVALID_PROJECTION)
+    transport_value = value.get("transport")
+    if (
+        type(transport_value) is not dict
+        or set(transport_value) != set(LLMTransportReceipt.__dataclass_fields__)
+    ):
+        raise ValueError(_INVALID_PROJECTION)
+    try:
+        transport = LLMTransportReceipt(**transport_value)
+        receipt_fields = dict(value)
+        receipt_fields["transport"] = transport
+        receipt = LLMReceipt(**receipt_fields)
+        inputs = {
+            "schema": "market-aligner.current-profile-fact-selection-input.v4",
+            "records": records,
+            "required_correction_assessment_source_ids": [
+                record["evidence_id"]
+                for record in records
+                if record["kind"].strip().casefold()
+                in _CURRENT_REQUIRED_CORRECTION_KINDS
+            ],
+            "profile_context": profile_context,
+            "profile_context_sha256": profile_context_sha256,
+        }
+        if (
+            receipt.receipt_id != transport.receipt_sha256
+            or receipt.task != "current_profile_fact_selection"
+            or receipt.prompt_version != CURRENT_FACT_SELECTION_PROMPT_VERSION
+            or receipt.model != transport.model_identity
+            or transport.provider_identity != PROVIDER_IDENTITY
+            or transport.invocation_count != 1
+            or receipt.input_sha256 != canonical_hash(inputs)
+            or receipt.output_sha256 != canonical_hash(selection)
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+    except (TypeError, ValueError, KeyError):
+        raise ValueError(_INVALID_PROJECTION) from None
+
+
+def compile_current_profile_projection(
+    *,
+    profile_id: str,
+    activation_bytes: bytes,
+    expected_activation_sha256: str,
+    manifest_bytes: bytes,
+    expected_manifest_sha256: str,
+    approval_id: str,
+    recovered_profile_bytes: bytes,
+    recovered_evidence_bytes: bytes,
+    snapshot: Any,
+) -> dict[str, bytes]:
+    """Revalidate a saved activation against its approval and live snapshot."""
+    try:
+        validate_profile_id(profile_id)
+        if (
+            type(activation_bytes) is not bytes
+            or type(expected_activation_sha256) is not str
+            or len(expected_activation_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_activation_sha256)
+            or _sha256(activation_bytes) != expected_activation_sha256
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        document = _strict_json_loads(activation_bytes)
+        if (
+            type(document) is not dict
+            or _canonical_document_bytes(document) != activation_bytes
+            or set(document)
+            != {
+                "schema_version",
+                "profile_id",
+                "profile_version",
+                "approval_id",
+                "source_hashes",
+                "active_snapshot_hashes",
+                "profile_selection_context_sha256",
+                "selection",
+                "source_spans",
+                "packet_bindings",
+                "factual_packet",
+                "factual_packet_sha256",
+                "provider_receipt",
+                "application_authority",
+                "release_authority",
+                "submission_authority",
+                "activation_sha256",
+            }
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        unsigned = dict(document)
+        observed_activation_sha256 = unsigned.pop("activation_sha256")
+        if (
+            document["schema_version"]
+            != "market-aligner.current-profile-fact-activation.v1"
+            or observed_activation_sha256 != canonical_hash(unsigned)
+            or document["profile_id"] != profile_id
+            or document["approval_id"] != approval_id
+            or document["application_authority"] is not False
+            or document["release_authority"] is not False
+            or document["submission_authority"] is not False
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        snapshot.revalidate()
+        descriptors = select_recovered_input_descriptors(
+            manifest_bytes, expected_manifest_sha256, approval_id
+        )
+        profile_descriptor = descriptors[_PROFILE_DESCRIPTOR_KIND]
+        evidence_descriptor = descriptors[_EVIDENCE_DESCRIPTOR_KIND]
+        expected_source_hashes = {
+            "recovery_manifest": expected_manifest_sha256,
+            "profile": profile_descriptor["sha256"],
+            "evidence": evidence_descriptor["sha256"],
+        }
+        if (
+            type(recovered_profile_bytes) is not bytes
+            or len(recovered_profile_bytes) != profile_descriptor["bytes"]
+            or _sha256(recovered_profile_bytes) != profile_descriptor["sha256"]
+            or type(recovered_evidence_bytes) is not bytes
+            or len(recovered_evidence_bytes) != evidence_descriptor["bytes"]
+            or _sha256(recovered_evidence_bytes) != evidence_descriptor["sha256"]
+            or document["source_hashes"] != expected_source_hashes
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        recovered_profile, _recovered_evidence, recovered_ledger = _parse_profile_content(
+            profile_id, recovered_profile_bytes, recovered_evidence_bytes
+        )
+        if (
+            recovered_profile != snapshot.profile
+            or recovered_ledger != snapshot.evidence_ledger
+            or profile_id != snapshot.profile_id
+            or document["profile_version"] != snapshot.profile.version
+            or document["active_snapshot_hashes"] != snapshot.hashes
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        records = [
+            {
+                "evidence_id": item.evidence_id,
+                "kind": item.kind,
+                "claim": item.claim,
+                "status": item.status,
+            }
+            for item in recovered_ledger
+        ]
+        spans = _evidence_spans(recovered_evidence_bytes, recovered_ledger)
+        profile_context, profile_context_sha256 = _profile_selection_context(snapshot)
+        if (
+            document["profile_selection_context_sha256"]
+            != profile_context_sha256
+            or document["source_spans"] != spans
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        packet_bytes, packet_bindings = _validated_activation_selection(
+            document["selection"], records, expected_source_hashes
+        )
+        packet = json.loads(packet_bytes.decode("utf-8", errors="strict"))
+        if (
+            document["packet_bindings"] != packet_bindings
+            or document["factual_packet"] != packet
+            or document["factual_packet_sha256"] != _sha256(packet_bytes)
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        _validate_current_activation_provider_receipt(
+            document["provider_receipt"],
+            records=records,
+            profile_context=profile_context,
+            profile_context_sha256=profile_context_sha256,
+            selection=document["selection"],
+        )
+        snapshot.revalidate()
+        return serialize_projection_documents(
+            profile_id=profile_id,
+            activation_sha256=observed_activation_sha256,
+            packet_bytes=packet_bytes,
+            bindings=packet_bindings,
+            source_hashes=expected_source_hashes,
+            profile_sha256=snapshot.hashes["profile_sha256"],
+            evidence_ledger_sha256=snapshot.hashes["evidence_ledger_sha256"],
+        )
+    except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        raise ValueError(_INVALID_PROJECTION) from None
+    except ValueError as exc:
+        if str(exc) == _INVALID_PROJECTION:
+            raise
+        raise ValueError(_INVALID_PROJECTION) from None
+
+
+def write_current_profile_projection_documents(
+    *,
+    data_home: str | Path | None,
+    profile_id: str,
+    documents: dict[str, bytes],
+) -> dict[str, dict[str, str]]:
+    """Write create-only projection siblings beside the activation; receipt last."""
+    validate_profile_id(profile_id)
+    filenames = {
+        "evidence_packet_bytes": "evidence-packet.json",
+        "candidate_projection_bytes": "candidate-projection.json",
+        "candidate_authority_bytes": "candidate-authority.json",
+        "profile_projection_receipt_bytes": "projection-receipt.json",
+    }
+    if (
+        type(documents) is not dict
+        or set(documents) != set(filenames)
+        or any(
+            type(value) is not bytes
+            or not value
+            or len(value) > _MAX_CURRENT_ACTIVATION_BYTES
+            for value in documents.values()
+        )
+    ):
+        raise ValueError(_INVALID_PROJECTION)
+    root_chain = open_existing_private_data_root(data_home)
+    directories: list[_RetainedDirectory] = []
+    output_fd: int | None = None
+    projection_id = uuid.uuid4().hex
+    try:
+        parent_fd = root_chain.deepest_fd
+        for name, label in (
+            ("outputs", "data_home/outputs"),
+            ("current-profile-facts", "current profile fact artifacts"),
+            (profile_id, "current profile fact profile directory"),
+        ):
+            directory = _RetainedDirectory(
+                parent_fd=parent_fd,
+                name=name,
+                path_label=label,
+                private=True,
+            )
+            directory.initial_proof()
+            directories.append(directory)
+            parent_fd = directory.fd
+        output_paths: dict[str, dict[str, str]] = {}
+        output_root = ProductPaths.resolve(data_home).outputs
+        for document_key in (
+            "evidence_packet_bytes",
+            "candidate_projection_bytes",
+            "candidate_authority_bytes",
+            "profile_projection_receipt_bytes",
+        ):
+            filename = f"projection-{projection_id}-{filenames[document_key]}"
+            payload = documents[document_key]
+            output_fd = os.open(
+                filename,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directories[-1].fd,
+            )
+            view = memoryview(payload)
+            while view:
+                count = os.write(output_fd, view)
+                if count <= 0:
+                    raise OSError("short write while creating projection document")
+                view = view[count:]
+            os.fsync(output_fd)
+            info = os.fstat(output_fd)
+            named = os.stat(
+                filename, dir_fd=directories[-1].fd, follow_symlinks=False
+            )
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_size != len(payload)
+                or (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise ValueError(_INVALID_PROJECTION)
+            os.close(output_fd)
+            output_fd = None
+            output_paths[document_key] = {
+                "path": str(output_root / "current-profile-facts" / profile_id / filename),
+                "sha256": _sha256(payload),
+            }
+        root_chain.revalidate()
+        for directory in directories:
+            directory.revalidate()
+        for directory in directories:
+            os.fsync(directory.fd)
+        return output_paths
+    finally:
+        if output_fd is not None:
+            os.close(output_fd)
+        for directory in reversed(directories):
+            directory.close()
+        root_chain.close()
 
 
 def _evidence_spans(
