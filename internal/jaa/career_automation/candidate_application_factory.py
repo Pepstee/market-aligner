@@ -968,10 +968,18 @@ class CandidateApplicationMaterializationReceipt:
 
     def authorize_editorial_request(self, request: object) -> None:
         """Fail closed unless an editorial request exactly projects this receipt."""
-        if getattr(getattr(request, "authority", None), "source_sha256", None) != (
-            self.candidate_authority_file_sha256
-        ):
+        authority = getattr(request, "authority", None)
+        if getattr(authority, "source_sha256", None) != self.candidate_authority_file_sha256:
             raise ValueError("editorial request candidate authority differs")
+        current_runtime = (
+            self.deployment_binding.environment == CURRENT_RUNTIME_ENVIRONMENT
+        )
+        request_current_runtime = getattr(authority, "current_runtime", False)
+        if (
+            type(request_current_runtime) is not bool
+            or request_current_runtime is not current_runtime
+        ):
+            raise ValueError("editorial request runtime mode differs from materialization")
         if getattr(request, "vacancy_sha256", None) != self.vacancy_sha256:
             raise ValueError("editorial request vacancy authority differs")
         if (
@@ -991,6 +999,8 @@ class CandidateApplicationMaterializationReceipt:
         if not claims:
             raise ValueError("editorial request has no materialized claims")
         if document_kind == "cv":
+            from cv_generation.editorial_composition import category_for_source_heading
+
             request_rows = {
                 claim.claim_id: {
                     "category": claim.category,
@@ -1002,13 +1012,9 @@ class CandidateApplicationMaterializationReceipt:
             }
             expected_rows = {
                 sentence_id: {
-                    "category": {
-                        "Professional Summary": "summary",
-                        "Core Capabilities": "capability_domain",
-                        "Projects": "project",
-                        "Experience": "experience",
-                        "Education": "education",
-                    }[str(binding["section_heading"])],
+                    "category": category_for_source_heading(
+                        binding["section_heading"], current_runtime=current_runtime
+                    ),
                     "evidence_ids": tuple(binding["evidence_ids"]),
                     "text": binding["text"],
                     "text_sha256": binding["text_sha256"],

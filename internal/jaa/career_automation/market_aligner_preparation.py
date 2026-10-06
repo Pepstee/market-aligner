@@ -51,6 +51,7 @@ from cv_generation.editorial_composition import (
     EditorialCompositionRuntime,
     build_cover_letter_editorial_request,
     build_editorial_request,
+    category_for_source_heading,
     run_cover_letter_composition_runtime,
     run_editorial_composition_runtime,
 )
@@ -477,20 +478,16 @@ class CanonicalPreparationInputMaterializer:
                 for section in materialization.source.cv_sections
                 for sentence_id in section.sentence_ids
             }
-            categories = {
-                "Professional Summary": "summary",
-                "Core Capabilities": "capability_domain",
-                "Projects": "project",
-                "Experience": "experience",
-                "Education": "education",
-            }
             claims = tuple(
                 ApprovedCVClaim(
                     claim_id=str(row["sentence_id"]),
                     text=str(row["text"]),
                     text_sha256=str(row["text_sha256"]),
                     evidence_ids=tuple(str(value) for value in row["evidence_ids"]),
-                    category=categories[heading_by_id[str(row["sentence_id"])]],
+                    category=category_for_source_heading(
+                        heading_by_id[str(row["sentence_id"])],
+                        current_runtime=current_runtime,
+                    ),
                 )
                 for row in materialization.receipt.fact_bindings
                 if row["document_kind"] == "cv"

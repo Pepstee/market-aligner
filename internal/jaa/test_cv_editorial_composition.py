@@ -55,6 +55,113 @@ def test_detached_response_schema_types_every_property() -> None:
     require_property_types(editorial_module._COVER_LETTER_RESPONSE_SCHEMA)
 
 
+def test_editorial_section_policy_keeps_legacy_and_maps_current_headings() -> None:
+    legacy = editorial_module.editorial_section_policy()
+    current = editorial_module.editorial_section_policy(current_runtime=True)
+
+    assert legacy == editorial_module._CATEGORY_BY_HEADING
+    assert all(type(categories) is frozenset for categories in current.values())
+    assert current["Highlights"] == frozenset({"highlight"})
+    assert current["Skills"] == frozenset({"skill"})
+    assert editorial_module.category_for_source_heading(
+        "Highlights", current_runtime=True
+    ) == "highlight"
+    assert editorial_module.category_for_source_heading(
+        "Skills", current_runtime=True
+    ) == "skill"
+    with pytest.raises(ValueError, match="invalid editorial section policy"):
+        editorial_module.category_for_source_heading("highlight", current_runtime=True)
+    with pytest.raises(ValueError, match="invalid editorial section policy"):
+        editorial_module.category_for_source_heading("Highlights")
+
+    schema = editorial_module._DRAFT_RESPONSE_SCHEMA
+    legacy_schema = editorial_module.editorial_layout_response_schema(dict(schema))
+    current_schema = editorial_module.editorial_layout_response_schema(
+        dict(schema), current_runtime=True
+    )
+    assert legacy_schema == schema
+    assert legacy_schema is not schema
+    assert current_schema["properties"]["sections"]["minItems"] == 1
+    assert current_schema["properties"]["sections"]["items"]["properties"][
+        "heading"
+    ]["enum"] == sorted(current)
+    assert schema["properties"]["sections"]["minItems"] == 2
+    assert editorial_module.validate_editorial_layout(("Highlights",), current_runtime=True) is None
+    with pytest.raises(ValueError, match="invalid editorial section policy"):
+        editorial_module.validate_editorial_layout(("Highlights",))
+
+
+def test_current_highlight_draft_round_trips_without_legacy_required_sections() -> None:
+    authority = CandidateEditorialAuthority(
+        candidate_name="Synthetic Candidate",
+        candidate_city="London, United Kingdom",
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+        current_runtime=True,
+    )
+    claim = _claim(
+        "highlight-1",
+        "Delivered a workflow improvement.",
+        editorial_module.category_for_source_heading(
+            "Highlights", current_runtime=True
+        ),
+    )
+    request = build_editorial_request(
+        authority=authority,
+        role_title="Synthetic Analyst",
+        company_name="Example Employer",
+        vacancy_sha256="b" * 64,
+        approved_claims=(claim,),
+    )
+    assert request.approved_claims == (claim,)
+
+    legacy_authority = CandidateEditorialAuthority(
+        candidate_name="Synthetic Candidate",
+        candidate_city="London, United Kingdom",
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+    )
+    with pytest.raises(
+        EditorialCompositionError,
+        match="category is unsupported for editorial runtime",
+    ):
+        build_editorial_request(
+            authority=legacy_authority,
+            role_title="Synthetic Analyst",
+            company_name="Example Employer",
+            vacancy_sha256="b" * 64,
+            approved_claims=(claim,),
+        )
+    draft = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        sections=(
+            CVSection(
+                "Highlights",
+                (EditorialAtom("approved_claim", claim.text, claim.claim_id),),
+            ),
+        ),
+        current_runtime=True,
+    )
+
+    response = editorial_module._draft_from_response(
+        canonical_json(draft.document()).encode(), current_runtime=True
+    )
+    validate_editorial_draft(request, response, current_runtime=True)
+    assert response.document() == draft.document()
+    assert response.current_runtime is True
+    with pytest.raises(EditorialCompositionError, match="layout is invalid"):
+        build_editorial_draft(
+            candidate_name=authority.candidate_name,
+            candidate_city=authority.candidate_city,
+            sections=draft.sections,
+        )
+    with pytest.raises(EditorialCompositionError, match="mode differs from authority"):
+        validate_editorial_draft(request, response, current_runtime=False)
+
+
 def _claim(claim_id: str, text: str, category: str) -> ApprovedCVClaim:
     return ApprovedCVClaim(
         claim_id=claim_id,
@@ -63,6 +170,12 @@ def _claim(claim_id: str, text: str, category: str) -> ApprovedCVClaim:
         evidence_ids=(f"evidence:{claim_id}",),
         category=category,
     )
+
+
+def _adapter_request_bytes() -> bytes:
+    return canonical_json(
+        {"editorial_request": {"authority": {"candidate_city": "London"}}}
+    ).encode()
 
 
 def _fixture():
@@ -454,7 +567,7 @@ def test_detached_codex_adapter_is_one_shot_hash_bound_and_scrubbed(
         return SimpleNamespace(returncode=0, stdout=json.dumps(event), stderr="")
 
     monkeypatch.setattr("cv_generation.editorial_composition.subprocess.run", fake_run)
-    request_bytes = canonical_json({"synthetic": "request"}).encode()
+    request_bytes = _adapter_request_bytes()
     session = adapter.open_fresh_session(invocation_id="writer-invocation")
     result = session.invoke(request_bytes=request_bytes)
 
@@ -511,7 +624,7 @@ def test_detached_codex_adapter_rejects_invalid_jsonl_event(
     monkeypatch.setattr("cv_generation.editorial_composition.subprocess.run", fake_run)
     with pytest.raises(EditorialCompositionError, match=message):
         adapter.open_fresh_session(invocation_id="writer").invoke(
-            request_bytes=b"{}"
+            request_bytes=_adapter_request_bytes()
         )
     assert len(calls) == 1
 
@@ -539,7 +652,9 @@ def test_detached_codex_adapter_rejects_model_supplied_draft_identity(
 
     monkeypatch.setattr("cv_generation.editorial_composition.subprocess.run", fake_run)
     with pytest.raises(EditorialCompositionError, match="draft schema differs"):
-        adapter.open_fresh_session(invocation_id="writer").invoke(request_bytes=b"{}")
+        adapter.open_fresh_session(invocation_id="writer").invoke(
+            request_bytes=_adapter_request_bytes()
+        )
 
 
 def test_runtime_rejects_swapped_detached_stage_adapters(tmp_path) -> None:
@@ -719,6 +834,7 @@ def test_current_runtime_allows_only_authority_bound_absent_city() -> None:
         candidate_city=None,
         sections=writer.sections,
         allow_missing_city=True,
+        current_runtime=True,
     )
     validate_editorial_draft(current_request, draft)
     schema = editorial_module.editorial_city_response_schema(
