@@ -1721,10 +1721,13 @@ class AssessmentStore:
         profile_id: str | None = None,
         job_key: str | None = None,
         require_refresh_bridge: bool = False,
+        initial_only: bool = False,
         _preview_without_lease: bool = False,
     ) -> ResearchTask | None:
         if (profile_id is None) != (job_key is None):
             raise ValueError("research claim scope requires both profile_id and job_key")
+        if initial_only and require_refresh_bridge:
+            raise ValueError("initial-only research cannot require a refresh bridge")
         now = datetime.now(timezone.utc)
         lease_until = now + timedelta(seconds=max(1, lease_seconds))
         with self.transaction() as connection:
@@ -1739,6 +1742,11 @@ class AssessmentStore:
                     " AND q.refresh_bridge_sha256 IS NOT NULL"
                     " AND e.id=q.refresh_event_id"
                     " AND e.event_type='employer_research_collection_refresh_queued'"
+                )
+            if initial_only:
+                scope += (
+                    " AND q.refresh_event_id IS NULL"
+                    " AND q.refresh_bridge_sha256 IS NULL"
                 )
             row = connection.execute(
                 """SELECT q.profile_id,q.job_key,a.title,a.company,a.url,a.opportunity,

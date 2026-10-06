@@ -14,16 +14,18 @@ import market_aligner.research.public_provider as public_provider_module
 
 from market_aligner.assessment.opportunity import apply_gate
 from market_aligner.assessment.scoring import AssessmentAxes, score
-from market_aligner.cli import build_parser
+from market_aligner.cli import build_parser, main as market_aligner_main
 from market_aligner.collectors.engine import Collector
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.domain.contracts import JobUrl, RawPosting, write_jsonl
 from market_aligner.research.public_provider import (
-    CanonicalCollectorVacancyLoader, PlannedCitation, PlannedClaim, PlannedSupport,
+    CanonicalCollectorVacancyLoader, FetchedPublicSource,
+    PlannedCitation, PlannedClaim, PlannedSupport,
     PublicResearchError, PublicResearchPlan, ScraplingPublicSourceFetcher,
     SourceBoundResearchProvider, RefreshDerivedResearchProvider, _safe_public_url,
+    build_initial_plan, extract_initial_claim_spans,
 )
-from market_aligner.research.models import ResearchDossier
+from market_aligner.research.models import ResearchDossier, ResearchTask
 from market_aligner.research.store import AssessmentStore
 from market_aligner.research.worker import ResearchWorker
 from market_aligner.service.api import CollectionService
@@ -1966,3 +1968,223 @@ def test_legacy_dossier_has_no_v2_store_binding(tmp_path: Path) -> None:
     assert queue["status"] == "queued"
     assert queue["lease_owner"] is None and queue["lease_until"] is None
     assert event_count == 1
+
+
+def _initial_research_task() -> ResearchTask:
+    return ResearchTask(
+        profile_id="synthetic-profile",
+        job_key=JOB_KEY,
+        title="Software Engineer",
+        company="Cogna",
+        url=URL,
+        opportunity=0.8,
+        priority=1,
+        attempts=0,
+        source_content_sha256="a" * 64,
+        vacancy_snapshot_sha256="b" * 64,
+        promotion_receipt_sha256="c" * 64,
+    )
+
+
+def _initial_research_source(
+    task: ResearchTask,
+    *,
+    raw_text: str | None,
+    raw_json: dict[str, object] | None = None,
+    body: bytes | None = None,
+    status: int = 200,
+) -> FetchedPublicSource:
+    envelope = {
+        "authority_source_content_sha256": task.source_content_sha256,
+        "fetched_at": "2026-10-06T00:00:00Z",
+        "job_key": task.job_key,
+        "raw_json": raw_json,
+        "raw_text": raw_text,
+        "schema_version": "market-aligner.canonical-collector-vacancy.v1",
+        "url": task.url,
+    }
+    exact_body = body or json.dumps(
+        envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return FetchedPublicSource(
+        requested_url=task.url,
+        final_url=task.url,
+        status=status,
+        body=exact_body,
+        content_type="application/vnd.market-aligner.canonical-vacancy+json",
+        accessed_at="2026-10-06T00:00:00Z",
+        redirect_chain=(task.url,),
+        source_kind="canonical_vacancy",
+        authority_source_content_sha256=task.source_content_sha256,
+    )
+
+
+def test_initial_research_spans_are_exact_deduplicated_and_capped() -> None:
+    sentences = (
+        "Alpha researchers documented steady signals across the trial window.",
+        "Beta observers recorded matching patterns in the second cohort set.",
+        "Gamma analysts compared the resulting curves against baseline data.",
+        "Delta engineers archived every raw measurement for later review.",
+    )
+    text = " ".join((sentences[0], sentences[0], *sentences[1:]))
+    body = text.encode("utf-8")
+    spans = extract_initial_claim_spans(body, text)
+    assert tuple(row[0] for row in spans) == sentences[:3]
+    assert all(body[start:end].decode("utf-8") == claim for claim, start, end in spans)
+    assert all(start == body.find(claim.encode("utf-8")) for claim, start, _ in spans)
+
+
+def test_initial_research_spans_use_exact_utf8_offsets_and_raw_json_fallback() -> None:
+    task = _initial_research_task()
+    first = "Alpha researchers documented naïve café signals across the trial window."
+    second = "Beta observers recorded matching patterns in the second cohort set."
+    text = f"{first} {second}"
+    source = _initial_research_source(
+        task,
+        raw_text=None,
+        raw_json={"aaa_prefix": "Ω-prefix ✓", "content_text": text},
+    )
+    plan = build_initial_plan(task, source)
+    assert tuple(claim.claim for claim in plan.claims) == (first, second)
+    support = plan.claims[0].supports[0]
+    start, end = (int(value) for value in support.selector.removeprefix("bytes:").split("-"))
+    assert source.body[start:end].decode("utf-8") == first
+    assert start == source.body.find(first.encode("utf-8"))
+    assert start != len(source.body[:start].decode("utf-8"))
+    assert plan.citations[0].expected_content_sha256 == hashlib.sha256(source.body).hexdigest()
+    assert plan.citations[0].expected_content_sha256 != task.source_content_sha256
+    assert plan.production_authority is True
+    assert plan.unknowns == ("External employer facts have not been researched.",)
+
+
+def test_initial_research_skips_json_escaped_text_and_refuses_no_support() -> None:
+    task = _initial_research_task()
+    escaped = 'Delta engineers said "archive everything" for later review checks.'
+    first = "Alpha researchers documented steady signals across the trial window."
+    second = "Beta observers recorded matching patterns in the second cohort set."
+    source = _initial_research_source(task, raw_text=f"{escaped} {first} {second}")
+    assert escaped.encode("utf-8") not in source.body
+    plan = build_initial_plan(task, source)
+    assert tuple(claim.claim for claim in plan.claims) == (first, second)
+    unsupported = _initial_research_source(
+        task, raw_text="A short unsupported line.", raw_json=None
+    )
+    with pytest.raises(PublicResearchError, match="^initial_research_no_verbatim_support$"):
+        build_initial_plan(task, unsupported)
+
+
+def test_initial_research_builder_refuses_invalid_bindings_and_exact_type_subclasses() -> None:
+    task = _initial_research_task()
+    sentence = "Alpha researchers documented steady signals across the trial window."
+    source = _initial_research_source(task, raw_text=sentence)
+    invalid_task = replace(task, refresh_event_id=3, refresh_bridge_sha256="d" * 64)
+    with pytest.raises(PublicResearchError, match="^initial_research_input_invalid$"):
+        build_initial_plan(invalid_task, source)
+    with pytest.raises(PublicResearchError, match="^initial_research_input_invalid$"):
+        build_initial_plan(task, replace(source, status=True))
+
+    class BytesSubclass(bytes):
+        pass
+
+    class StringSubclass(str):
+        pass
+
+    with pytest.raises(PublicResearchError, match="^initial_research_input_invalid$"):
+        extract_initial_claim_spans(BytesSubclass(b"x"), sentence)
+    with pytest.raises(PublicResearchError, match="^initial_research_input_invalid$"):
+        extract_initial_claim_spans(b"x", StringSubclass(sentence))
+
+
+def test_research_claim_initial_only_preserves_refresh_linked_queue(
+    tmp_path: Path,
+) -> None:
+    store, profile_id = _queued_store(tmp_path / "assessments.sqlite3", DIGEST)
+    with store.connection() as connection:
+        cursor = connection.execute(
+            """INSERT INTO assessment_events(
+                   profile_id,job_key,event_type,actor_kind,payload_json,idempotency_key
+               ) VALUES(?,?,?,?,?,?)""",
+            (profile_id, JOB_KEY, "synthetic_refresh", "deterministic", "{}", "synthetic-refresh-event"),
+        )
+        connection.execute(
+            """UPDATE employer_research_queue
+               SET refresh_event_id=?,refresh_bridge_sha256=?
+               WHERE profile_id=? AND job_key=?""",
+            (cursor.lastrowid, "e" * 64, profile_id, JOB_KEY),
+        )
+    assert store.claim_research(
+        "initial-only-worker", profile_id=profile_id, job_key=JOB_KEY, initial_only=True
+    ) is None
+    with store.connection() as connection:
+        status = connection.execute(
+            "SELECT status FROM employer_research_queue WHERE profile_id=? AND job_key=?",
+            (profile_id, JOB_KEY),
+        ).fetchone()[0]
+    assert status == "queued"
+
+
+def test_initial_research_cli_uses_configured_database_and_real_worker(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data_home = tmp_path / "runtime"
+    database_path = data_home / "scraper" / "data_overnight" / "jobs.sqlite3"
+    database = JobDatabase(database_path)
+    database.upsert_discovered(JobUrl("workable", "cogna:847CFBC5F4", URL))
+    text = (
+        "Alpha researchers documented steady signals across the trial window. "
+        "Beta observers recorded matching patterns in the second cohort set."
+    )
+    database.store_raw(
+        RawPosting(
+            "workable", "cogna:847CFBC5F4", URL, "2026-10-06T00:00:00+00:00",
+            None, {"content_text": text},
+        )
+    )
+    with database.connect() as connection:
+        source_digest = connection.execute(
+            "SELECT content_hash FROM postings WHERE key=?", (JOB_KEY,)
+        ).fetchone()[0]
+    store_path = data_home / "state" / "assessments.sqlite3"
+    _store, profile_id = _queued_store(store_path, source_digest)
+    config_path = tmp_path / "collection.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "boards": {"enabled": ["workable"]},
+                "io": {"database": "scraper/data_overnight/jobs.sqlite3"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = market_aligner_main(
+        [
+            "research-run-initial-one",
+            "--profile-id", profile_id,
+            "--job-key", JOB_KEY,
+            "--worker-id", "synthetic-initial-worker",
+            "--collection-config", str(config_path),
+            "--data-home", str(data_home),
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert result == 0, output
+    assert output["status"] == "completed"
+    assert output["application_authority"] is False
+    assert output["release_authority"] is False
+    assert text not in json.dumps(output)
+    completed_store = AssessmentStore(store_path)
+    with completed_store.connection() as connection:
+        dossier_text = connection.execute(
+            "SELECT dossier_json FROM employer_dossiers WHERE profile_id=? AND job_key=?",
+            (profile_id, JOB_KEY),
+        ).fetchone()[0]
+        queue_status = connection.execute(
+            "SELECT status FROM employer_research_queue WHERE profile_id=? AND job_key=?",
+            (profile_id, JOB_KEY),
+        ).fetchone()[0]
+    assert queue_status == "completed"
+    dossier = json.loads(dossier_text)
+    assert [claim["claim"] for claim in dossier["claims"]] == [
+        "Alpha researchers documented steady signals across the trial window.",
+        "Beta observers recorded matching patterns in the second cohort set.",
+    ]

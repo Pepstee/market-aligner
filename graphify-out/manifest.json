@@ -3372,9 +3372,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/cli.py": {
-    "mtime": 1790431205.2220745,
-    "seen": 1790775868.5203328,
-    "ast_hash": "1cc927661cd0baa247ede19f26ed3445",
+    "mtime": 1791256142.4637825,
+    "seen": 1791257441.3949463,
+    "ast_hash": "0857af6724718b2284ea7995091aeb2f",
     "semantic_hash": ""
   },
   "src/market_aligner/collectors/__init__.py": {
@@ -3744,15 +3744,15 @@
     "semantic_hash": ""
   },
   "src/market_aligner/research/store.py": {
-    "mtime": 1790113918.041165,
-    "seen": 1790775868.520389,
-    "ast_hash": "9a3eb93ed4cc328fe588a46e85688668",
+    "mtime": 1791256113.6237836,
+    "seen": 1791257441.395005,
+    "ast_hash": "086a210b2a83e953b5fa0022ddd23e48",
     "semantic_hash": ""
   },
   "src/market_aligner/research/worker.py": {
-    "mtime": 1788246507.3436723,
-    "seen": 1790775868.5203898,
-    "ast_hash": "8d7352026a23848152f0d1a84d45fdbb",
+    "mtime": 1791256119.6957834,
+    "seen": 1791257441.3950057,
+    "ast_hash": "99a4f767c8e839d7975c11af6d15845b",
     "semantic_hash": ""
   },
   "src/market_aligner/service/__init__.py": {
@@ -4284,9 +4284,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/research/public_provider.py": {
-    "mtime": 1788246507.3436723,
-    "seen": 1790775868.5203884,
-    "ast_hash": "e6bac4ac720054731ff9df8b54f3f8f9",
+    "mtime": 1791256105.3637836,
+    "seen": 1791257441.3950038,
+    "ast_hash": "c40fb06b6911e14ac6df64cb2dca9fe8",
     "semantic_hash": ""
   },
   "src/market_aligner/service/processing.py": {
@@ -4308,9 +4308,9 @@
     "semantic_hash": ""
   },
   "tests/test_public_research_provider.py": {
-    "mtime": 1788246507.3533726,
-    "seen": 1790775868.5204294,
-    "ast_hash": "5ce22344f7f2bf1ea774c3891a91a784",
+    "mtime": 1791256368.059787,
+    "seen": 1791257441.3950472,
+    "ast_hash": "cc380f82bf1f6f158023ef1ec561ab96",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/application_quality.py": {

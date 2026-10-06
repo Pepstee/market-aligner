@@ -15,7 +15,7 @@ from market_aligner import processing as processing_module
 from market_aligner.collectors.engine import Collector
 from market_aligner.state.vacancies import JobDatabase
 from market_aligner.config import ProductPaths
-from market_aligner.config_loader import closure_identity, snapshot_config
+from market_aligner.config_loader import closure_identity, load_config, snapshot_config
 from market_aligner.applications.producer import write_handoff
 from market_aligner.profiler.importers import (
     import_evidence_led,
@@ -27,6 +27,7 @@ from market_aligner.profiler.store import ProfileStore
 from market_aligner.research.store import AssessmentStore
 from market_aligner.research.public_provider import (
     CanonicalCollectorVacancyLoader,
+    InitialSourceBoundResearchProvider,
     RefreshDerivedResearchProvider,
 )
 from market_aligner.research.worker import ResearchWorker
@@ -38,7 +39,7 @@ from market_aligner.llm.codex_gateway import (
 from market_aligner.llm.contracts import canonical_hash
 from market_aligner.assessment.scoring import AssessmentAxes
 from market_aligner.service.api import AssessmentRequest, CollectionService, MarketAlignerService
-from market_aligner.service.processing import ProcessingService
+from market_aligner.service.processing import ProcessingService, _collector_database
 from market_aligner.state.operations import (
     INGEST_CYCLE_KIND,
     OperationJournal,
@@ -406,6 +407,40 @@ def _research_run_one_command(args: argparse.Namespace) -> int:
         )
     print(json.dumps(output, ensure_ascii=False, sort_keys=True))
     return 0 if run is not None and run.status == "completed" else 1
+
+
+def _research_run_initial_one_command(args: argparse.Namespace) -> int:
+    profiles = ProfileStore(args.data_home)
+    assessments = AssessmentStore(profiles.paths.state / "assessments.sqlite3")
+    config = load_config(args.collection_config)
+    collector_database, _database_relative = _collector_database(
+        profiles.paths, config
+    )
+    loader = CanonicalCollectorVacancyLoader(database=collector_database)
+    provider = InitialSourceBoundResearchProvider(
+        canonical_vacancy_loader=loader,
+        repository_root=Path(__file__).resolve().parents[2],
+        archive_root=profiles.paths.state / "public-employer-research-v2",
+    )
+    run = ResearchWorker(assessments, provider, args.worker_id).run_one(
+        profile_id=args.profile_id,
+        job_key=args.job_key,
+        initial_only=True,
+    )
+    output = {
+        "application_authority": False,
+        "completed": run.status == "completed",
+        "dossier_sha256": run.dossier_sha256,
+        "error": run.error,
+        "job_key": args.job_key,
+        "profile_id": args.profile_id,
+        "release_authority": False,
+        "schema_version": "market-aligner.initial-research-run.v1",
+        "status": run.status,
+        "worker_id": args.worker_id,
+    }
+    print(json.dumps(output, ensure_ascii=False, sort_keys=True))
+    return 0 if run.status == "completed" else 1
 
 
 def _semantic_worker(specification: str, *, config: Path, data_home: Path | None):
@@ -1161,6 +1196,19 @@ def build_parser() -> argparse.ArgumentParser:
     research_run_one.add_argument("--selector-review-receipt", type=Path)
     _add_data_home(research_run_one)
     research_run_one.set_defaults(handler=_research_run_one_command)
+
+    research_run_initial_one = commands.add_parser(
+        "research-run-initial-one",
+        help="Research one initial opportunity from its canonical collector source.",
+    )
+    research_run_initial_one.add_argument("--profile-id", required=True)
+    research_run_initial_one.add_argument("--job-key", required=True)
+    research_run_initial_one.add_argument("--worker-id", required=True)
+    research_run_initial_one.add_argument("--collection-config", type=Path, required=True)
+    _add_data_home(research_run_initial_one)
+    research_run_initial_one.set_defaults(
+        handler=_research_run_initial_one_command
+    )
 
     process = commands.add_parser(
         "process",
