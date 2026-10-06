@@ -1,11 +1,11 @@
 {
   "community_count": 29688,
-  "edge_count": 74937,
-  "node_count": 56943,
+  "edge_count": 74958,
+  "node_count": 56950,
   "outputs": {
     ".graphify_labels.json": "958acceca6590be59b5abe496d1da2b771cde8a75bf348c766f377db451ecf62",
     "GRAPH_REPORT.md": "ce27e7ebb64972e1172f0ab3a8534c993e4bc4efc932459e785b9017967fc201",
-    "graph.json": "834059e17aa6ad894eedde7d7f8ae7b3211803413238732dd332bc80f13fefdc"
+    "graph.json": "d4e88292fb138c1c43116144a4d312c4c79feab54d1c0e3c60de4354e254a658"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "85658949ebc8e0d7773097770a881909c9e20865",
+  "source_base_commit": "4f72c3e97a4347300deaebee5dc1ec516a4d6833",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -766,9 +766,9 @@
     "src/market_aligner/integrations/__init__.py": "c90774f2e629925d5887af80d407b002b29ac8717736f55cee9a3f02f73d16d8",
     "src/market_aligner/integrations/orchestrator.py": "19f51098196b2cb24aec4a4d3c013835b873b58b300fcf63a0a283d43ce95cfd",
     "src/market_aligner/llm/__init__.py": "2ea86f8e0e07b357c5df697ce1a76ced7825431ea98f783f97ca066be837fff6",
-    "src/market_aligner/llm/codex_gateway.py": "4a2ab544c9c742603dc290b4b8fdac13dcfdd0b2cd71f6fe2a93b06e5d4bc30c",
+    "src/market_aligner/llm/codex_gateway.py": "9072940c0d4a130b756c1011a218f40e8f38a33a2e02622892f22f4b20a4577c",
     "src/market_aligner/llm/contracts.py": "cba01af90d17c11d246027acdd3def6a9e49c21211b7d2492d36e8ba830a4e11",
-    "src/market_aligner/llm/pipeline.py": "4312d98160baf4d06b545ecabb286f5421bc06eb613414c6ec6d5c1ded230a0f",
+    "src/market_aligner/llm/pipeline.py": "679700105199e531fc9d1361015d2348a7b4a5ab0ec0d9c5cd587e3f4a47556f",
     "src/market_aligner/llm/structured.py": "9182fdfe0541ba70e7f96502cf271406d9e10978a84700e81b8119f4815f9a47",
     "src/market_aligner/normalisation/__init__.py": "b1650ff2aafbda22ea78530df3f5604b68e033c7f07ddd94e80bb642e6373878",
     "src/market_aligner/normalisation/deduplication.py": "c7ca03c2e1cce88c50f3b6c356c07cc0fea6e5ff7531304e3b58561f9cb3598a",
@@ -831,7 +831,7 @@
     "tests/test_jaa_events_v1.py": "98edfd1fb21ffd9f1bacde30b027d70a360cba2d177e4197708660042f2dc2b0",
     "tests/test_legacy_import.py": "00ce475704bf5ba829683365437c43c9804cd32b1d1e812832fcc71741ba1915",
     "tests/test_lineage.py": "322e19db7cf892a373fede67fa36eb1f2c3771aacd9d7cf057c9f6de4f1ada23",
-    "tests/test_llm_pipeline.py": "59d833c6b476584014647ae413d882191f85032db4ca5eb20aab2f599f321c63",
+    "tests/test_llm_pipeline.py": "62b763b98f7133db255b88ef63bad5357b83ca081af42d3e57d9e981cd4d31a0",
     "tests/test_market_aligner_jaa_handoff.py": "f7a30b781118034766d4aae3cee6180d81ec0713765ca70e15ace8e4a4cc30b4",
     "tests/test_migration_ledger.py": "c68796958547de9caeff93c0f7ba9c169d723eb8b9826b2b96602171bb13baa2",
     "tests/test_migrations.py": "e968fa4158bd4fc6521512007f5ae2659c3b094fdefeba95fa60b0be45de900f",

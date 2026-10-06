@@ -34,7 +34,7 @@ from market_aligner.llm.contracts import (
 
 PROVIDER_IDENTITY = "openai-codex-cli"
 EXTRACTION_PROMPT_VERSION = "market-aligner.codex-extraction.v2"
-VACANCY_ELIGIBILITY_PROMPT_VERSION = f"{VACANCY_ELIGIBILITY_FACTS_VERSION}.codex"
+VACANCY_ELIGIBILITY_PROMPT_VERSION = f"{VACANCY_ELIGIBILITY_FACTS_VERSION}.codex.v2"
 ALIGNMENT_PROMPT_VERSION = "market-aligner.codex-alignment.v2"
 CURRENT_FACT_SELECTION_PROMPT_VERSION = "market-aligner.current-profile-fact-selection.v4"
 _CURRENT_PROFILE_CONTEXT_SCHEMA = "market-aligner.current-profile-selection-context.v1"
@@ -341,7 +341,16 @@ _PROMPTS = {
         "unavailability statement. minimum_years_experience is a finite non-negative number only "
         "for an explicit minimum. contract_type must be an exact canonical token from the existing "
         "eligibility contract; otherwise return null. Do not return any candidate policy or decision."
-        " Return source_evidence and unknown_fields in alphabetical field order."
+        " Return source_evidence and unknown_fields in alphabetical field order. For "
+        "work_jurisdiction only, the complete clause ‘We're open to distributed working within "
+        "the UK’ (also United Kingdom or GB), or ‘This role can be based in our [city] office, "
+        "but we're open to distributed working within the UK (with ad hoc meetings in [city])’, "
+        "supports GB; quote the exact complete source sentence. These work clauses and office "
+        "locations never establish residence. Leave required_residence null and list it in "
+        "unknown_fields unless an exact source quote explicitly states a residence requirement "
+        "using reside, resident, or residency. The exact statement ‘We can sponsor visas’, with "
+        "optional final ! or ., supports sponsorship_available=true only; it is not a guarantee "
+        "for any individual candidate."
     ),
     "semantic_vacancy_extraction": (
         "Extract only facts explicitly supported by the supplied vacancy snapshot. "

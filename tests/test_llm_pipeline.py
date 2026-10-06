@@ -23,6 +23,7 @@ from market_aligner.llm.codex_gateway import (
     VACANCY_ELIGIBILITY_PROMPT_VERSION,
     VACANCY_ELIGIBILITY_SCHEMA,
     SYNTHETIC_CANARY_MARKER,
+    _PROMPTS,
     _DISABLED_CODE_MODE_HOST_NOTICE,
     _event_validation_policy_fields,
     _validate_events,
@@ -42,6 +43,8 @@ from market_aligner.llm.pipeline import (
     accept_extraction,
     accept_vacancy_eligibility_facts,
     quote_supports_eligibility,
+    supports_can_sponsor_visas,
+    supports_explicit_uk_work_clause,
     verified_eligibility_capture,
     vacancy_eligibility_input,
 )
@@ -533,6 +536,15 @@ class LLMPipelineTests(unittest.TestCase):
         self.assertEqual("minimum_years_experience", facts.source_evidence[0].field)
         self.assertEqual(1, len(runner.calls))
         self.assertEqual(VACANCY_ELIGIBILITY_PROMPT_VERSION, receipt.prompt_version)
+        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v2"))
+        self.assertIn(
+            "distributed working within the UK",
+            _PROMPTS["vacancy_eligibility_facts"],
+        )
+        self.assertIn(
+            "Leave required_residence null",
+            _PROMPTS["vacancy_eligibility_facts"],
+        )
         self.assertEqual("vacancy_eligibility_facts", receipt.task)
         self.assertEqual(
             VACANCY_ELIGIBILITY_SCHEMA,
@@ -1240,6 +1252,86 @@ class VacancyEligibilityContractTests(unittest.TestCase):
                 inputs=absent_inputs,
             )
 
+    def test_can_sponsor_visas_support_is_exact_and_source_bound(self) -> None:
+        def bound_case(
+            quote: str, *, value: bool = True
+        ) -> tuple[RawPosting, VacancyEligibilityFacts, LLMReceipt, dict[str, Any]]:
+            raw, _ = LLMPipelineTests._structured_listing()
+            raw = RawPosting(
+                board=raw.board,
+                job_id=raw.job_id,
+                url=raw.url,
+                fetched_at=raw.fetched_at,
+                raw_json={"description": quote},
+            )
+            raw = replace(raw, content_sha256=raw_posting_content_sha256(raw))
+            inputs = vacancy_eligibility_input(raw)
+            facts = VacancyEligibilityFacts(
+                source_content_sha256=str(inputs["content_sha256"]),
+                work_jurisdiction=None,
+                required_residence=None,
+                sponsorship_available=value,
+                minimum_years_experience=None,
+                contract_type=None,
+                source_evidence=(
+                    VacancyEligibilityEvidence(
+                        field="sponsorship_available", quote=quote
+                    ),
+                ),
+                unknown_fields=(
+                    "contract_type",
+                    "minimum_years_experience",
+                    "required_residence",
+                    "work_jurisdiction",
+                ),
+            )
+            receipt = LLMReceipt.bind(
+                receipt_id="can-sponsor-visas-receipt",
+                task="vacancy_eligibility_facts",
+                model="fixture-model",
+                prompt_version=VACANCY_ELIGIBILITY_PROMPT_VERSION,
+                inputs=inputs,
+                output=facts,
+                created_at="2026-10-06T00:00:00Z",
+            )
+            return raw, facts, receipt, inputs
+
+        quote = "We can sponsor visas!"
+        raw, facts, receipt, inputs = bound_case(quote)
+        self.assertTrue(supports_can_sponsor_visas(True, quote))
+        self.assertEqual(
+            facts,
+            accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs),
+        )
+
+        for unsupported_quote in (
+            "We cannot sponsor visas.",
+            "We can sponsor visas for the right candidate.",
+            "We can sponsor visas?",
+            "We can sponsor visas!!",
+        ):
+            with self.subTest(quote=unsupported_quote):
+                raw, facts, receipt, inputs = bound_case(unsupported_quote)
+                self.assertFalse(
+                    supports_can_sponsor_visas(True, unsupported_quote)
+                )
+                with self.assertRaisesRegex(
+                    ContractValidationError, "exact quote grammar"
+                ):
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    )
+
+        raw, facts, receipt, inputs = bound_case(quote, value=False)
+        self.assertFalse(supports_can_sponsor_visas(False, quote))
+        with self.assertRaisesRegex(ContractValidationError, "exact quote grammar"):
+            accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs)
+
+        class TextSubclass(str):
+            pass
+
+        self.assertFalse(supports_can_sponsor_visas(True, TextSubclass(quote)))
+
     def _bound_jurisdiction_case(
         self,
         *,
@@ -1292,6 +1384,58 @@ class VacancyEligibilityContractTests(unittest.TestCase):
             created_at="2026-10-06T00:00:00Z",
         )
         return raw, facts, receipt, inputs
+
+    def test_explicit_uk_work_clause_supports_work_jurisdiction_only(self) -> None:
+        quotes = (
+            "We're open to distributed working within the UK.",
+            "This role can be based in our London office, but we're open to distributed "
+            "working within the UK (with ad hoc meetings in London).",
+        )
+        for quote in quotes:
+            with self.subTest(quote=quote):
+                raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+                    code="GB", quote=quote, description=quote
+                )
+                self.assertEqual(
+                    facts,
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    ),
+                )
+
+        quote = quotes[0]
+        raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+            code="GB",
+            quote=quote,
+            description=quote,
+            field="required_residence",
+        )
+        with self.assertRaisesRegex(
+            ContractValidationError, "country code is absent"
+        ):
+            accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs)
+
+    def test_uk_work_clause_helper_rejects_nonexact_and_malformed_inputs(self) -> None:
+        valid = "We're open to distributed working within the UK."
+        for code, quote in (
+            ("GB", "We're not open to distributed working within the UK."),
+            ("GB", "We're open to distributed working within the UK if approved."),
+            ("GB", "We're open to distributed working within the UK and Ireland."),
+            ("GB", "We're open to distributed working within England."),
+            ("GB", "London"),
+            ("gb", valid),
+            (None, valid),
+        ):
+            with self.subTest(code=code, quote=quote):
+                self.assertFalse(supports_explicit_uk_work_clause(code, quote))
+
+        class TextSubclass(str):
+            pass
+
+        self.assertFalse(supports_explicit_uk_work_clause(TextSubclass("GB"), valid))
+        self.assertFalse(
+            supports_explicit_uk_work_clause("GB", TextSubclass(valid))
+        )
 
     def test_work_jurisdiction_accepts_only_structured_gb_uk_office_binding(self) -> None:
         for code, quote in (

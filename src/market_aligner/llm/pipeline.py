@@ -220,6 +220,50 @@ def quote_supports_eligibility(field: str, value: object, quote: object) -> bool
     return False
 
 
+_UK_WORK_COUNTRY = r"(?:uk|gb|united kingdom)"
+_UK_WORK_CITY = r"[a-z]+(?: [a-z]+){0,3}"
+_UK_WORK_CLAUSE_PATTERNS = (
+    re.compile(rf"we're open to distributed working within the {_UK_WORK_COUNTRY}\.?"),
+    re.compile(
+        rf"this role can be based in our {_UK_WORK_CITY} office, but we're open to "
+        rf"distributed working within the {_UK_WORK_COUNTRY} "
+        rf"\(with ad hoc meetings in {_UK_WORK_CITY}\)\.?"
+    ),
+)
+_CAN_SPONSOR_VISAS_PATTERN = re.compile(r"we can sponsor visas[!.]?")
+
+
+def _normalize_public_eligibility_quote(quote: object) -> str | None:
+    if type(quote) is not str:
+        return None
+    for character in quote:
+        if character == "\u2019" or character.isspace():
+            continue
+        if not character.isascii() or not character.isprintable():
+            return None
+    return " ".join(quote.replace("\u2019", "'").split()).lower()
+
+
+def supports_explicit_uk_work_clause(code: object, quote: object) -> bool:
+    if type(code) is not str or code not in {"GB", "UK"}:
+        return False
+    normalized = _normalize_public_eligibility_quote(quote)
+    return normalized is not None and any(
+        pattern.fullmatch(normalized) is not None
+        for pattern in _UK_WORK_CLAUSE_PATTERNS
+    )
+
+
+def supports_can_sponsor_visas(value: object, quote: object) -> bool:
+    if value is not True:
+        return False
+    normalized = _normalize_public_eligibility_quote(quote)
+    return (
+        normalized is not None
+        and _CAN_SPONSOR_VISAS_PATTERN.fullmatch(normalized) is not None
+    )
+
+
 def _structured_work_country_quote_supports(
     code: object, quote: object, source_listing: object
 ) -> bool:
@@ -327,8 +371,11 @@ def accept_vacancy_eligibility_facts(
                 flags=re.ASCII,
             ) and not (
                 evidence.field == "work_jurisdiction"
-                and _structured_work_country_quote_supports(
-                    value, evidence.quote, source_listing
+                and (
+                    _structured_work_country_quote_supports(
+                        value, evidence.quote, source_listing
+                    )
+                    or supports_explicit_uk_work_clause(value, evidence.quote)
                 )
             ):
                 raise ContractValidationError(
@@ -345,7 +392,14 @@ def accept_vacancy_eligibility_facts(
             "minimum_years_experience",
             "contract_type",
         }:
-            if not quote_supports_eligibility(evidence.field, value, evidence.quote):
+            supported = quote_supports_eligibility(
+                evidence.field, value, evidence.quote
+            )
+            if evidence.field == "sponsorship_available":
+                supported = supported or supports_can_sponsor_visas(
+                    value, evidence.quote
+                )
+            if not supported:
                 raise ContractValidationError(
                     "eligibility fact is not supported by the exact quote grammar"
                 )
