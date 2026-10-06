@@ -20,6 +20,7 @@ from market_aligner.applications.production_handoff import (
     _build_production_handoff_from_authenticated_time,
     _deterministic_handoff_issuance,
     _git_commit,
+    _greenhouse_identity,
     _persist_execution_receipt,
     _protected_candidate_authority,
     _research_evidence,
@@ -630,6 +631,260 @@ def test_workable_flat_and_tenant_routes(
 def test_workable_rejects_ambiguous_identity(url: str) -> None:
     with pytest.raises(ProductionHandoffError):
         _workable_identity(url)
+
+
+@pytest.mark.parametrize(
+    ("url", "source_job_key", "expected"),
+    [
+        (
+            "https://job-boards.eu.greenhouse.io/winton/jobs/4986765101",
+            "greenhouse:winton:4986765101",
+            ("winton", "4986765101"),
+        ),
+        (
+            "https://job-boards.greenhouse.io/example/jobs/12345",
+            "greenhouse:example:12345",
+            ("example", "12345"),
+        ),
+        (
+            "HTTPS://JOB-BOARDS.GREENHOUSE.IO:443/b_1-X/jobs/42/",
+            "greenhouse:b_1-X:42",
+            ("b_1-X", "42"),
+        ),
+        (
+            "https://Job-Boards.Eu.Greenhouse.Io/winton/jobs/9",
+            "greenhouse:winton:9",
+            ("winton", "9"),
+        ),
+    ],
+)
+def test_greenhouse_identity_accepts_canonical_routes(
+    url: str, source_job_key: str, expected: tuple[str, str]
+) -> None:
+    assert _greenhouse_identity(url, source_job_key) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "source_job_key"),
+    [
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:other:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:8",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7:extra",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "workable:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "GREENHOUSE:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            " greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:Acme:7",
+        ),
+        (
+            "http://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "//job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io.evil.test/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://evil.job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://user@job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:8443/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:0443/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:+443/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:80/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:443x/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7?x=1",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7#frag",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7//",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io//acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme//jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/./jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/../acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/JOBS/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7/confirmation",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/0",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/07",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/١٢٣",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/１２",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/-bad/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/_bad/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/a.b/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme%2Fx/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/a%63me/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/%37",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acmé/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7\n",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7\r",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7\x00",
+            "greenhouse:acme:7",
+        ),
+        (
+            "\thttps://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme\\jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-bоards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouſe.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://ｊob-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7?",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7#",
+            "greenhouse:acme:7",
+        ),
+    ],
+)
+def test_greenhouse_identity_rejects_noncanonical_routes(
+    url: str, source_job_key: str
+) -> None:
+    with pytest.raises(ValueError, match="^official_greenhouse_route_invalid$"):
+        _greenhouse_identity(url, source_job_key)
+
+
+def test_greenhouse_identity_rejects_nonexact_string_types() -> None:
+    class StringSubclass(str):
+        pass
+
+    url = "https://job-boards.greenhouse.io/acme/jobs/7"
+    source_job_key = "greenhouse:acme:7"
+    for invalid_url in (None, 123, url.encode(), [url], (url,), True):
+        with pytest.raises(ValueError, match="^official_greenhouse_route_invalid$"):
+            _greenhouse_identity(invalid_url, source_job_key)
+    with pytest.raises(ValueError, match="^official_greenhouse_route_invalid$"):
+        _greenhouse_identity(StringSubclass(url), source_job_key)
+    with pytest.raises(ValueError, match="^official_greenhouse_route_invalid$"):
+        _greenhouse_identity(url, StringSubclass(source_job_key))
 
 
 def test_v2_revalidates_flat_route_and_exact_support(tmp_path: Path) -> None:

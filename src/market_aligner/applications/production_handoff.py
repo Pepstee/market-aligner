@@ -575,6 +575,24 @@ def _workable_identity(url: str) -> tuple[str | None, str]:
     return tenant, vacancy_id
 
 
+_GREENHOUSE_ROUTE = re.compile(
+    r"(?i:https)://(?i:job-boards\.greenhouse\.io|job-boards\.eu\.greenhouse\.io)(?::443)?"
+    r"/([A-Za-z0-9][A-Za-z0-9_-]*)/jobs/([1-9][0-9]*)(/)?"
+)
+
+
+def _greenhouse_identity(url: object, source_job_key: object) -> tuple[str, str]:
+    if type(url) is not str or type(source_job_key) is not str or not url.isascii():
+        raise ValueError("official_greenhouse_route_invalid") from None
+    match = _GREENHOUSE_ROUTE.fullmatch(url)
+    if match is None:
+        raise ValueError("official_greenhouse_route_invalid") from None
+    board, vacancy_id = match.group(1), match.group(2)
+    if source_job_key != f"greenhouse:{board}:{vacancy_id}":
+        raise ValueError("official_greenhouse_route_invalid") from None
+    return board, vacancy_id
+
+
 def _protected_candidate_authority(
     path: Path, projection: Mapping[str, Any], expected_sha256: str
 ) -> bytes:
@@ -992,16 +1010,24 @@ def _research_evidence(
             "research_metadata", "canonical vacancy metadata differs"
         )
     job_parts = source_job_key.split(":")
-    route_tenant, route_id = _workable_identity(canonical_url)
-    if (
-        len(job_parts) != 3
-        or job_parts[0] != "workable"
-        or (route_tenant is not None and job_parts[1] != route_tenant)
-        or job_parts[2] != route_id
-    ):
-        raise ProductionHandoffError(
-            "official_source_route", "source job identity differs"
-        )
+    if job_parts and job_parts[0] == "greenhouse":
+        try:
+            _greenhouse_identity(canonical_url, source_job_key)
+        except ValueError:
+            raise ProductionHandoffError(
+                "official_route", "Greenhouse observation route is not canonical"
+            ) from None
+    else:
+        route_tenant, route_id = _workable_identity(canonical_url)
+        if (
+            len(job_parts) != 3
+            or job_parts[0] != "workable"
+            or (route_tenant is not None and job_parts[1] != route_tenant)
+            or job_parts[2] != route_id
+        ):
+            raise ProductionHandoffError(
+                "official_source_route", "source job identity differs"
+            )
     object_raw = archive.read("objects", str(object_sha))
     envelope = _document(object_raw, "canonical vacancy object")
     schema = envelope.get("schema_version")

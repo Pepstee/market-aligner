@@ -1,11 +1,11 @@
 {
   "community_count": 29688,
-  "edge_count": 74927,
-  "node_count": 56939,
+  "edge_count": 74937,
+  "node_count": 56943,
   "outputs": {
     ".graphify_labels.json": "958acceca6590be59b5abe496d1da2b771cde8a75bf348c766f377db451ecf62",
     "GRAPH_REPORT.md": "ce27e7ebb64972e1172f0ab3a8534c993e4bc4efc932459e785b9017967fc201",
-    "graph.json": "b06f573a9ca14cd2d8baaef2d5437d1852abaf2aa2ccf14318bdf3a3df1e44aa"
+    "graph.json": "834059e17aa6ad894eedde7d7f8ae7b3211803413238732dd332bc80f13fefdc"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "a1d915f1cafe991cd3f58d35b014ea923a37d268",
+  "source_base_commit": "85658949ebc8e0d7773097770a881909c9e20865",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -708,7 +708,7 @@
     "src/market_aligner/applications/jaa.py": "fce5c2bcc41486096f119f49838c23f22fad5bb7aedfae3ca9b0637d47af86b5",
     "src/market_aligner/applications/legacy_v0.py": "826747e9e8049709537c95d8674a95537148b4743a1652feecdca4d18d16de67",
     "src/market_aligner/applications/producer.py": "c5fdae78328ac5ff2706b3f34b4ee633bb85945a1609c68a25fcb1fd012a9342",
-    "src/market_aligner/applications/production_handoff.py": "ce97e4aeaded89315447fca45e98a1333eda731271a78eb5f0b2192583336d57",
+    "src/market_aligner/applications/production_handoff.py": "dc3b58a97ee3217dda76b19957071ace21a98adc7840510959596c912e612339",
     "src/market_aligner/assessment/__init__.py": "95adae9b08a7013ca9649fc47d73f425772f98b9e7dd3f6afd488e4513b18d58",
     "src/market_aligner/assessment/calibration.py": "722284df4decb114411b39848e950510b4fdef6c9d9172a6bdc5c5f268467a98",
     "src/market_aligner/assessment/eligibility.py": "7669c4e15c1d85f18d474d8b72e5229e44a78c42fd9e7319d79635cc857a0729",
@@ -839,7 +839,7 @@
     "tests/test_operation_journal.py": "cbda9c886182c8e42995dbd47dc551b377133fbbc0a9a183354eae60339987ae",
     "tests/test_privacy.py": "1db78024b79b6109a53a9654ac8c15ddc9e29da702a5ab1e7c95ea26ee9bf164",
     "tests/test_process_one.py": "5395adf6a05df3354dcd1b58fdb4a9ed9a9903d85e928b569d46ca72519c0e97",
-    "tests/test_production_handoff.py": "9f083656933bcf74f4db7bc4b4d6d9f7a04e533e0c38ebe31975944ac366cdf8",
+    "tests/test_production_handoff.py": "e724772728fb692e576a1ebb5a9d7e4ddba0b39e97cdb079259b6db6138504c2",
     "tests/test_profiles.py": "14a21fc1018c44ba4220bbd8eb080b44212bd15a720c614a779264370afdf5bc",
     "tests/test_public_research_provider.py": "958152afc98872626c67dc02f33827019d276cd73d47123bf3b78ce1ad5bc901",
     "tests/test_recovery_manifest.py": "ed9c5f396e804a5579d959430e2f31d413f8beebe45412a0fd7f620caf5422aa",
