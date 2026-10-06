@@ -10,6 +10,8 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import yaml
+
 from market_aligner import __version__
 from market_aligner import processing as processing_module
 from market_aligner.collectors.engine import Collector
@@ -21,6 +23,11 @@ from market_aligner.profiler.importers import (
     import_evidence_led,
     import_guided_profile,
     project_canonical_authority,
+)
+from market_aligner.profiler.current_activation import (
+    PinnedRecoveryInputs,
+    compile_current_profile_activation,
+    write_current_activation_artifact,
 )
 from market_aligner.profiler.schema import CandidateProfile, TrackProfile, new_profile_id
 from market_aligner.profiler.store import ProfileStore
@@ -148,6 +155,75 @@ def _profile_command(args: argparse.Namespace) -> int:
         )
         return 0
     raise AssertionError(f"unhandled profile action: {args.profile_action}")
+
+
+def _activate_recovered_profile_command(args: argparse.Namespace) -> int:
+    store = ProfileStore.open_existing(args.data_home)
+    with PinnedRecoveryInputs(
+        data_home=store.paths.root,
+        manifest_relative_path=args.manifest_relative_path,
+        expected_manifest_sha256=args.manifest_sha256,
+        approval_id=args.approval_id,
+    ) as recovered:
+        try:
+            profile_document = yaml.safe_load(
+                recovered.files["candidate_profile_and_job_preferences"].decode("utf-8")
+            )
+        except (UnicodeDecodeError, yaml.YAMLError):
+            raise ValueError("approved recovered profile is malformed") from None
+        if type(profile_document) is not dict or type(profile_document.get("profile_id")) is not str:
+            raise ValueError("approved recovered profile is malformed")
+        profile_id = profile_document["profile_id"]
+        snapshot = store.coherent_snapshot(
+            profile_id, require_committed_generation=True
+        )
+        try:
+            activation = compile_current_profile_activation(
+                profile_id=profile_id,
+                manifest_bytes=recovered.manifest_bytes,
+                expected_manifest_sha256=args.manifest_sha256,
+                approval_id=args.approval_id,
+                recovered_profile_bytes=recovered.files[
+                    "candidate_profile_and_job_preferences"
+                ],
+                recovered_evidence_bytes=recovered.files[
+                    "existing_profile_claims_and_provenance"
+                ],
+                snapshot=snapshot,
+                gateway=_codex_gateway(args),
+            )
+            recovered.revalidate()
+            snapshot.revalidate()
+            artifact_path, artifact_sha256 = write_current_activation_artifact(
+                data_home=store.paths.root,
+                profile_id=profile_id,
+                document=activation,
+            )
+            recovered.revalidate()
+            snapshot.revalidate()
+        finally:
+            snapshot.close()
+    print(
+        json.dumps(
+            {
+                "status": "prepared_non_authoritative",
+                "artifact_path": str(artifact_path),
+                "artifact_sha256": artifact_sha256,
+                "activation_sha256": activation["activation_sha256"],
+                "profile_id": profile_id,
+                "selected_facts": len(activation["selection"]["selection"]),
+                "excluded_records": len(activation["selection"]["excluded_ids"]),
+                "provider_invocations": activation["provider_receipt"]["transport"][
+                    "invocation_count"
+                ],
+                "application_authority": False,
+                "release_authority": False,
+                "submission_authority": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def _assess_command(args: argparse.Namespace) -> int:
@@ -1065,6 +1141,22 @@ def build_parser() -> argparse.ArgumentParser:
     projector.add_argument("--evidence-mapping", type=Path, required=True)
     _add_data_home(projector)
     projector.set_defaults(handler=_profile_command)
+
+    activate_recovered = profile_commands.add_parser(
+        "activate-recovered-inputs",
+        help=(
+            "Select exact current factual statements from approved recovery inputs; "
+            "this grants no application or release authority."
+        ),
+    )
+    activate_recovered.add_argument("--manifest-relative-path", required=True)
+    activate_recovered.add_argument("--manifest-sha256", required=True)
+    activate_recovered.add_argument("--approval-id", required=True)
+    activate_recovered.add_argument("--model", required=True)
+    activate_recovered.add_argument("--semantic-timeout", type=float, default=120.0)
+    activate_recovered.add_argument("--codex-binary", type=Path)
+    _add_data_home(activate_recovered)
+    activate_recovered.set_defaults(handler=_activate_recovered_profile_command)
 
     assess = commands.add_parser("assess", help="Assess one vacancy for an opaque profile ID.")
     assess.add_argument("--profile-id", required=True)

@@ -1,11 +1,11 @@
 {
-  "community_count": 30042,
-  "edge_count": 74054,
-  "node_count": 56728,
+  "community_count": 30069,
+  "edge_count": 74386,
+  "node_count": 56824,
   "outputs": {
-    ".graphify_labels.json": "781e909dc6a8c8e416e1c6acf45a383bb6f016a38f3fae63957e977ea15a3df9",
-    "GRAPH_REPORT.md": "773757ef7f63754de3c25c8f94e68a41dab0d1988399dd402e19dc826448534f",
-    "graph.json": "56691f64a66ab5acfc4d7d911f4d4d1b03695d0b2d7ae7a28c3c110da9866cc8"
+    ".graphify_labels.json": "753d0d74f26a0e4e0763bd55e90c474bd24638a5238cd5a10ec9bda5c40a7dc5",
+    "GRAPH_REPORT.md": "98719e91f186c6b9aa1b00e0d6a34129144e40c545f9e3a0e5c47c526e390116",
+    "graph.json": "7ce1417ef60e6f837fec465e83952ae2c6178bdea3b2f8af673afdb7b0ef498e"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "43f67a501c6f0d3d8a33877167e89190a4862c43",
+  "source_base_commit": "b70eaf2218edfdd04457d8b851ebb751189e8577",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -716,7 +716,7 @@
     "src/market_aligner/assessment/opportunity.py": "f4483faeb7bac7d49a13a9bfac77e11e599d9d871c4362d19a373c868734b1ca",
     "src/market_aligner/assessment/scoring.py": "a5a354e8bd48d33d8dbb9d9cacf4d96fc0a2aa6b46aff6d4ab41334ce8f772ac",
     "src/market_aligner/assessment/viability.py": "26ccbfd18e05dda673391594fbfeb9621917ae11896bbf7236a9ab0368eecce4",
-    "src/market_aligner/cli.py": "29ba1c7087a1a5626942f82f486e1f69982e2c0c6bb433585319181f1fb9dffb",
+    "src/market_aligner/cli.py": "802d2e18ec4c1d2cd334d0793e6c1823a0f1748f4dc3b453f55acdef91b980d8",
     "src/market_aligner/collectors/__init__.py": "260a6fec63e28d4384679128c5fc66d09644d5efa06869b51075041243390d9f",
     "src/market_aligner/collectors/adapters/__init__.py": "6116b53b0e08252ea14e63cba54241acf918300bef7c8c8a76313796073119c3",
     "src/market_aligner/collectors/adapters/adzuna.py": "dd9a1a975af9a6cdddcf176b207866c132d88158615ea6a1d65fd6bb3768d714",
@@ -766,7 +766,7 @@
     "src/market_aligner/integrations/__init__.py": "c90774f2e629925d5887af80d407b002b29ac8717736f55cee9a3f02f73d16d8",
     "src/market_aligner/integrations/orchestrator.py": "19f51098196b2cb24aec4a4d3c013835b873b58b300fcf63a0a283d43ce95cfd",
     "src/market_aligner/llm/__init__.py": "2ea86f8e0e07b357c5df697ce1a76ced7825431ea98f783f97ca066be837fff6",
-    "src/market_aligner/llm/codex_gateway.py": "8b6fcdd3b8ff92e54e2fa5c434f41857859449a5f55e91dc719317970dd2af61",
+    "src/market_aligner/llm/codex_gateway.py": "83dcc42ab19e507df856bb4a31b2e3be595295bc61864b83747df4813b6ded11",
     "src/market_aligner/llm/contracts.py": "022ca4669a9440d4289ae8736abc31b96832d92d08cc11d71413a186ee8d37e9",
     "src/market_aligner/llm/pipeline.py": "eb89428d9054e61eaa81cab1f4f63cf7ff2af42ab4193b0e24ae73c299158c7d",
     "src/market_aligner/llm/structured.py": "9182fdfe0541ba70e7f96502cf271406d9e10978a84700e81b8119f4815f9a47",

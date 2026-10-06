@@ -3372,9 +3372,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/cli.py": {
-    "mtime": 1791256142.4637825,
-    "seen": 1791257441.3949463,
-    "ast_hash": "0857af6724718b2284ea7995091aeb2f",
+    "mtime": 1791259601.3557296,
+    "seen": 1791262488.5807953,
+    "ast_hash": "e377733b3ded04010688c0bb884bfacb",
     "semantic_hash": ""
   },
   "src/market_aligner/collectors/__init__.py": {
@@ -4278,9 +4278,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/llm/codex_gateway.py": {
-    "mtime": 1791250330.1318846,
-    "seen": 1791250475.7228136,
-    "ast_hash": "6a5e4dda7d733ebf66df7b9a76a3f420",
+    "mtime": 1791261840.203701,
+    "seen": 1791262488.580838,
+    "ast_hash": "45c87a4f0cca49e2838b9a11b192791e",
     "semantic_hash": ""
   },
   "src/market_aligner/research/public_provider.py": {
@@ -4713,6 +4713,48 @@
     "mtime": 1790944090.1987877,
     "seen": 1790944280.7690136,
     "ast_hash": "60d2eb5e2cc67f649dada97536ba9b82",
+    "semantic_hash": ""
+  },
+  "src/market_aligner/profiler/current_activation.py": {
+    "mtime": 1791260407.8957157,
+    "seen": 1791262488.5808456,
+    "ast_hash": "6fd65dae3aa622db60295101ddff51b6",
+    "semantic_hash": ""
+  },
+  "src/market_aligner/profiler/fact_packet.py": {
+    "mtime": 1791258774.7077432,
+    "seen": 1791262488.5808465,
+    "ast_hash": "a3d34a8d0ade496fca9ad3757ef7e986",
+    "semantic_hash": ""
+  },
+  "src/market_aligner/profiler/recovery_manifest.py": {
+    "mtime": 1791258774.739743,
+    "seen": 1791262488.5808506,
+    "ast_hash": "486af5831b4a1a1e5a303acb78bd6fe8",
+    "semantic_hash": ""
+  },
+  "tests/test_current_activation.py": {
+    "mtime": 1791260435.6317155,
+    "seen": 1791262488.5808845,
+    "ast_hash": "c42181fd64cc6e2d10d9b563f469b23b",
+    "semantic_hash": ""
+  },
+  "tests/test_current_fact_packet.py": {
+    "mtime": 1791258774.771743,
+    "seen": 1791262488.5808852,
+    "ast_hash": "5771bb9167980f19941b55310ee2a00b",
+    "semantic_hash": ""
+  },
+  "tests/test_current_profile_fact_selection.py": {
+    "mtime": 1791261804.831702,
+    "seen": 1791262488.5808864,
+    "ast_hash": "c1164d73806c637aae70683f71ac4d5e",
+    "semantic_hash": ""
+  },
+  "tests/test_recovery_manifest.py": {
+    "mtime": 1791258783.3477428,
+    "seen": 1791262488.5809026,
+    "ast_hash": "963925ffe6fcd591efaafead1f46154c",
     "semantic_hash": ""
   }
 }
