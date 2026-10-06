@@ -302,6 +302,7 @@ class CanonicalPreparationInputMaterializer:
     role_title: str | None = None
     company_name: str | None = None
     candidate_authority_bytes: bytes | None = None
+    approved_evidence_bytes: bytes | None = field(default=None, repr=False)
     contact_authority_bytes: bytes | None = None
     materialization_only: bool = False
 
@@ -368,6 +369,7 @@ class CanonicalPreparationInputMaterializer:
                 role_title=verified.role_title,
                 company_name=verified.company_name,
                 observed_at=verified.source_observed_at,
+                approved_evidence_bytes=self.approved_evidence_bytes,
             )
             decision = market_authority.decision_receipt()
             source_job_key = market_authority.source_job_key
@@ -433,6 +435,7 @@ class CanonicalPreparationInputMaterializer:
             candidate_authority_bytes=self.candidate_authority_bytes,
             contact_authority_bytes=self.contact_authority_bytes,
             contact_provenance=contact_provenance,
+            approved_evidence_bytes=self.approved_evidence_bytes,
         )
         request = None
         cover_request = None

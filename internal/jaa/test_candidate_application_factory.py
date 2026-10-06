@@ -34,6 +34,7 @@ from career_automation.candidate_application_factory import (
     _assert_package_quality,
     _source_policy_receipt,
     resolve_match_policy,
+    resolve_evidence_packet,
     build_market_application_decision_authority,
     build_candidate_application_deployment_binding,
     build_candidate_application_package,
@@ -546,7 +547,7 @@ def test_current_market_authority_loads_evidence_from_pinned_projection(
     source_job_key = "greenhouse:synthetic:current"
     evidence_bytes = b'{"statements":[]}\n'
     evidence_path = tmp_path / "current-approved-evidence.json"
-    evidence_path.write_bytes(evidence_bytes)
+    evidence_path.write_bytes(b'{"statements":[{"id":"legacy"}]}\n')
     evidence_sha256 = hashlib.sha256(evidence_bytes).hexdigest()
     projection_body = {
         "approved_evidence": [],
@@ -637,8 +638,9 @@ def test_current_market_authority_loads_evidence_from_pinned_projection(
             company_name="Synthetic company",
             observed_at="2026-10-06T00:00:00+00:00",
             approved_evidence_path=evidence_path,
+            approved_evidence_bytes=evidence_bytes,
         )
-    with pytest.raises(ValueError, match="candidate evidence hash differs"):
+    with pytest.raises(ValueError, match="candidate evidence binding differs"):
         _approved_statements(evidence_path)
 
 
@@ -931,7 +933,7 @@ def test_rejects_candidate_evidence_byte_substitution(tmp_path: Path) -> None:
     changed = tmp_path / "changed-evidence.json"
     changed.write_bytes(approved_evidence_path.read_bytes() + b" ")
     arguments["approved_evidence_path"] = changed
-    with pytest.raises(ValueError, match="evidence hash differs"):
+    with pytest.raises(ValueError, match="candidate evidence binding differs"):
         build_candidate_application_package(**arguments)
 
 
@@ -1284,6 +1286,9 @@ def test_current_match_policy_uses_authenticated_matrix_for_both_outcomes(
 
     monkeypatch.setattr(candidate_factory_module, "MatchResult", capture_match_result)
     matrix_policy_sha256 = "b" * 64
+    arguments["approved_evidence_bytes"] = Path(
+        arguments["approved_evidence_path"]
+    ).read_bytes()
     built = _build_candidate_application_source(
         **arguments,
         current_runtime=True,
@@ -2432,8 +2437,81 @@ def test_approved_statements_legacy_call_keeps_pinned_default(
 
     assert "SYNTHETIC-EVIDENCE-1" in _approved_statements(evidence_path)
     evidence_path.write_bytes(evidence_path.read_bytes() + b" ")
-    with pytest.raises(ValueError, match="evidence hash differs"):
+    with pytest.raises(ValueError, match="candidate evidence binding differs"):
         _approved_statements(evidence_path)
+
+
+def test_current_approved_statements_use_pinned_bytes_without_legacy_path(
+    tmp_path: Path,
+) -> None:
+    evidence_bytes = (
+        canonical_json(
+            {
+                "statements": [
+                    {"id": "CURRENT-EVIDENCE", "statement": "Synthetic claim."}
+                ]
+            }
+        )
+        + "\n"
+    ).encode()
+
+    statements, source = _load_approved_statements(
+        tmp_path / "absent-legacy-packet.json",
+        current_runtime=True,
+        expected_evidence_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+        approved_evidence_bytes=evidence_bytes,
+    )
+
+    assert statements["CURRENT-EVIDENCE"]["statement"] == "Synthetic claim."
+    assert source.source_bytes == evidence_bytes
+
+
+def test_current_packet_missing_or_mismatched_bytes_never_falls_back(
+    tmp_path: Path,
+) -> None:
+    legacy_bytes = b'{"statements":[]}\n'
+    legacy_path = tmp_path / "legacy-packet.json"
+    legacy_path.write_bytes(legacy_bytes)
+    expected_sha256 = hashlib.sha256(legacy_bytes).hexdigest()
+
+    for pinned_bytes in (None, b'{"statements":[]}'):
+        with pytest.raises(ValueError, match="candidate evidence binding differs"):
+            _load_approved_statements(
+                legacy_path,
+                current_runtime=True,
+                expected_evidence_sha256=expected_sha256,
+                approved_evidence_bytes=pinned_bytes,
+            )
+
+
+def test_legacy_packet_selector_rejects_supplied_bytes_without_reading(
+    tmp_path: Path,
+) -> None:
+    legacy_bytes = b'{"statements":[]}\n'
+    path = tmp_path / "legacy-packet.json"
+    path.write_bytes(legacy_bytes)
+    calls: list[int] = []
+
+    selected = resolve_evidence_packet(
+        current_runtime=False,
+        pinned_bytes=None,
+        expected_sha256=hashlib.sha256(legacy_bytes).hexdigest(),
+        legacy_read=lambda: calls.append(1) or path.read_bytes(),
+    )
+
+    assert selected == legacy_bytes
+    assert calls == [1]
+    calls.clear()
+
+    with pytest.raises(ValueError, match="candidate evidence binding differs"):
+        resolve_evidence_packet(
+            current_runtime=False,
+            pinned_bytes=b"caller bytes",
+            expected_sha256=hashlib.sha256(legacy_bytes).hexdigest(),
+            legacy_read=lambda: calls.append(1) or path.read_bytes(),
+        )
+
+    assert calls == []
 
 
 def test_materializes_exact_authority_bound_source_without_pdf(
@@ -2559,7 +2637,7 @@ def test_materialization_rejects_authority_and_unsupported_packet_substitution(
     )
     proposal_path = tmp_path / "proposal.json"
     proposal_path.write_text(json.dumps(proposal))
-    with pytest.raises(ValueError, match="evidence hash differs"):
+    with pytest.raises(ValueError, match="candidate evidence binding differs"):
         materialize_candidate_application_source(
             **_materialization_inputs(tmp_path),
             candidate_authority_path=AUTHORITY_PATH,

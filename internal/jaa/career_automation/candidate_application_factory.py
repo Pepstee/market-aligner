@@ -135,6 +135,40 @@ CURRENT_RUNTIME_MATERIALIZATION_RECEIPT_SCHEMA = (
 )
 _CURRENT_PACKET_SHA256 = re.compile(r"[0-9a-f]{64}")
 _MATCH_POLICY_BINDING_INVALID = "match_policy_binding_invalid"
+_EVIDENCE_PACKET_BINDING_INVALID = "candidate evidence binding differs"
+
+
+def resolve_evidence_packet(
+    *,
+    current_runtime: bool,
+    pinned_bytes: bytes | None,
+    expected_sha256: object,
+    legacy_read,
+) -> bytes:
+    try:
+        if type(current_runtime) is not bool:
+            raise TypeError("mode")
+        if type(expected_sha256) is not str or _CURRENT_PACKET_SHA256.fullmatch(
+            expected_sha256
+        ) is None:
+            raise TypeError("hash")
+        if current_runtime:
+            if type(pinned_bytes) is not bytes or not pinned_bytes:
+                raise TypeError("bytes")
+            data = pinned_bytes
+        else:
+            if pinned_bytes is not None:
+                raise TypeError("pinned")
+            if not callable(legacy_read):
+                raise TypeError("reader")
+            data = legacy_read()
+            if type(data) is not bytes or not data:
+                raise TypeError("bytes")
+        if _sha256(data) != expected_sha256:
+            raise ValueError("hash mismatch")
+    except Exception:
+        raise ValueError(_EVIDENCE_PACKET_BINDING_INVALID) from None
+    return data
 
 
 def resolve_match_policy(
@@ -532,6 +566,7 @@ def build_market_application_decision_authority(
     company_name: str,
     observed_at: str,
     approved_evidence_path: Path = APPROVED_EVIDENCE_PATH,
+    approved_evidence_bytes: bytes | None = None,
 ) -> MarketApplicationDecisionAuthority:
     """Compile an exact integrated decision from a freshly verified MA graph."""
 
@@ -608,12 +643,14 @@ def build_market_application_decision_authority(
             candidate_projection,
             {"candidate_projection_sha256": projection_sha256},
         )
-    evidence_bytes = approved_evidence_path.read_bytes()
-    evidence_document = json.loads(evidence_bytes)
-    approved_statements = _approved_statements(
+    approved_statements, approved_evidence_source = _load_approved_statements(
         approved_evidence_path,
         expected_evidence_sha256=expected_evidence_sha256,
+        current_runtime=current_runtime,
+        approved_evidence_bytes=approved_evidence_bytes,
     )
+    evidence_bytes = approved_evidence_source.source_bytes
+    evidence_document = json.loads(evidence_bytes)
     try:
         ledger_rows = [json.loads(line) for line in evidence_ledger_bytes.splitlines()]
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1083,10 +1120,14 @@ def _approved_statements(
     path: Path,
     *,
     expected_evidence_sha256: str | None = None,
+    current_runtime: bool = False,
+    approved_evidence_bytes: bytes | None = None,
 ) -> dict[str, dict[str, object]]:
     statements, _source_context = _load_approved_statements(
         path,
         expected_evidence_sha256=expected_evidence_sha256,
+        current_runtime=current_runtime,
+        approved_evidence_bytes=approved_evidence_bytes,
     )
     return statements
 
@@ -1095,15 +1136,23 @@ def _load_approved_statements(
     path: Path,
     *,
     expected_evidence_sha256: str | None = None,
+    current_runtime: bool = False,
+    approved_evidence_bytes: bytes | None = None,
 ) -> tuple[dict[str, dict[str, object]], ApprovedEvidenceSourceContext]:
-    value = path.read_bytes()
-    expected = (
-        APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
-        if expected_evidence_sha256 is None
-        else expected_evidence_sha256
+    if expected_evidence_sha256 is None:
+        expected = (
+            ""
+            if current_runtime
+            else APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
+        )
+    else:
+        expected = expected_evidence_sha256
+    value = resolve_evidence_packet(
+        current_runtime=current_runtime,
+        pinned_bytes=approved_evidence_bytes,
+        expected_sha256=expected,
+        legacy_read=path.read_bytes,
     )
-    if _sha256(value) != expected:
-        raise ValueError("application factory candidate evidence hash differs")
     source_context = ApprovedEvidenceSourceContext(value, expected)
     document = json.loads(value)
     rows = document.get("statements")
@@ -1654,6 +1703,7 @@ def _build_candidate_application_source(
     current_runtime: bool = False,
     current_matrix_policy_sha256: str | None = None,
     approved_evidence_path: Path = APPROVED_EVIDENCE_PATH,
+    approved_evidence_bytes: bytes | None = None,
     revision_writer: GenerationRevisionWriter | None = None,
 ) -> _CandidateApplicationSourceBuild:
     """Build a plain UK CV and letter using verbatim approved factual atoms."""
@@ -1711,6 +1761,8 @@ def _build_candidate_application_source(
     statements, approved_evidence_source = _load_approved_statements(
         approved_evidence_path,
         expected_evidence_sha256=expected_evidence_sha256,
+        current_runtime=current_runtime,
+        approved_evidence_bytes=approved_evidence_bytes,
     )
     projection_rows = candidate_projection.get("approved_evidence")
     if not isinstance(projection_rows, list):
@@ -2604,6 +2656,7 @@ def materialize_candidate_application_source(
     candidate_authority_bytes: bytes | None = None,
     contact_authority_bytes: bytes | None = None,
     contact_provenance: CurrentContactProvenance | None = None,
+    approved_evidence_bytes: bytes | None = None,
 ) -> CandidateApplicationMaterialization:
     """Materialize exact source authority without rendering or release authority."""
     deployment_binding.__post_init__()
@@ -2681,14 +2734,18 @@ def materialize_candidate_application_source(
         require_embedded_decision=market_decision_authority is None,
         exact_bytes=candidate_authority_bytes,
     )
-    evidence_bytes = approved_evidence_path.read_bytes()
     expected_source_evidence_sha256 = (
         _projection_evidence_sha256(candidate_projection, decision_receipt)
         if current_runtime
         else APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
     )
-    if _sha256(evidence_bytes) != expected_source_evidence_sha256:
-        raise ValueError("application factory candidate evidence hash differs")
+    _, approved_evidence_source = _load_approved_statements(
+        approved_evidence_path,
+        expected_evidence_sha256=expected_source_evidence_sha256,
+        current_runtime=current_runtime,
+        approved_evidence_bytes=approved_evidence_bytes,
+    )
+    evidence_bytes = approved_evidence_source.source_bytes
     evidence_document = json.loads(evidence_bytes)
     if current_runtime and type(market_decision_authority) is not MarketApplicationDecisionAuthority:
         raise ValueError("current application requires authenticated matrix policy")
@@ -2708,6 +2765,7 @@ def materialize_candidate_application_source(
             else None
         ),
         approved_evidence_path=approved_evidence_path,
+        approved_evidence_bytes=approved_evidence_bytes,
         revision_writer=revision_writer,
     )
     source = built.source

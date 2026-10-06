@@ -300,7 +300,7 @@ def _load_pinned_current_contact_provenance(
     deployment: _ProductionPreparationDeployment,
     verified,
     candidate_authority_bytes: bytes,
-) -> tuple[CurrentContactProvenance, dict[str, str]]:
+) -> tuple[CurrentContactProvenance, dict[str, str], bytes]:
     from market_aligner.profiler.current_activation import (
         PinnedCurrentActivationArtifact,
         PinnedRecoveryInputs,
@@ -393,10 +393,20 @@ def _load_pinned_current_contact_provenance(
                 current_projection_receipt,
                 expected_activation_sha256=activation_sha256,
             )
+            approved_evidence_bytes = current_documents.get(
+                "evidence_packet_bytes"
+            )
+            projection_source_hashes = current_projection.get("source_hashes")
             if (
                 current_documents.get("candidate_authority_bytes")
                 != candidate_authority_bytes
                 or current_projection != projection
+                or type(approved_evidence_bytes) is not bytes
+                or type(projection_source_hashes) is not dict
+                or type(projection_source_hashes.get("approved_evidence"))
+                is not str
+                or hashlib.sha256(approved_evidence_bytes).hexdigest()
+                != projection_source_hashes["approved_evidence"]
             ):
                 raise ValueError(invalid)
             recovery_manifest_sha256 = projection["source_hashes"][
@@ -482,7 +492,7 @@ def _load_pinned_current_contact_provenance(
                     activation.revalidate()
                     recovered.revalidate()
                     snapshot.revalidate()
-                    return contact_provenance, bindings
+                    return contact_provenance, bindings, approved_evidence_bytes
         finally:
             snapshot.close()
     except (OSError, TypeError, ValueError, KeyError, HandoffContractError):
@@ -2115,6 +2125,7 @@ def _run_production_preparation(
         contact_lease = None
         contact_provenance = None
         current_contact_bindings = None
+        current_approved_evidence_bytes = None
         if deployment.current_runtime:
             verified_current_input = _current_runtime_strategy_input(
                 store=store,
@@ -2125,7 +2136,11 @@ def _run_production_preparation(
                 admitted_producer_commit=admitted_source.producer_commit_sha,
                 current_commit=current_commit,
             )
-            contact_provenance, current_contact_bindings = (
+            (
+                contact_provenance,
+                current_contact_bindings,
+                current_approved_evidence_bytes,
+            ) = (
                 _load_pinned_current_contact_provenance(
                     deployment=deployment,
                     verified=verified_current_input,
@@ -2228,6 +2243,7 @@ def _run_production_preparation(
             input_materializer=CanonicalPreparationInputMaterializer(
                 candidate_authority_path=deployment.candidate_authority_path,
                 candidate_authority_bytes=candidate_bytes,
+                approved_evidence_bytes=current_approved_evidence_bytes,
                 contact_authority_bytes=contact_authority_bytes,
                 materialization_only=materialization_only,
             ),
