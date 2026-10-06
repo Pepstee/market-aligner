@@ -51,6 +51,7 @@ PRODUCTION_MARKET_OUTBOX_ROOT = Path(
 PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT = PRODUCTION_MARKET_OUTBOX_ROOT / "receipts"
 PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY = "state/public-employer-research-v2"
 _DEPLOYMENT_SCHEMA = "jaa.production-market-handoff-deployment.v1"
+_DEPLOYMENT_SCHEMA_V2 = "jaa.production-market-handoff-deployment.v2"
 _MAX_CONFIG_BYTES = 8192
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COLLECTION_CONFIG_RELATIVE_PATH = Path(
@@ -120,13 +121,29 @@ def _validate_deployment_document(document: object) -> dict[str, object]:
         raise ProductionHandoffDeploymentError(
             "deployment configuration keys differ from the supported schema"
         )
+    schema_version = document["schema_version"]
     if (
-        document["schema_version"] != _DEPLOYMENT_SCHEMA
+        type(schema_version) is not str
+        or schema_version not in {_DEPLOYMENT_SCHEMA, _DEPLOYMENT_SCHEMA_V2}
         or document["trust_root_id"]
         != production_handoff.PRODUCTION_HANDOFF_TRUST_ROOT_ID
         or document["research_archive_root_identity"]
         != PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY
-        or document["collection_config_sha256"]
+    ):
+        raise ProductionHandoffDeploymentError(
+            "deployment configuration trust or code identity differs"
+        )
+    for key in (
+        "candidate_authority_sha256",
+        "collection_config_sha256",
+        "collection_config_file_sha256",
+    ):
+        if type(document[key]) is not str or not _SHA256.fullmatch(document[key]):
+            raise ProductionHandoffDeploymentError(
+                f"deployment configuration {key} is invalid"
+            )
+    if schema_version == _DEPLOYMENT_SCHEMA and (
+        document["collection_config_sha256"]
         != PRODUCTION_COLLECTION_CONFIG_SHA256
         or document["collection_config_file_sha256"]
         != PRODUCTION_COLLECTION_CONFIG_FILE_SHA256
@@ -134,11 +151,6 @@ def _validate_deployment_document(document: object) -> dict[str, object]:
         raise ProductionHandoffDeploymentError(
             "deployment configuration trust or code identity differs"
         )
-    for key in ("candidate_authority_sha256",):
-        if type(document[key]) is not str or not _SHA256.fullmatch(document[key]):
-            raise ProductionHandoffDeploymentError(
-                f"deployment configuration {key} is invalid"
-            )
     data_home = _normalized_absolute_path(document, "data_home")
     repository_root = _normalized_absolute_path(document, "repository_root")
     output_root = _normalized_absolute_path(document, "output_root")
@@ -148,7 +160,15 @@ def _validate_deployment_document(document: object) -> dict[str, object]:
     collection_config = _normalized_absolute_path(
         document, "collection_config_path"
     )
-    if collection_config != repository_root / _COLLECTION_CONFIG_RELATIVE_PATH:
+    if schema_version == _DEPLOYMENT_SCHEMA_V2 and str(
+        document["collection_config_path"]
+    ).startswith("//"):
+        raise ProductionHandoffDeploymentError(
+            "deployment configuration collection_config_path is not a normalized absolute path"
+        )
+    if schema_version == _DEPLOYMENT_SCHEMA and (
+        collection_config != repository_root / _COLLECTION_CONFIG_RELATIVE_PATH
+    ):
         raise ProductionHandoffDeploymentError(
             "collection configuration path does not belong to the deployed repository"
         )
@@ -179,6 +199,9 @@ def production_handoff_deployment_configuration_bytes(
     output_root: str | Path | None = None,
     candidate_authority_path: str | Path | None = None,
     candidate_authority_sha256: str | None = None,
+    collection_config_path: str | Path | None = None,
+    collection_config_sha256: str | None = None,
+    collection_config_file_sha256: str | None = None,
 ) -> bytes:
     """Return canonical deployment bytes for one explicitly provisioned host."""
     values = (
@@ -194,6 +217,23 @@ def production_handoff_deployment_configuration_bytes(
         raise ProductionHandoffDeploymentError(
             "host deployment requires all five host-specific authority values"
         )
+    collection_values = (
+        collection_config_path,
+        collection_config_sha256,
+        collection_config_file_sha256,
+    )
+    if any(value is not None for value in collection_values) and not all(
+        value is not None for value in collection_values
+    ):
+        raise ProductionHandoffDeploymentError(
+            "collection configuration requires its path and both hashes together"
+        )
+    if all(value is not None for value in collection_values) and not all(
+        value is not None for value in values
+    ):
+        raise ProductionHandoffDeploymentError(
+            "current collection configuration requires all five host-specific authority values"
+        )
     if not any(value is not None for value in values):
         data_home = PRODUCTION_MARKET_DATA_HOME
         repository_root = PRODUCTION_MARKET_REPOSITORY_ROOT
@@ -207,6 +247,19 @@ def production_handoff_deployment_configuration_bytes(
         candidate_authority_path=candidate_authority_path,
         candidate_authority_sha256=candidate_authority_sha256,
     )
+    if all(value is not None for value in collection_values):
+        if not isinstance(collection_config_path, (str, Path)):
+            raise ProductionHandoffDeploymentError(
+                "deployment configuration collection_config_path is invalid"
+            )
+        document.update(
+            {
+                "collection_config_path": str(collection_config_path),
+                "collection_config_sha256": collection_config_sha256,
+                "collection_config_file_sha256": collection_config_file_sha256,
+                "schema_version": _DEPLOYMENT_SCHEMA_V2,
+            }
+        )
     _validate_deployment_document(document)
     return canonical_json_bytes(document)
 

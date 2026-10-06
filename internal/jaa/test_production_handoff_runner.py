@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
+from itertools import combinations
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -112,7 +114,11 @@ def test_alternate_roots_fail_before_time_or_state_read(
     monkeypatch, tmp_path: Path, field: str
 ) -> None:
     alternate_document = runner._expected_deployment_document()
-    alternate_document[field] = str(tmp_path / f"alternate-{field}")
+    alternate_document[field] = (
+        str(tmp_path / f"alternate-{field}")
+        if field == "collection_config_path"
+        else "f" * 64
+    )
     alternate = canonical_json_bytes(alternate_document)
     calls = {"time": 0, "build": 0}
 
@@ -194,6 +200,213 @@ def test_host_deployment_paths_are_accepted_when_bound_to_the_repository(
     )
     assert document["candidate_authority_path"] == str(candidate)
     assert document["candidate_authority_sha256"] == "a" * 64
+
+
+def _synthetic_host_deployment_values(tmp_path: Path) -> dict[str, object]:
+    return {
+        "data_home": tmp_path / "artvault" / "ma-state",
+        "repository_root": tmp_path / "artvault" / "market-aligner",
+        "output_root": tmp_path / "artvault" / "ma-outbox",
+        "candidate_authority_path": tmp_path / "artvault" / "private" / "candidate.json",
+        "candidate_authority_sha256": "a" * 64,
+    }
+
+
+def test_legacy_builder_bytes_remain_exact() -> None:
+    assert hashlib.sha256(
+        runner.production_handoff_deployment_configuration_bytes()
+    ).hexdigest() == "7f06b79bdc90ec20bd03d93224bc3307cff2b4cf7a6a5308d1fa52b5643df6aa"
+    host_values = {
+        "data_home": "/var/lib/synthetic-ma/data",
+        "repository_root": "/srv/synthetic-ma/source",
+        "output_root": "/var/lib/synthetic-ma/outbox",
+        "candidate_authority_path": "/var/lib/synthetic-ma/authority/current.json",
+        "candidate_authority_sha256": "a" * 64,
+    }
+    assert hashlib.sha256(
+        runner.production_handoff_deployment_configuration_bytes(**host_values)
+    ).hexdigest() == "db3b74cb854913354c75559e69e7e69ea9157530ff2da5632881a20f03a534c5"
+
+
+def test_current_collection_binding_round_trips_as_v2(tmp_path: Path) -> None:
+    host_values = _synthetic_host_deployment_values(tmp_path)
+    collection_values = {
+        "collection_config_path": "/etc/market-aligner/collection.yaml",
+        "collection_config_sha256": "b" * 64,
+        "collection_config_file_sha256": "c" * 64,
+    }
+    raw = runner.production_handoff_deployment_configuration_bytes(
+        **host_values, **collection_values
+    )
+    document = json.loads(raw)
+
+    assert document["schema_version"] == runner._DEPLOYMENT_SCHEMA_V2
+    assert document["collection_config_path"] == collection_values["collection_config_path"]
+    assert document["collection_config_sha256"] != document[
+        "collection_config_file_sha256"
+    ]
+    assert runner._parse_deployment_configuration(raw) == hashlib.sha256(raw).hexdigest()
+
+
+_HOST_DEPLOYMENT_FIELDS = (
+    "data_home",
+    "repository_root",
+    "output_root",
+    "candidate_authority_path",
+    "candidate_authority_sha256",
+)
+_COLLECTION_DEPLOYMENT_FIELDS = (
+    "collection_config_path",
+    "collection_config_sha256",
+    "collection_config_file_sha256",
+)
+
+
+@pytest.mark.parametrize(
+    "provided_fields",
+    [
+        fields
+        for count in range(1, len(_HOST_DEPLOYMENT_FIELDS))
+        for fields in combinations(_HOST_DEPLOYMENT_FIELDS, count)
+    ],
+)
+def test_partial_host_deployment_bundles_refuse(
+    tmp_path: Path, provided_fields: tuple[str, ...]
+) -> None:
+    values = _synthetic_host_deployment_values(tmp_path)
+    with pytest.raises(runner.ProductionHandoffDeploymentError):
+        runner.production_handoff_deployment_configuration_bytes(
+            **{key: values[key] for key in provided_fields}
+        )
+
+
+@pytest.mark.parametrize(
+    "provided_fields",
+    [
+        fields
+        for count in range(1, len(_COLLECTION_DEPLOYMENT_FIELDS))
+        for fields in combinations(_COLLECTION_DEPLOYMENT_FIELDS, count)
+    ],
+)
+def test_partial_collection_binding_refuses(
+    tmp_path: Path, provided_fields: tuple[str, ...]
+) -> None:
+    values = {
+        "collection_config_path": "/etc/market-aligner/collection.yaml",
+        "collection_config_sha256": "b" * 64,
+        "collection_config_file_sha256": "c" * 64,
+    }
+    arguments = _synthetic_host_deployment_values(tmp_path)
+    arguments.update({key: values[key] for key in provided_fields})
+    with pytest.raises(runner.ProductionHandoffDeploymentError):
+        runner.production_handoff_deployment_configuration_bytes(**arguments)
+
+
+def test_current_collection_binding_requires_all_host_values() -> None:
+    with pytest.raises(
+        runner.ProductionHandoffDeploymentError,
+        match="all five host-specific authority values",
+    ):
+        runner.production_handoff_deployment_configuration_bytes(
+            collection_config_path="/etc/market-aligner/collection.yaml",
+            collection_config_sha256="b" * 64,
+            collection_config_file_sha256="c" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("collection_config_sha256", True),
+        ("collection_config_sha256", "B" * 64),
+        ("collection_config_sha256", "g" * 64),
+        ("collection_config_file_sha256", True),
+        ("collection_config_file_sha256", "C" * 64),
+        ("collection_config_file_sha256", "z" * 64),
+    ],
+)
+def test_current_collection_binding_rejects_invalid_hashes(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    arguments = _synthetic_host_deployment_values(tmp_path)
+    arguments.update(
+        {
+            "collection_config_path": "/etc/market-aligner/collection.yaml",
+            "collection_config_sha256": "b" * 64,
+            "collection_config_file_sha256": "c" * 64,
+        }
+    )
+    arguments[field] = value
+    with pytest.raises(runner.ProductionHandoffDeploymentError):
+        runner.production_handoff_deployment_configuration_bytes(**arguments)
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "relative/collection.yaml",
+        "/",
+        "/var/../etc/collection.yaml",
+        "/var//etc/collection.yaml",
+        "/var/./etc/collection.yaml",
+        "/var/etc/",
+        "//a/b",
+    ),
+)
+def test_current_collection_binding_rejects_noncanonical_paths(
+    tmp_path: Path, path: str
+) -> None:
+    arguments = _synthetic_host_deployment_values(tmp_path)
+    arguments.update(
+        {
+            "collection_config_path": path,
+            "collection_config_sha256": "b" * 64,
+            "collection_config_file_sha256": "c" * 64,
+        }
+    )
+    with pytest.raises(runner.ProductionHandoffDeploymentError):
+        runner.production_handoff_deployment_configuration_bytes(**arguments)
+
+
+def test_v1_binding_and_unknown_schema_are_rejected_when_changed() -> None:
+    legacy = json.loads(runner.production_handoff_deployment_configuration_bytes())
+    changed_legacy = dict(legacy)
+    changed_legacy["collection_config_path"] = "/etc/market-aligner/collection.yaml"
+    changed_legacy["collection_config_sha256"] = "b" * 64
+    changed_legacy["collection_config_file_sha256"] = "c" * 64
+    with pytest.raises(
+        runner.ProductionHandoffDeploymentError,
+        match="trust or code identity differs",
+    ):
+        runner._parse_deployment_configuration(canonical_json_bytes(changed_legacy))
+
+    unknown_schema = dict(legacy)
+    unknown_schema["schema_version"] = "jaa.production-market-handoff-deployment.v3"
+    with pytest.raises(
+        runner.ProductionHandoffDeploymentError,
+        match="trust or code identity differs",
+    ):
+        runner._parse_deployment_configuration(canonical_json_bytes(unknown_schema))
+
+
+def test_v2_still_requires_the_fixed_trust_identity(tmp_path: Path) -> None:
+    arguments = _synthetic_host_deployment_values(tmp_path)
+    arguments.update(
+        {
+            "collection_config_path": "/etc/market-aligner/collection.yaml",
+            "collection_config_sha256": "b" * 64,
+            "collection_config_file_sha256": "c" * 64,
+        }
+    )
+    document = json.loads(
+        runner.production_handoff_deployment_configuration_bytes(**arguments)
+    )
+    document["trust_root_id"] = "untrusted-root"
+    with pytest.raises(
+        runner.ProductionHandoffDeploymentError,
+        match="trust or code identity differs",
+    ):
+        runner._parse_deployment_configuration(canonical_json_bytes(document))
 
 
 def test_host_deployment_configuration_requires_all_authority_values(

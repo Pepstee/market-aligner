@@ -338,6 +338,17 @@ def main(argv: list[str] | None = None) -> int:
         "--candidate-authority-sha256", help="SHA-256 of the candidate authority"
     )
     parser.add_argument(
+        "--collection-config-path", help="absolute path to the bound collection config"
+    )
+    parser.add_argument(
+        "--collection-config-sha256",
+        help="semantic SHA-256 of the collection configuration",
+    )
+    parser.add_argument(
+        "--collection-config-file-sha256",
+        help="exact file-byte SHA-256 of the collection configuration",
+    )
+    parser.add_argument(
         "--preparation-data-home", help="host-private preparation data root"
     )
     parser.add_argument(
@@ -383,6 +394,20 @@ def main(argv: list[str] | None = None) -> int:
             "host deployment requires --data-home, --repository-root, --output-root, "
             "--candidate-authority-path and --candidate-authority-sha256 together"
         )
+    collection_values = (
+        args.collection_config_path,
+        args.collection_config_sha256,
+        args.collection_config_file_sha256,
+    )
+    custom_collection = any(value is not None for value in collection_values)
+    if custom_collection and not all(value is not None for value in collection_values):
+        parser.error(
+            "collection configuration requires --collection-config-path, "
+            "--collection-config-sha256 and --collection-config-file-sha256 together"
+        )
+    if custom_collection and not custom_handoff:
+        parser.error("current collection configuration requires all five host options")
+    custom_handoff = custom_handoff or custom_collection
     preparation_host_values = {
         "data_home": args.preparation_data_home,
         "repository_root": args.preparation_repository_root,
@@ -438,6 +463,9 @@ def main(argv: list[str] | None = None) -> int:
             output_root=args.output_root,
             candidate_authority_path=args.candidate_authority_path,
             candidate_authority_sha256=args.candidate_authority_sha256,
+            collection_config_path=args.collection_config_path,
+            collection_config_sha256=args.collection_config_sha256,
+            collection_config_file_sha256=args.collection_config_file_sha256,
         )
         if custom_handoff
         else production_handoff_deployment_configuration_bytes()

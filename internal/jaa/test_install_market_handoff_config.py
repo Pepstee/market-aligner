@@ -234,6 +234,85 @@ def test_print_config_cli_accepts_complete_host_deployment(capsys, tmp_path: Pat
     )
 
 
+def test_print_config_cli_accepts_current_collection_binding(
+    capsys, tmp_path: Path
+) -> None:
+    values = {
+        "data_home": tmp_path / "private-state",
+        "repository_root": tmp_path / "deployed-repository",
+        "output_root": tmp_path / "private-outbox",
+        "candidate_authority_path": tmp_path / "private" / "candidate.json",
+        "candidate_authority_sha256": "a" * 64,
+        "collection_config_path": "/etc/market-aligner/collection.yaml",
+        "collection_config_sha256": "b" * 64,
+        "collection_config_file_sha256": "c" * 64,
+    }
+    arguments = ["--print-config"]
+    for key, value in values.items():
+        arguments.extend(("--" + key.replace("_", "-"), str(value)))
+
+    assert installer.main(arguments) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.encode() == runner.production_handoff_deployment_configuration_bytes(
+        **values
+    )
+    assert runner._parse_deployment_configuration(captured.out.encode()) == (
+        hashlib.sha256(captured.out.encode()).hexdigest()
+    )
+
+
+def test_collection_options_require_all_three_cli_values(capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
+        installer.main(
+            ["--print-config", "--collection-config-path", "/etc/collection.yaml"]
+        )
+    assert raised.value.code == 2
+    assert "requires --collection-config-path" in capsys.readouterr().err
+
+
+def test_collection_options_require_all_five_host_values(capsys) -> None:
+    arguments = [
+        "--print-config",
+        "--collection-config-path",
+        "/etc/collection.yaml",
+        "--collection-config-sha256",
+        "b" * 64,
+        "--collection-config-file-sha256",
+        "c" * 64,
+    ]
+    with pytest.raises(SystemExit) as raised:
+        installer.main(arguments)
+    assert raised.value.code == 2
+    assert "requires all five host options" in capsys.readouterr().err
+
+
+def test_collection_options_cannot_be_combined_with_preparation_action(capsys) -> None:
+    arguments = [
+        "--print-preparation-config",
+        "--data-home",
+        "/var/lib/ma/state",
+        "--repository-root",
+        "/srv/ma/source",
+        "--output-root",
+        "/var/lib/ma/outbox",
+        "--candidate-authority-path",
+        "/var/lib/ma/authority/candidate.json",
+        "--candidate-authority-sha256",
+        "a" * 64,
+        "--collection-config-path",
+        "/etc/ma/collection.yaml",
+        "--collection-config-sha256",
+        "b" * 64,
+        "--collection-config-file-sha256",
+        "c" * 64,
+    ]
+    with pytest.raises(SystemExit) as raised:
+        installer.main(arguments)
+    assert raised.value.code == 2
+    assert "cannot be used for preparation" in capsys.readouterr().err
+
+
 def test_host_deployment_cli_rejects_partial_configuration(capsys) -> None:
     with pytest.raises(SystemExit) as raised:
         installer.main(["--print-config", "--data-home", "/tmp/ma-state"])

@@ -4026,9 +4026,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_handoff_runner.py": {
-    "mtime": 1790669915.31642,
-    "seen": 1790775868.5198534,
-    "ast_hash": "7e8667c4ab84b32f61bda8052a7d0af2",
+    "mtime": 1791253543.0198352,
+    "seen": 1791253826.2874615,
+    "ast_hash": "143fe7e4adef99c2db2552e84108d7ab",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_preparation_runner.py": {
@@ -4104,9 +4104,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/install_market_handoff_config.py": {
-    "mtime": 1790690699.9081006,
-    "seen": 1790775868.5200691,
-    "ast_hash": "93bc20ef9ef886f1d1e2ed505a1ea50e",
+    "mtime": 1791253128.6678352,
+    "seen": 1791253826.287655,
+    "ast_hash": "a25971c95d40f2486b507daa51344b6c",
     "semantic_hash": ""
   },
   "internal/jaa/scripts/provision_gigabyte_authorities.py": {
@@ -4206,15 +4206,15 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_install_market_handoff_config.py": {
-    "mtime": 1790690552.5641057,
-    "seen": 1790775868.5201478,
-    "ast_hash": "360ffb8e19a69c42ba7fcb24c8e7a91c",
+    "mtime": 1791253331.4038336,
+    "seen": 1791253826.2877717,
+    "ast_hash": "ce18af60645131d81f096296d576357e",
     "semantic_hash": ""
   },
   "internal/jaa/test_production_handoff_runner.py": {
-    "mtime": 1790669915.32042,
-    "seen": 1790775868.5202837,
-    "ast_hash": "a4fe7cc57bbd343d7b9187d6512449e7",
+    "mtime": 1791253543.0558352,
+    "seen": 1791253826.2879143,
+    "ast_hash": "ff6dedd4589db2ffc31e286a8bc27ac3",
     "semantic_hash": ""
   },
   "internal/jaa/test_production_operational_surfaces.py": {
