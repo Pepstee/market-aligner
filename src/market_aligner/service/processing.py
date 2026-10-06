@@ -8,8 +8,9 @@ import os
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
+from market_aligner.applications.canonical import ContractValidationError
 from market_aligner.assessment.opportunity import (
     OpportunityAxisPolicy,
     derive_opportunity_axes,
@@ -77,6 +78,53 @@ def _atomic_json(path: Path, value: object) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+_ELIGIBILITY_REJECTION_SCHEMA = "market-aligner.vacancy-eligibility-rejection.v1"
+
+
+def _accept_or_archive_eligibility_rejection(
+    *,
+    facts: VacancyEligibilityFacts,
+    receipt: LLMReceipt,
+    source_sha256: str,
+    validate: Callable[[], VacancyEligibilityFacts],
+    archive: Callable[[str, dict[str, object]], None],
+    archive_status: dict[str, str],
+) -> VacancyEligibilityFacts:
+    try:
+        return validate()
+    except ContractValidationError as original:
+        document: dict[str, object] = {
+            "schema_version": _ELIGIBILITY_REJECTION_SCHEMA,
+            "authority_scope": "diagnostic_only",
+            "application_authority": False,
+            "source_content_sha256": source_sha256,
+            "facts": asdict(facts),
+            "receipt": asdict(receipt),
+            "error_type": type(original).__name__,
+            "error_message": str(original),
+        }
+        try:
+            payload = _canonical_bytes(document)
+        except Exception as secondary:
+            archive_status.update(
+                status="archive_failed",
+                failure_type=type(secondary).__name__,
+            )
+            raise original from None
+        digest = hashlib.sha256(payload).hexdigest()
+        archive_status["sha256"] = digest
+        try:
+            archive(digest, document)
+        except Exception as secondary:
+            archive_status.update(
+                status="archive_failed",
+                failure_type=type(secondary).__name__,
+            )
+            raise original from None
+        archive_status["status"] = "archived"
+        raise original
 
 
 def _receipt(receipt: LLMReceipt, *, task: str, inputs: Mapping[str, Any]) -> None:
@@ -414,6 +462,7 @@ class ProcessingService:
         completed = rejected = parked = errors = 0
         extraction_reuses = alignment_reuses = 0
         for raw in claimed:
+            eligibility_archive_status: dict[str, str] = {}
             try:
                 source_content_sha256 = str(raw.content_sha256)
                 prior = self.jobs.reusable_processing_result(
@@ -474,11 +523,22 @@ class ProcessingService:
                         task=VACANCY_ELIGIBILITY_FACTS_TASK,
                         inputs=eligibility_inputs,
                     )
-                    accept_vacancy_eligibility_facts(
-                        raw,
-                        eligibility_facts,
-                        eligibility_receipt,
-                        inputs=eligibility_inputs,
+                    _accept_or_archive_eligibility_rejection(
+                        facts=eligibility_facts,
+                        receipt=eligibility_receipt,
+                        source_sha256=str(raw.content_sha256),
+                        validate=lambda: accept_vacancy_eligibility_facts(
+                            raw,
+                            eligibility_facts,
+                            eligibility_receipt,
+                            inputs=eligibility_inputs,
+                        ),
+                        archive=lambda digest, document: _atomic_json(
+                            self.paths.state
+                            / f"vacancy-eligibility-rejection-{digest}.json",
+                            document,
+                        ),
+                        archive_status=eligibility_archive_status,
                     )
                     eligibility_status = "source_bound_extraction"
                 else:
@@ -601,6 +661,19 @@ class ProcessingService:
                 )
             except Exception as exc:
                 errors += 1
+                error = repr(exc)
+                if eligibility_archive_status.get("status") == "archived":
+                    error += (
+                        "; eligibility_rejection_archive=archived;sha256="
+                        + eligibility_archive_status["sha256"]
+                    )
+                elif eligibility_archive_status.get("status") == "archive_failed":
+                    error += (
+                        "; eligibility_rejection_archive=failed;failure_type="
+                        + eligibility_archive_status["failure_type"]
+                    )
+                    if "sha256" in eligibility_archive_status:
+                        error += ";sha256=" + eligibility_archive_status["sha256"]
                 self.jobs.fail_processing(
                     profile_id=profile_id,
                     track=track,
@@ -609,7 +682,7 @@ class ProcessingService:
                     source_content_sha256=str(raw.content_sha256),
                     processing_config_sha256=config_sha256,
                     worker_id=worker_id,
-                    error=repr(exc),
+                    error=error,
                 )
 
         with self.jobs.processing_report_snapshot(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 import hashlib
@@ -11,10 +11,13 @@ import sqlite3
 import stat
 import sys
 import tempfile
+import traceback
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from typing import Any, Mapping
 
+from market_aligner.applications.canonical import ContractValidationError
 from market_aligner.assessment.scoring import AssessmentAxes, FitStatus
 from market_aligner.applications.assessment_promotion import AssessmentPromotionError
 from market_aligner.assessment.geography import (
@@ -28,10 +31,16 @@ from market_aligner.llm.contracts import (
     EvidenceAlignment,
     EvidenceMatch,
     LLMReceipt,
+    LLMTransportReceipt,
     SemanticVacancyExtraction,
     VACANCY_ELIGIBILITY_FIELDS,
     VACANCY_ELIGIBILITY_FACTS_TASK,
+    VacancyEligibilityEvidence,
     VacancyEligibilityFacts,
+)
+from market_aligner.llm.pipeline import (
+    accept_vacancy_eligibility_facts,
+    vacancy_eligibility_input,
 )
 from market_aligner.profiler.schema import (
     CandidateProfile,
@@ -41,6 +50,7 @@ from market_aligner.profiler.schema import (
 )
 from market_aligner.profiler.store import ProfileStore
 from market_aligner.service.api import AssessmentRequest, MarketAlignerService
+from market_aligner.service import processing as processing_module
 from market_aligner.service.processing import ProcessingService
 from market_aligner.state.vacancies import JobDatabase
 
@@ -152,6 +162,42 @@ class LegacyFixtureSemanticWorker(FixtureSemanticWorker):
     def __init__(self) -> None:
         super().__init__()
         self.extract_vacancy_eligibility = None
+
+
+class UnsupportedQuoteFixtureSemanticWorker(FixtureSemanticWorker):
+    def extract_vacancy_eligibility(
+        self, raw_context: Mapping[str, Any]
+    ) -> tuple[VacancyEligibilityFacts, LLMReceipt]:
+        self.eligibility_extractions += 1
+        facts = VacancyEligibilityFacts(
+            source_content_sha256=str(raw_context["content_sha256"]),
+            work_jurisdiction=None,
+            required_residence=None,
+            sponsorship_available=True,
+            minimum_years_experience=None,
+            contract_type=None,
+            source_evidence=(
+                VacancyEligibilityEvidence(
+                    field="sponsorship_available",
+                    quote="We sponsor visas.",
+                ),
+            ),
+            unknown_fields=tuple(
+                sorted(set(VACANCY_ELIGIBILITY_FIELDS) - {"sponsorship_available"})
+            ),
+        )
+        receipt = LLMReceipt.bind(
+            receipt_id=f"eligibility-rejected-{self.eligibility_extractions}",
+            task=VACANCY_ELIGIBILITY_FACTS_TASK,
+            model="fixture-semantic-v1",
+            prompt_version="eligibility-v1",
+            inputs=raw_context,
+            output=facts,
+            created_at="2026-08-20T00:00:00Z",
+        )
+        self.rejected_facts = facts
+        self.rejected_receipt = receipt
+        return facts, receipt
 
 
 def _processing_fixture(root: Path, *, jobs: int = 1) -> tuple[str, Path]:
@@ -947,6 +993,259 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(1, recovered["shard_claimed"])
             self.assertEqual(0, recovered["errors"])
             self.assertEqual(1, recovered["ranked_count"])
+
+    def test_rejected_eligibility_payload_is_archived_and_replays_exact_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            worker = UnsupportedQuoteFixtureSemanticWorker()
+            service = ProcessingService(root, worker)
+
+            result = service.process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="worker-rejected-eligibility",
+                job_key="fixture:1",
+            )
+
+            self.assertEqual(1, result["errors"])
+            self.assertEqual(0, result["included"])
+            self.assertFalse(result["application_authority"])
+            self.assertEqual((1, 1, 0), (
+                worker.extractions,
+                worker.eligibility_extractions,
+                worker.alignments,
+            ))
+            with sqlite3.connect(service.jobs.path) as connection:
+                row = connection.execute(
+                    """SELECT status,error,result_json FROM processing_jobs
+                       WHERE profile_id=? AND track=? AND job_key=?
+                         AND processing_config_sha256=?""",
+                    (
+                        profile_id,
+                        "automation",
+                        "fixture:1",
+                        result["config_sha256"],
+                    ),
+                ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual("failed", row[0])
+            self.assertIsNone(row[2])
+            self.assertIn("eligibility_rejection_archive=archived", row[1])
+            self.assertIn("ContractValidationError", row[1])
+            self.assertIn(";sha256=", row[1])
+            digest = row[1].split(";sha256=", 1)[1].split(";", 1)[0]
+            self.assertEqual(64, len(digest))
+            self.assertTrue(all(character in "0123456789abcdef" for character in digest))
+
+            archive_path = (
+                service.paths.state / f"vacancy-eligibility-rejection-{digest}.json"
+            )
+            payload = archive_path.read_bytes()
+            self.assertEqual(digest, hashlib.sha256(payload).hexdigest())
+            self.assertEqual(0o600, stat.S_IMODE(archive_path.stat().st_mode))
+            document = json.loads(payload)
+            self.assertEqual(
+                {
+                    "schema_version",
+                    "authority_scope",
+                    "application_authority",
+                    "source_content_sha256",
+                    "facts",
+                    "receipt",
+                    "error_type",
+                    "error_message",
+                },
+                set(document),
+            )
+            self.assertEqual(
+                "market-aligner.vacancy-eligibility-rejection.v1",
+                document["schema_version"],
+            )
+            self.assertEqual("diagnostic_only", document["authority_scope"])
+            self.assertIs(document["application_authority"], False)
+            self.assertEqual(
+                json.loads(json.dumps(asdict(worker.rejected_facts))),
+                document["facts"],
+            )
+            self.assertEqual(
+                json.loads(json.dumps(asdict(worker.rejected_receipt))),
+                document["receipt"],
+            )
+            self.assertNotIn("profile", document)
+            self.assertNotIn("candidate_inputs", document)
+
+            with sqlite3.connect(service.jobs.path) as connection:
+                row = connection.execute(
+                    """SELECT board,job_id,url,fetched_at,raw_text,raw_json,content_hash
+                       FROM postings WHERE key=?""",
+                    ("fixture:1",),
+                ).fetchone()
+            self.assertIsNotNone(row)
+            raw = RawPosting(
+                board=row[0],
+                job_id=row[1],
+                url=row[2],
+                fetched_at=row[3] or "",
+                raw_text=row[4],
+                raw_json=json.loads(row[5]) if row[5] else None,
+                content_sha256=row[6],
+            )
+            facts_document = dict(document["facts"])
+            facts_document["source_evidence"] = tuple(
+                VacancyEligibilityEvidence(**dict(item))
+                for item in facts_document["source_evidence"]
+            )
+            facts_document["unknown_fields"] = tuple(facts_document["unknown_fields"])
+            replayed_facts = VacancyEligibilityFacts(**facts_document)
+            receipt_document = dict(document["receipt"])
+            if isinstance(receipt_document.get("transport"), dict):
+                receipt_document["transport"] = LLMTransportReceipt(
+                    **receipt_document["transport"]
+                )
+            replayed_receipt = LLMReceipt(**receipt_document)
+            with self.assertRaises(ContractValidationError) as replay_failure:
+                accept_vacancy_eligibility_facts(
+                    raw,
+                    replayed_facts,
+                    replayed_receipt,
+                    inputs=vacancy_eligibility_input(raw),
+                )
+            self.assertEqual(document["error_type"], type(replay_failure.exception).__name__)
+            self.assertEqual(document["error_message"], str(replay_failure.exception))
+            self.assertEqual(1, worker.eligibility_extractions)
+
+    def test_rejection_archive_failure_is_recorded_without_replacing_validation_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            worker = UnsupportedQuoteFixtureSemanticWorker()
+            service = ProcessingService(root, worker)
+            atomic_json = processing_module._atomic_json
+
+            def fail_rejection_archive(path: Path, value: object) -> None:
+                if path.name.startswith("vacancy-eligibility-rejection-"):
+                    raise PermissionError("secondary private path sentinel")
+                atomic_json(path, value)
+
+            with patch.object(
+                processing_module,
+                "_atomic_json",
+                side_effect=fail_rejection_archive,
+            ):
+                result = service.process(
+                    config,
+                    profile_id=profile_id,
+                    track="automation",
+                    worker_id="worker-rejected-archive-failure",
+                    job_key="fixture:1",
+                )
+
+            self.assertEqual(1, result["errors"])
+            self.assertEqual(0, result["included"])
+            with sqlite3.connect(service.jobs.path) as connection:
+                row = connection.execute(
+                    """SELECT status,error,result_json FROM processing_jobs
+                       WHERE profile_id=? AND track=? AND job_key=?
+                         AND processing_config_sha256=?""",
+                    (
+                        profile_id,
+                        "automation",
+                        "fixture:1",
+                        result["config_sha256"],
+                    ),
+                ).fetchone()
+            self.assertEqual("failed", row[0])
+            self.assertIsNone(row[2])
+            self.assertIn("ContractValidationError", row[1])
+            self.assertIn("eligibility_rejection_archive=failed", row[1])
+            self.assertIn("failure_type=PermissionError", row[1])
+            self.assertIn(";sha256=", row[1])
+            self.assertNotIn("secondary private path sentinel", row[1])
+            digest = row[1].split(";sha256=", 1)[1].split(";", 1)[0]
+            self.assertFalse(
+                (service.paths.state / f"vacancy-eligibility-rejection-{digest}.json").exists()
+            )
+            self.assertEqual(1, worker.eligibility_extractions)
+
+    def test_rejection_capture_suppresses_secondary_exception_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _processing_fixture(root)
+            worker = UnsupportedQuoteFixtureSemanticWorker()
+            raw = JobDatabase(root / "state" / "vacancies.sqlite3").load_current_raw_snapshot(
+                "fixture:1"
+            )
+            inputs = vacancy_eligibility_input(raw)
+            facts, receipt = worker.extract_vacancy_eligibility(inputs)
+            real_canonical_bytes = processing_module._canonical_bytes
+
+            for secondary_stage, secondary_type in (
+                ("serialization", PermissionError),
+                ("archive", OSError),
+            ):
+                with self.subTest(secondary_stage=secondary_stage):
+                    original = ContractValidationError("original validation failure")
+                    archive_status: dict[str, str] = {}
+                    validation_calls = 0
+                    archive_calls = 0
+
+                    def validate() -> VacancyEligibilityFacts:
+                        nonlocal validation_calls
+                        validation_calls += 1
+                        raise original
+
+                    def archive(digest: str, document: dict[str, object]) -> None:
+                        nonlocal archive_calls
+                        archive_calls += 1
+                        raise secondary_type("secondary private path sentinel")
+
+                    def fail_serialization(value: object) -> bytes:
+                        if (
+                            isinstance(value, dict)
+                            and value.get("schema_version")
+                            == "market-aligner.vacancy-eligibility-rejection.v1"
+                        ):
+                            raise secondary_type("secondary private path sentinel")
+                        return real_canonical_bytes(value)
+
+                    if secondary_stage == "serialization":
+                        context = patch.object(
+                            processing_module,
+                            "_canonical_bytes",
+                            side_effect=fail_serialization,
+                        )
+                    else:
+                        context = patch.object(
+                            processing_module,
+                            "_canonical_bytes",
+                            wraps=real_canonical_bytes,
+                        )
+                    with context:
+                        with self.assertRaises(ContractValidationError) as caught:
+                            processing_module._accept_or_archive_eligibility_rejection(
+                                facts=facts,
+                                receipt=receipt,
+                                source_sha256=str(raw.content_sha256),
+                                validate=validate,
+                                archive=archive,
+                                archive_status=archive_status,
+                            )
+                    self.assertIs(caught.exception, original)
+                    self.assertTrue(original.__suppress_context__)
+                    self.assertNotIn(
+                        "secondary private path sentinel",
+                        "".join(traceback.format_exception(original)),
+                    )
+                    self.assertEqual(1, validation_calls)
+                    self.assertEqual(1 if secondary_stage == "archive" else 0, archive_calls)
+                    self.assertEqual("archive_failed", archive_status["status"])
+                    self.assertEqual(secondary_type.__name__, archive_status["failure_type"])
+                    self.assertEqual(
+                        secondary_stage == "archive",
+                        "sha256" in archive_status,
+                    )
 
     def test_processing_leases_are_shard_safe(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
