@@ -22,6 +22,7 @@ from market_aligner.llm.contracts import LLMReceipt, LLMTransportReceipt, canoni
 from market_aligner.profiler.fact_packet import (
     compile_selected_facts,
     serialize_projection_documents,
+    validate_current_profile_projection_receipt,
 )
 from market_aligner.profiler.recovery_manifest import select_recovered_input_descriptors
 from market_aligner.profiler.store import (
@@ -47,6 +48,9 @@ _REQUIRED_DESCRIPTOR_KINDS = (
     _EVIDENCE_DESCRIPTOR_KIND,
 )
 _CURRENT_ACTIVATION_NAME = re.compile(r"activation-[0-9a-f]{32}\.json\Z")
+_CURRENT_PROJECTION_AUTHORITY_NAME = re.compile(
+    r"projection-([0-9a-f]{32})-candidate-authority\.json\Z"
+)
 _INVALID_PROJECTION = "current_profile_projection_invalid"
 _CURRENT_INVALIDATING_RELATIONSHIPS = frozenset(
     {"retracts", "corrects", "contradicts", "limits"}
@@ -772,6 +776,112 @@ def write_current_profile_projection_documents(
         for directory in reversed(directories):
             directory.close()
         root_chain.close()
+
+
+def read_current_profile_projection_bundle(
+    *,
+    data_home: str | Path | None,
+    profile_id: str,
+    candidate_authority_path: str | Path,
+    expected_candidate_authority_sha256: str,
+    profile_sha256: str,
+    evidence_ledger_sha256: str,
+) -> tuple[dict[str, bytes], dict[str, Any]]:
+    """Read and validate the immutable siblings selected by the pinned authority."""
+    root_chain = None
+    directories: list[_RetainedDirectory] = []
+    opened_fds: list[int] = []
+    try:
+        validate_profile_id(profile_id)
+        for digest in (
+            expected_candidate_authority_sha256,
+            profile_sha256,
+            evidence_ledger_sha256,
+        ):
+            if type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ValueError(_INVALID_PROJECTION)
+        authority_path = Path(candidate_authority_path)
+        expected_directory = (
+            ProductPaths.resolve(data_home).outputs
+            / "current-profile-facts"
+            / profile_id
+        )
+        if (
+            not authority_path.is_absolute()
+            or ".." in authority_path.parts
+            or authority_path.parent != expected_directory
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        match = _CURRENT_PROJECTION_AUTHORITY_NAME.fullmatch(authority_path.name)
+        if match is None:
+            raise ValueError(_INVALID_PROJECTION)
+        bundle_id = match.group(1)
+        prefix = f"projection-{bundle_id}-"
+        filenames = {
+            "evidence_packet_bytes": f"{prefix}evidence-packet.json",
+            "candidate_projection_bytes": f"{prefix}candidate-projection.json",
+            "candidate_authority_bytes": authority_path.name,
+            "profile_projection_receipt_bytes": f"{prefix}projection-receipt.json",
+        }
+
+        root_chain = open_existing_private_data_root(data_home)
+        parent_fd = root_chain.deepest_fd
+        for name, label in (
+            ("outputs", "data_home/outputs"),
+            ("current-profile-facts", "current profile fact artifacts"),
+            (profile_id, "current profile fact profile directory"),
+        ):
+            directory = _RetainedDirectory(
+                parent_fd=parent_fd,
+                name=name,
+                path_label=label,
+                private=True,
+            )
+            directories.append(directory)
+            directory.initial_proof()
+            parent_fd = directory.fd
+
+        documents: dict[str, bytes] = {}
+        for key, filename in filenames.items():
+            value, _identity_value, descriptor = _open_verified_leaf(
+                directories[-1].fd,
+                filename,
+                _MAX_CURRENT_ACTIVATION_BYTES,
+            )
+            opened_fds.append(descriptor)
+            documents[key] = value
+        if _sha256(documents["candidate_authority_bytes"]) != (
+            expected_candidate_authority_sha256
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+        receipt = _strict_json_loads(
+            documents["profile_projection_receipt_bytes"]
+        )
+        if type(receipt) is not dict or type(receipt.get("activation_sha256")) is not str:
+            raise ValueError(_INVALID_PROJECTION)
+        validate_current_profile_projection_receipt(
+            documents["profile_projection_receipt_bytes"],
+            profile_id=profile_id,
+            activation_sha256=receipt["activation_sha256"],
+            evidence_packet_bytes=documents["evidence_packet_bytes"],
+            candidate_projection_bytes=documents["candidate_projection_bytes"],
+            candidate_authority_bytes=documents["candidate_authority_bytes"],
+            profile_sha256=profile_sha256,
+            evidence_ledger_sha256=evidence_ledger_sha256,
+        )
+        root_chain.revalidate()
+        for directory in directories:
+            directory.revalidate()
+        return documents, receipt
+    except (KeyError, OSError, TypeError, ValueError, UnicodeDecodeError, RecursionError):
+        raise ValueError(_INVALID_PROJECTION) from None
+    finally:
+        for descriptor in opened_fds:
+            os.close(descriptor)
+        for directory in reversed(directories):
+            directory.close()
+        if root_chain is not None:
+            root_chain.close()
 
 
 def _evidence_spans(

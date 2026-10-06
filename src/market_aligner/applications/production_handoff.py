@@ -32,6 +32,9 @@ from market_aligner.assessment.geography import GeographyMatch, SelectionDecisio
 from market_aligner.assessment.scoring import ScoringParams
 from market_aligner.collectors.evidence import public_listing_bytes
 from market_aligner.profiler.intent import serialize_candidate_intent
+from market_aligner.profiler.current_activation import (
+    read_current_profile_projection_bundle,
+)
 from market_aligner.research.models import (
     ClaimSupport,
     ResearchClaim,
@@ -57,6 +60,9 @@ PRODUCTION_CANDIDATE_AUTHORITY_SHA256 = (
     "85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9"
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_CURRENT_PROJECTION_AUTHORITY_NAME = re.compile(
+    r"projection-[0-9a-f]{32}-candidate-authority\.json\Z"
+)
 
 
 class ProductionHandoffError(ValueError):
@@ -1334,18 +1340,6 @@ def _build_production_handoff_from_authenticated_time(
     projection_path = profile_directory / "projection-receipt.json"
     _profile_bytes = _read_regular(profile_path, "canonical profile")
     evidence_bytes = _read_regular(evidence_path, "canonical evidence ledger")
-    projection = _document(
-        _read_regular(projection_path, "canonical projection receipt"),
-        "canonical projection receipt",
-    )
-    if (
-        projection.get("schema") != "market-aligner.canonical-profile-projection.v1"
-        or projection.get("profile_id") != profile_id
-        or projection.get("release_authority") is not False
-    ):
-        raise ProductionHandoffError(
-            "candidate_projection", "canonical profile projection receipt differs"
-        )
     authority_path = deployment.candidate_authority_path
     repository = deployment.repository_root.absolute()
     if authority_path == repository or repository in authority_path.parents:
@@ -1353,9 +1347,98 @@ def _build_production_handoff_from_authenticated_time(
             "candidate_authority_location",
             "protected candidate authority must be outside the repository",
         )
-    candidate_authority_bytes = _protected_candidate_authority(
-        authority_path, projection, deployment.candidate_authority_sha256
+    current_projection_directory = (
+        service.profiles.paths.outputs / "current-profile-facts" / profile_id
     )
+    if authority_path.parent == current_projection_directory:
+        if _CURRENT_PROJECTION_AUTHORITY_NAME.fullmatch(authority_path.name) is None:
+            raise ProductionHandoffError(
+                "candidate_projection", "current profile projection bundle name differs"
+            )
+        authority_probe = _read_regular(
+            authority_path, "protected candidate authority", private=True
+        )
+        if _sha(authority_probe) != deployment.candidate_authority_sha256:
+            raise ProductionHandoffError(
+                "candidate_authority_identity",
+                "protected candidate authority differs from deployment-owned pin",
+            )
+        authority_document = _document(
+            authority_probe, "protected candidate authority"
+        )
+        if authority_document.get("source_kind") != "approved_current_profile_activation":
+            raise ProductionHandoffError(
+                "candidate_projection", "current profile authority source differs"
+            )
+        snapshot = service.profiles.coherent_snapshot(
+            profile_id, require_committed_generation=True
+        )
+        try:
+            if (
+                snapshot.profile != profile
+                or snapshot.hashes.get("profile_file_sha256") != _sha(_profile_bytes)
+                or snapshot.hashes.get("evidence_file_sha256")
+                != _sha(evidence_bytes)
+            ):
+                raise ProductionHandoffError(
+                    "candidate_projection",
+                    "live profile snapshot differs from canonical files",
+                )
+            try:
+                current_documents, projection = read_current_profile_projection_bundle(
+                    data_home=deployment.data_home,
+                    profile_id=profile_id,
+                    candidate_authority_path=authority_path,
+                    expected_candidate_authority_sha256=(
+                        deployment.candidate_authority_sha256
+                    ),
+                    profile_sha256=snapshot.hashes["profile_sha256"],
+                    evidence_ledger_sha256=snapshot.hashes[
+                        "evidence_ledger_sha256"
+                    ],
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProductionHandoffError(
+                    "candidate_projection",
+                    "current profile projection receipt differs",
+                ) from exc
+            candidate_authority_bytes = _protected_candidate_authority(
+                authority_path,
+                projection,
+                deployment.candidate_authority_sha256,
+            )
+            if current_documents["candidate_authority_bytes"] != candidate_authority_bytes:
+                raise ProductionHandoffError(
+                    "candidate_authority_identity",
+                    "current profile projection authority differs from its pinned file",
+                )
+            snapshot.revalidate()
+        finally:
+            snapshot.close()
+    else:
+        projection = _document(
+            _read_regular(projection_path, "canonical projection receipt"),
+            "canonical projection receipt",
+        )
+        if (
+            projection.get("schema")
+            != "market-aligner.canonical-profile-projection.v1"
+            or projection.get("profile_id") != profile_id
+            or projection.get("release_authority") is not False
+        ):
+            raise ProductionHandoffError(
+                "candidate_projection", "canonical profile projection receipt differs"
+            )
+        candidate_authority_bytes = _protected_candidate_authority(
+            authority_path, projection, deployment.candidate_authority_sha256
+        )
+        if _document(
+            candidate_authority_bytes, "protected candidate authority"
+        ).get("source_kind") == "approved_current_profile_activation":
+            raise ProductionHandoffError(
+                "candidate_projection",
+                "current profile authority is not in its pinned projection bundle",
+            )
 
     try:
         promotion_row = service.assessments.processing_promotion(

@@ -4266,9 +4266,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/applications/production_handoff.py": {
-    "mtime": 1790669915.32042,
-    "seen": 1790775868.5203204,
-    "ast_hash": "e5b2f54af347383fd872d88a73d3db0e",
+    "mtime": 1791269127.6755645,
+    "seen": 1791269554.1433864,
+    "ast_hash": "c280eb9a3d89e0f6feed0ce89537bb17",
     "semantic_hash": ""
   },
   "src/market_aligner/assessment/geography.py": {
@@ -4716,15 +4716,15 @@
     "semantic_hash": ""
   },
   "src/market_aligner/profiler/current_activation.py": {
-    "mtime": 1791265312.2796617,
-    "seen": 1791265778.8477376,
-    "ast_hash": "8216a70880813a60ede9cb1fb2618b75",
+    "mtime": 1791269127.6355643,
+    "seen": 1791269554.1434448,
+    "ast_hash": "04fbad71e238047b5a75e470822ac048",
     "semantic_hash": ""
   },
   "src/market_aligner/profiler/fact_packet.py": {
-    "mtime": 1791265083.0236661,
-    "seen": 1791265778.8477387,
-    "ast_hash": "4ae63276f235399e6f10f47233f43dde",
+    "mtime": 1791268777.5355906,
+    "seen": 1791269554.1434455,
+    "ast_hash": "9f3aff293a084907bc4dd767f94f8d33",
     "semantic_hash": ""
   },
   "src/market_aligner/profiler/recovery_manifest.py": {
@@ -4734,15 +4734,15 @@
     "semantic_hash": ""
   },
   "tests/test_current_activation.py": {
-    "mtime": 1791265312.3156617,
-    "seen": 1791265778.8477771,
-    "ast_hash": "c5a79330dbfb2817aa0620330e382d75",
+    "mtime": 1791268951.4635766,
+    "seen": 1791269554.1434834,
+    "ast_hash": "a5d89401248a9df6668912babb6bdb38",
     "semantic_hash": ""
   },
   "tests/test_current_fact_packet.py": {
-    "mtime": 1791265100.5916684,
-    "seen": 1791265778.847778,
-    "ast_hash": "8ffcca053d5d9f7a4910dcbe66e8e2c6",
+    "mtime": 1791269085.2875698,
+    "seen": 1791269554.143484,
+    "ast_hash": "ff3f9ecfea20667890cc7c76450782b1",
     "semantic_hash": ""
   },
   "tests/test_current_profile_fact_selection.py": {

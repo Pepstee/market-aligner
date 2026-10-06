@@ -1,11 +1,11 @@
 {
-  "community_count": 30093,
-  "edge_count": 74497,
-  "node_count": 56851,
+  "community_count": 30098,
+  "edge_count": 74517,
+  "node_count": 56853,
   "outputs": {
-    ".graphify_labels.json": "9c4714e0fd182b69f4705b8b70ad5944e82ef45850dfb4bf14b9c038341d2809",
-    "GRAPH_REPORT.md": "7d8da83828097477e831950290e91534711988e09a5b6976ef34d1ac2c13dd6e",
-    "graph.json": "dcf1c72d5c51c488ffa4338c9a524f947312935e9d1c6acf32e951a59ab0a675"
+    ".graphify_labels.json": "06182011cc9c9cde873dc8fe8c7ccd87fe46c70a6076cd64287479d247d37bc7",
+    "GRAPH_REPORT.md": "f70b05b383333bbb70e1aa9920dd39fa7573b50b4a98aeba15aa1713f343d03f",
+    "graph.json": "b8e2a5e181685e60b24dfbf12493ee4830c62c6cdc9e3ceefa2de045a8454b7a"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "e0f5f63e600103ab522985c01ae60de7137f1b70",
+  "source_base_commit": "af93e198c9bb96695f4ffd2079fd026310ba5232",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -708,7 +708,7 @@
     "src/market_aligner/applications/jaa.py": "fce5c2bcc41486096f119f49838c23f22fad5bb7aedfae3ca9b0637d47af86b5",
     "src/market_aligner/applications/legacy_v0.py": "826747e9e8049709537c95d8674a95537148b4743a1652feecdca4d18d16de67",
     "src/market_aligner/applications/producer.py": "e67ad464e21f5131a67fb559b1222e2a6b73b678654a65de90e8562334b320d7",
-    "src/market_aligner/applications/production_handoff.py": "3749815c0ca2f5ec9c497775089b637d13aff0a4390d9b1b591ddf97d3bd5968",
+    "src/market_aligner/applications/production_handoff.py": "4aeac3bbced927de85d2356e516033dd04d95092801473ce18ff6bdfafc64960",
     "src/market_aligner/assessment/__init__.py": "95adae9b08a7013ca9649fc47d73f425772f98b9e7dd3f6afd488e4513b18d58",
     "src/market_aligner/assessment/calibration.py": "722284df4decb114411b39848e950510b4fdef6c9d9172a6bdc5c5f268467a98",
     "src/market_aligner/assessment/eligibility.py": "7669c4e15c1d85f18d474d8b72e5229e44a78c42fd9e7319d79635cc857a0729",
@@ -775,8 +775,8 @@
     "src/market_aligner/normalisation/records.py": "3bb66a0e77d99969110bce96b3286c527b2f1aa875a8aa0727e8a9b822013c60",
     "src/market_aligner/processing.py": "bbc99148d123c38f6c02a37318a245b68a2889ab812b76bd53057a476f514b2e",
     "src/market_aligner/profiler/__init__.py": "791a751152924faa89777e3d245359f2255425afdedd469b696566898d79f15c",
-    "src/market_aligner/profiler/current_activation.py": "5cab586a051c9754708b77bafcb37a366fba258f981058c026c35101027fe3e1",
-    "src/market_aligner/profiler/fact_packet.py": "46eabda8d237bbed4bc1b862cc7deb99597f265f1a6cc14fa92d557282dad8c7",
+    "src/market_aligner/profiler/current_activation.py": "afe1466bddabb91c25ec0e5246302a9681050d2d33500529d33b5e124c1f0046",
+    "src/market_aligner/profiler/fact_packet.py": "2b42aee626242a7062ccb1fc15d1e1f35673a3141d62be3532e362e29141f517",
     "src/market_aligner/profiler/importers.py": "319fe742e445b5eb49b341ee61b6ebbaaa46acf1cf2d003a7d9e833a32c48c91",
     "src/market_aligner/profiler/intent.py": "87aceccbf7e6908ef7bcd9324f7aee57b144f1a6e8294ae16ce7a1a3ffb2a635",
     "src/market_aligner/profiler/intent_store.py": "8d07195c78e12ddc8b070bc1d8cb7625f8ce4c15a9fec9b0679c0146e5394675",
@@ -821,8 +821,8 @@
     "tests/test_collection.py": "b638191baebf61bfd115d951846460baf785ed0f394114770767ef41273a09f7",
     "tests/test_collector_evidence.py": "8d1016af83a62bb057b00ca66fbac93ab369985ec7b736f35af8da4196dce65a",
     "tests/test_config.py": "bb5d7d812d7c3f6e56571fe0431ee72dc13f7f3329a63ec0bcc52f64e08dd599",
-    "tests/test_current_activation.py": "6e720a24954c3c7e674b6da640217e96497367700248f05467e621ad7218181c",
-    "tests/test_current_fact_packet.py": "15bcf9c6eee68dcc7637adb01eedd2bdef80e7f7d113bc31874b4f011701ab2f",
+    "tests/test_current_activation.py": "30857806420bca286d5d67803af9b7c7c3b5c9d0ae6f929cce2a90fc5b34b6c9",
+    "tests/test_current_fact_packet.py": "13c152ab8517542be2f96accd24ad55d0abd2f975db93138bc0d7ab815b865df",
     "tests/test_current_profile_fact_selection.py": "25dcc0ea823b3e39afd6fdc401534ee31aa3532bdfa5a62e04206a12c8acf207",
     "tests/test_fetch_control.py": "3fc4cca7d40442812ae51ea7f3b0cef8ed814fbbbbf270772bd06f4939308ea3",
     "tests/test_graphify_freshness.py": "7e3969d8ae8ef074007396993d22943b5a558d5713da5bb18805bc273034f913",

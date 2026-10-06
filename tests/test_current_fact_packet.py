@@ -195,6 +195,7 @@ def test_projection_documents_bind_profile_and_ledger_to_live_receipt():
 
     assert (records, selection, bindings, source_hashes) == original_inputs
     authority = json.loads(documents["candidate_authority_bytes"])
+    projection = json.loads(documents["candidate_projection_bytes"])
     receipt = json.loads(documents["profile_projection_receipt_bytes"])
     assert authority["profile_binding"] == {
         "profile_id": profile_id,
@@ -204,6 +205,10 @@ def test_projection_documents_bind_profile_and_ledger_to_live_receipt():
     assert authority["application_authority"] is False
     assert authority["release_authority"] is False
     assert authority["submission_authority"] is False
+    assert projection["source_hashes"]["profile"] == source_hashes["profile"]
+    assert projection["source_hashes"]["evidence"] == source_hashes["evidence"]
+    assert authority["profile_binding"]["profile_sha256"] == profile_sha256
+    assert authority["profile_binding"]["evidence_ledger_sha256"] == evidence_ledger_sha256
     validate_current_profile_binding(
         receipt,
         authority,
@@ -222,6 +227,107 @@ def test_projection_documents_bind_profile_and_ledger_to_live_receipt():
         evidence_ledger_sha256=evidence_ledger_sha256,
     )
     assert validated == receipt
+    tampered_packet = json.loads(packet_bytes)
+    tampered_packet["statements"][0]["statement"] += " altered"
+    tampered_packet_bytes = (
+        json.dumps(
+            tampered_packet,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    tampered_receipt = dict(receipt)
+    tampered_receipt["evidence_packet_sha256"] = hashlib.sha256(
+        tampered_packet_bytes
+    ).hexdigest()
+    tampered_receipt_bytes = (
+        json.dumps(
+            tampered_receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    with pytest.raises(
+        ValueError, match="^current_profile_projection_receipt_invalid$"
+    ):
+        validate_current_profile_projection_receipt(
+            tampered_receipt_bytes,
+            profile_id=profile_id,
+            activation_sha256=activation_sha256,
+            evidence_packet_bytes=tampered_packet_bytes,
+            candidate_projection_bytes=documents["candidate_projection_bytes"],
+            candidate_authority_bytes=documents["candidate_authority_bytes"],
+            profile_sha256=profile_sha256,
+            evidence_ledger_sha256=evidence_ledger_sha256,
+        )
+    for source_key in ("recovery_manifest", "profile", "evidence"):
+        mismatched_projection = deepcopy(projection)
+        mismatched_projection["source_hashes"][source_key] = "a" * 64
+        projection_body = dict(mismatched_projection)
+        projection_body.pop("projection_sha256")
+        projection_sha256 = hashlib.sha256(
+            (
+                json.dumps(
+                    projection_body,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+        ).hexdigest()
+        mismatched_projection["projection_sha256"] = projection_sha256
+        mismatched_projection_bytes = (
+            json.dumps(
+                mismatched_projection,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        mismatched_authority = deepcopy(authority)
+        mismatched_authority["candidate_projection"] = mismatched_projection
+        mismatched_authority_bytes = (
+            json.dumps(
+                mismatched_authority,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        mismatched_receipt = dict(receipt)
+        mismatched_receipt["authority_sha256"] = hashlib.sha256(
+            mismatched_authority_bytes
+        ).hexdigest()
+        mismatched_receipt["authority_projection_sha256"] = projection_sha256
+        mismatched_receipt_bytes = (
+            json.dumps(
+                mismatched_receipt,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        with pytest.raises(
+            ValueError, match="^current_profile_projection_receipt_invalid$"
+        ):
+            validate_current_profile_projection_receipt(
+                mismatched_receipt_bytes,
+                profile_id=profile_id,
+                activation_sha256=activation_sha256,
+                evidence_packet_bytes=packet_bytes,
+                candidate_projection_bytes=mismatched_projection_bytes,
+                candidate_authority_bytes=mismatched_authority_bytes,
+                profile_sha256=profile_sha256,
+                evidence_ledger_sha256=evidence_ledger_sha256,
+            )
     for field, replacement in (
         ("profile_id", "prf_" + "6" * 32),
         ("profile_sha256", "e" * 64),

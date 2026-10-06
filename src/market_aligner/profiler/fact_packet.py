@@ -421,6 +421,7 @@ def validate_current_profile_projection_receipt(
     ):
         raise ValueError(invalid)
     try:
+        packet = json.loads(evidence_packet_bytes.decode("utf-8", errors="strict"))
         receipt = json.loads(receipt_bytes.decode("utf-8", errors="strict"))
         projection = json.loads(
             candidate_projection_bytes.decode("utf-8", errors="strict")
@@ -447,9 +448,102 @@ def validate_current_profile_projection_receipt(
         ).hexdigest()
     except (TypeError, ValueError, UnicodeEncodeError):
         raise ValueError(invalid) from None
+    packet_source_hashes = packet.get("source_hashes") if type(packet) is dict else None
+    projection_source_hashes = (
+        projection.get("source_hashes") if type(projection) is dict else None
+    )
+    packet_statements = packet.get("statements") if type(packet) is dict else None
+    projection_evidence = (
+        projection.get("approved_evidence") if type(projection) is dict else None
+    )
+    packet_projection_matches = (
+        type(packet_statements) is list
+        and type(projection_evidence) is list
+        and len(packet_statements) == len(projection_evidence)
+        and bool(packet_statements)
+    )
+    seen_statement_ids: set[str] = set()
+    if packet_projection_matches:
+        try:
+            for statement, binding in zip(
+                packet_statements, projection_evidence, strict=True
+            ):
+                if (
+                    type(statement) is not dict
+                    or set(statement)
+                    != {"id", "kind", "proof_class", "statement", "document_targets"}
+                    or type(statement.get("id")) is not str
+                    or not statement["id"]
+                    or type(statement.get("kind")) is not str
+                    or statement["kind"] not in _PROOF_CLASSES
+                    or statement["id"] in seen_statement_ids
+                    or statement.get("proof_class") != statement.get("kind")
+                    or type(statement.get("statement")) is not str
+                    or not statement["statement"].strip()
+                    or type(statement.get("document_targets")) is not list
+                    or not statement["document_targets"]
+                    or any(
+                        type(target) is not str or target not in _DOCUMENT_TARGETS
+                        for target in statement["document_targets"]
+                    )
+                    or statement["document_targets"]
+                    != sorted(set(statement["document_targets"]))
+                    or type(binding) is not dict
+                    or set(binding)
+                    != {"id", "kind", "proof_class", "statement_sha256"}
+                    or binding.get("id") != statement.get("id")
+                    or binding.get("kind") != statement.get("kind")
+                    or binding.get("proof_class") != statement.get("proof_class")
+                    or binding.get("proof_class") not in _PROOF_CLASSES
+                    or not _valid_sha256(binding.get("statement_sha256"))
+                    or binding["statement_sha256"]
+                    != hashlib.sha256(
+                        statement["statement"].encode("utf-8")
+                    ).hexdigest()
+                ):
+                    packet_projection_matches = False
+                    break
+                seen_statement_ids.add(statement["id"])
+        except (TypeError, UnicodeEncodeError):
+            packet_projection_matches = False
+    expected_projection_sources = {
+        "approved_evidence": hashlib.sha256(evidence_packet_bytes).hexdigest(),
+        "current_profile_activation": activation_sha256,
+        "recovery_manifest": (
+            packet_source_hashes.get("recovery_manifest")
+            if type(packet_source_hashes) is dict
+            else None
+        ),
+        "profile": (
+            packet_source_hashes.get("profile")
+            if type(packet_source_hashes) is dict
+            else None
+        ),
+        "evidence": (
+            packet_source_hashes.get("evidence")
+            if type(packet_source_hashes) is dict
+            else None
+        ),
+    }
+    try:
+        packet_is_canonical = _canonical_document_bytes(packet) == evidence_packet_bytes
+        authority_is_canonical = (
+            _canonical_document_bytes(authority) == candidate_authority_bytes
+        )
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise ValueError(invalid) from None
     if (
         type(receipt) is not dict
         or set(receipt) != required
+        or type(packet) is not dict
+        or set(packet) != {"schema_version", "source_hashes", "statements"}
+        or packet.get("schema_version")
+        != "market-aligner.current-factual-statements.v1"
+        or type(packet_source_hashes) is not dict
+        or set(packet_source_hashes) != _SOURCE_HASH_KEYS
+        or any(not _valid_sha256(value) for value in packet_source_hashes.values())
+        or not packet_is_canonical
+        or not packet_projection_matches
         or receipt.get("schema") != "market-aligner.current-profile-projection.v1"
         or receipt.get("profile_id") != profile_id
         or receipt.get("activation_sha256") != activation_sha256
@@ -465,6 +559,17 @@ def validate_current_profile_projection_receipt(
         }
         or projection.get("schema_version")
         != "jaa.candidate-authority-projection.v1"
+        or type(projection_source_hashes) is not dict
+        or set(projection_source_hashes)
+        != {
+            "approved_evidence",
+            "current_profile_activation",
+            "recovery_manifest",
+            "profile",
+            "evidence",
+        }
+        or any(not _valid_sha256(value) for value in projection_source_hashes.values())
+        or projection_source_hashes != expected_projection_sources
         or not _valid_sha256(projection_sha256)
         or projection_sha256 != computed_projection_sha256
         or receipt.get("authority_projection_sha256")
@@ -477,10 +582,22 @@ def validate_current_profile_projection_receipt(
         or _canonical_document_bytes(receipt) != receipt_bytes
         or _canonical_document_bytes(projection) != candidate_projection_bytes
         or type(authority) is not dict
+        or set(authority)
+        != {
+            "schema_version",
+            "source_kind",
+            "activation_sha256",
+            "profile_binding",
+            "candidate_projection",
+            "application_authority",
+            "release_authority",
+            "submission_authority",
+        }
         or authority.get("schema_version") != "jaa.production-candidate-authority.v2"
         or authority.get("source_kind") != "approved_current_profile_activation"
         or authority.get("activation_sha256") != activation_sha256
         or authority.get("candidate_projection") != projection
+        or not authority_is_canonical
         or authority.get("application_authority") is not False
         or authority.get("release_authority") is not False
         or authority.get("submission_authority") is not False

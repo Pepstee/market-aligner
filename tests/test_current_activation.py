@@ -14,9 +14,13 @@ import yaml
 
 from market_aligner.llm.codex_gateway import CodexSemanticGateway
 from market_aligner.llm.contracts import canonical_hash
+from market_aligner.applications.production_handoff import (
+    _protected_candidate_authority,
+)
 from market_aligner.profiler.current_activation import (
     PinnedRecoveryInputs,
     compile_current_profile_activation,
+    read_current_profile_projection_bundle,
     write_current_activation_artifact,
 )
 from market_aligner.profiler.schema import CandidateProfile, EvidenceItem, TrackProfile
@@ -533,3 +537,32 @@ def test_project_current_activation_cli_revalidates_and_emits_private_bundle(
     assert receipt["authority_sha256"] == output["documents"][
         "candidate_authority_bytes"
     ]["sha256"]
+    bundle, validated_receipt = read_current_profile_projection_bundle(
+        data_home=store.paths.root,
+        profile_id=_PROFILE_ID,
+        candidate_authority_path=document_paths["candidate_authority_bytes"],
+        expected_candidate_authority_sha256=output["documents"][
+            "candidate_authority_bytes"
+        ]["sha256"],
+        profile_sha256=active_hashes["profile_sha256"],
+        evidence_ledger_sha256=active_hashes["evidence_ledger_sha256"],
+    )
+    assert validated_receipt == receipt
+    assert bundle == {
+        key: path.read_bytes()
+        for key, path in document_paths.items()
+    }
+    assert _protected_candidate_authority(
+        document_paths["candidate_authority_bytes"],
+        validated_receipt,
+        output["documents"]["candidate_authority_bytes"]["sha256"],
+    ) == bundle["candidate_authority_bytes"]
+    with pytest.raises(ValueError, match="^current_profile_projection_invalid$"):
+        read_current_profile_projection_bundle(
+            data_home=store.paths.root,
+            profile_id=_PROFILE_ID,
+            candidate_authority_path=document_paths["candidate_authority_bytes"],
+            expected_candidate_authority_sha256="0" * 64,
+            profile_sha256=active_hashes["profile_sha256"],
+            evidence_ledger_sha256=active_hashes["evidence_ledger_sha256"],
+        )
