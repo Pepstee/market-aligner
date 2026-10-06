@@ -143,7 +143,43 @@ def _receipt(receipt: LLMReceipt, *, task: str, inputs: Mapping[str, Any]) -> No
     if receipt.input_sha256 != canonical_hash(dict(inputs)):
         raise ValueError("semantic worker input hash differs from exact context")
     if len(receipt.output_sha256) != 64:
-        raise ValueError("semantic worker output hash is invalid")
+        raise ValueError("semantic worker receipt output hash is invalid")
+
+
+def reuse_current_semantic_cache(
+    cached: object,
+    *,
+    expected_task: object,
+    expected_prompt_version: object,
+    validate_current: object,
+) -> object | None:
+    def is_exact_stripped_string(value: object) -> bool:
+        return type(value) is str and value != "" and value == value.strip()
+
+    if not is_exact_stripped_string(expected_task):
+        raise ValueError("invalid semantic cache")
+    if not is_exact_stripped_string(expected_prompt_version):
+        raise ValueError("invalid semantic cache")
+    if not callable(validate_current):
+        raise ValueError("invalid semantic cache")
+    if cached is None:
+        return None
+    if type(cached) is not dict:
+        raise ValueError("invalid semantic cache")
+    if "receipt" not in cached:
+        return None
+    receipt = cached["receipt"]
+    if type(receipt) is not dict:
+        raise ValueError("invalid semantic cache")
+    task = receipt.get("task")
+    version = receipt.get("prompt_version")
+    if not is_exact_stripped_string(task):
+        raise ValueError("invalid semantic cache")
+    if not is_exact_stripped_string(version):
+        raise ValueError("invalid semantic cache")
+    if task != expected_task or version != expected_prompt_version:
+        return None
+    return validate_current(cached)
 
 
 def _processing_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -284,6 +320,7 @@ def _cached_vacancy_eligibility(
     raw: RawPosting,
     *,
     inputs: Mapping[str, Any],
+    expected_prompt_version: str | None = None,
 ) -> tuple[VacancyEligibilityFacts, LLMReceipt] | None:
     if not prior:
         return None
@@ -301,34 +338,45 @@ def _cached_vacancy_eligibility(
     receipt_value = cached_record.get("receipt")
     if not isinstance(facts_value, Mapping) or not isinstance(receipt_value, Mapping):
         raise ValueError("cached vacancy eligibility result is incomplete")
-    facts_document = dict(facts_value)
-    evidence_values = facts_document.get("source_evidence")
-    if not isinstance(evidence_values, list):
-        raise ValueError("cached vacancy eligibility evidence is malformed")
-    facts_document["source_evidence"] = tuple(
-        VacancyEligibilityEvidence(**dict(value))
-        for value in evidence_values
-        if isinstance(value, Mapping)
+    cache_document = {"receipt": dict(receipt_value)}
+    current_prompt_version = expected_prompt_version
+    if current_prompt_version is None:
+        current_prompt_version = receipt_value.get("prompt_version")
+
+    def validate_current(
+        cache_record: dict[str, object],
+    ) -> tuple[VacancyEligibilityFacts, LLMReceipt]:
+        facts_document = dict(facts_value)
+        evidence_values = facts_document.get("source_evidence")
+        if not isinstance(evidence_values, list):
+            raise ValueError("cached vacancy eligibility evidence is malformed")
+        facts_document["source_evidence"] = tuple(
+            VacancyEligibilityEvidence(**dict(value))
+            for value in evidence_values
+            if isinstance(value, Mapping)
+        )
+        if len(facts_document["source_evidence"]) != len(evidence_values):
+            raise ValueError("cached vacancy eligibility evidence is malformed")
+        unknown_values = facts_document.get("unknown_fields")
+        if not isinstance(unknown_values, list):
+            raise ValueError("cached vacancy eligibility unknown fields are malformed")
+        facts_document["unknown_fields"] = tuple(unknown_values)
+        facts = VacancyEligibilityFacts(**facts_document)
+        receipt_document = dict(receipt_value)
+        transport_value = receipt_document.get("transport")
+        if isinstance(transport_value, Mapping):
+            receipt_document["transport"] = LLMTransportReceipt(**dict(transport_value))
+        receipt = LLMReceipt(**receipt_document)
+        accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs)
+        return facts, receipt
+
+    result = reuse_current_semantic_cache(
+        cache_document,
+        expected_task=VACANCY_ELIGIBILITY_FACTS_TASK,
+        expected_prompt_version=current_prompt_version,
+        validate_current=validate_current,
     )
-    if len(facts_document["source_evidence"]) != len(evidence_values):
-        raise ValueError("cached vacancy eligibility evidence is malformed")
-    unknown_values = facts_document.get("unknown_fields")
-    if not isinstance(unknown_values, list):
-        raise ValueError("cached vacancy eligibility unknown fields are malformed")
-    facts_document["unknown_fields"] = tuple(unknown_values)
-    facts = VacancyEligibilityFacts(**facts_document)
-    receipt_document = dict(receipt_value)
-    transport_value = receipt_document.get("transport")
-    if isinstance(transport_value, Mapping):
-        receipt_document["transport"] = LLMTransportReceipt(**dict(transport_value))
-    receipt = LLMReceipt(**receipt_document)
-    accept_vacancy_eligibility_facts(
-        raw,
-        facts,
-        receipt,
-        inputs=inputs,
-    )
-    return facts, receipt
+    return result
 
 
 def _unknown_vacancy_eligibility(
@@ -426,6 +474,15 @@ class ProcessingService:
         }
         profile_context = profile.llm_context(evidence)
         authority_sha256 = _sha256(authority_document)
+        eligibility_prompt_version = getattr(
+            self.worker, "vacancy_eligibility_prompt_version", None
+        )
+        if eligibility_prompt_version is not None and (
+            type(eligibility_prompt_version) is not str
+            or not eligibility_prompt_version
+            or eligibility_prompt_version != eligibility_prompt_version.strip()
+        ):
+            raise ValueError("semantic worker eligibility prompt version is invalid")
         config_sha256 = _sha256(
             {
                 "geographic_preference_policy": asdict(geographic_policy),
@@ -433,6 +490,7 @@ class ProcessingService:
                 "loaded_config": config,
                 "opportunity_policy": asdict(self.opportunity_policy),
                 "vacancy_eligibility_facts_version": VACANCY_ELIGIBILITY_FACTS_VERSION,
+                "vacancy_eligibility_prompt_version": eligibility_prompt_version,
             }
         )
         report_scope = {
@@ -507,6 +565,7 @@ class ProcessingService:
                     prior,
                     raw,
                     inputs=eligibility_inputs,
+                    expected_prompt_version=eligibility_prompt_version,
                 )
                 eligibility_method = getattr(
                     self.worker, "extract_vacancy_eligibility", None
@@ -523,6 +582,14 @@ class ProcessingService:
                         task=VACANCY_ELIGIBILITY_FACTS_TASK,
                         inputs=eligibility_inputs,
                     )
+                    if (
+                        eligibility_prompt_version is not None
+                        and eligibility_receipt.prompt_version
+                        != eligibility_prompt_version
+                    ):
+                        raise ValueError(
+                            "semantic worker eligibility prompt version differs"
+                        )
                     _accept_or_archive_eligibility_rejection(
                         facts=eligibility_facts,
                         receipt=eligibility_receipt,

@@ -32,7 +32,10 @@ from market_aligner.collectors.evidence import validate_public_listing_url
 
 
 JAA_HANDOFF_VERSION = "market-aligner.jaa-handoff.v1"
+CURRENT_RUNTIME_HANDOFF_VERSION = "market-aligner.jaa-handoff.current-runtime.v1"
+_HANDOFF_RUNTIME_DISPATCH_ERROR = "invalid handoff runtime dispatch"
 STRICT_PROFILE = "strict_v1"
+CURRENT_RUNTIME_NON_RELEASE_PROFILE = "current_runtime_non_release_v1"
 BASE_COMPATIBILITY_PROFILE = "base_v1_compatibility"
 UNCLASSIFIED_TRUST_CLASS = "unclassified"
 SYNTHETIC_FIXTURE_TRUST_CLASS = "synthetic_fixture"
@@ -44,6 +47,30 @@ _TRUST_CLASSES = frozenset(
         INSTALLED_PRODUCTION_TRUST_CLASS,
     }
 )
+_STRICT_STRING_PROFILES = frozenset(
+    {STRICT_PROFILE, CURRENT_RUNTIME_NON_RELEASE_PROFILE}
+)
+
+
+def handoff_release_blocked(
+    schema_version: object,
+    emission_profile: object,
+    delivery_trust_class: object,
+) -> bool:
+    return not (
+        type(schema_version) is str
+        and type(emission_profile) is str
+        and type(delivery_trust_class) is str
+        and (schema_version, emission_profile, delivery_trust_class)
+        == (JAA_HANDOFF_VERSION, STRICT_PROFILE, INSTALLED_PRODUCTION_TRUST_CLASS)
+    )
+
+
+def _uses_strict_string_validation(emission_profile: object) -> bool:
+    return (
+        type(emission_profile) is str
+        and emission_profile in _STRICT_STRING_PROFILES
+    )
 _ENVELOPE_KEYS = {"payload", "payload_sha256", "schema_version"}
 _PAYLOAD_KEYS = {
     "assessment",
@@ -59,6 +86,7 @@ _PAYLOAD_KEYS = {
     "selection",
     "vacancy",
 }
+_CURRENT_RUNTIME_PAYLOAD_KEYS = _PAYLOAD_KEYS | {"preparation_geography"}
 _ASSESSMENT_KEYS = {
     "assessment_receipt_sha256",
     "extraction_confidence",
@@ -82,6 +110,9 @@ _SELECTION_KEYS = {
     "selection_policy_sha256",
     "selection_receipt_sha256",
 }
+_CURRENT_RUNTIME_SELECTION_KEYS = _SELECTION_KEYS | {
+    "geographic_preference_policy_sha256"
+}
 _VACANCY_KEYS = {
     "company_name",
     "location",
@@ -99,6 +130,152 @@ _BUCKETS = {
     "UK_ONSITE": (3, "GB", "onsite"),
     "RO_REMOTE": (4, "RO", "remote"),
 }
+
+_PREPARATION_GEOGRAPHY_SCHEMA = "market-aligner.preparation-geography.v1"
+_EU26_REMOTE_COUNTRIES = frozenset(
+    {
+        "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE",
+        "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT",
+        "SI", "SK", "ES", "SE",
+    }
+)
+_PREPARATION_GEOGRAPHY_KEYS = frozenset(
+    {
+        "schema_version",
+        "country_code",
+        "work_mode",
+        "geography_bucket",
+        "geography_priority_rank",
+        "application_authority",
+        "release_authority",
+        "submission_authority",
+    }
+)
+
+
+def _preparation_geography_row(country_code: object, work_mode: object) -> tuple[str | None, int | None]:
+    if type(country_code) is not str or type(work_mode) is not str:
+        raise ValueError("preparation geography requires exact str country_code and work_mode")
+    if country_code == "GB" and work_mode == "remote":
+        return "UK_REMOTE", 1
+    if country_code == "GB" and work_mode == "hybrid":
+        return "UK_HYBRID", 2
+    if country_code == "GB" and work_mode == "onsite":
+        return "UK_ONSITE", 3
+    if country_code == "RO" and work_mode == "remote":
+        return "RO_REMOTE", 4
+    if country_code in _EU26_REMOTE_COUNTRIES and work_mode == "remote":
+        return "EU_REMOTE", 5
+    if country_code == "GB" and work_mode == "unknown":
+        return None, None
+    raise ValueError("unsupported preparation geography country and work mode combination")
+
+
+@dataclass(frozen=True)
+class PreparationGeography:
+    country_code: str
+    work_mode: str
+    geography_bucket: str | None
+    geography_priority_rank: int | None
+
+    def __post_init__(self) -> None:
+        if type(self.country_code) is not str or type(self.work_mode) is not str:
+            raise ValueError("preparation geography requires exact str country_code and work_mode")
+        bucket, rank = _preparation_geography_row(self.country_code, self.work_mode)
+        if bucket is None:
+            if self.geography_bucket is not None or self.geography_priority_rank is not None:
+                raise ValueError("unknown UK mode requires None bucket and None rank")
+            return
+        if type(self.geography_bucket) is not str or self.geography_bucket != bucket:
+            raise ValueError("geography_bucket does not match resolved bucket")
+        if type(self.geography_priority_rank) is not int or self.geography_priority_rank != rank:
+            raise ValueError("geography_priority_rank does not match resolved rank")
+
+
+def resolve_preparation_geography(
+    *, country_code: object, work_mode: object, current_runtime: object,
+    unknown_uk_mode_allowed: object,
+) -> PreparationGeography:
+    if type(current_runtime) is not bool or type(unknown_uk_mode_allowed) is not bool:
+        raise ValueError("current_runtime and unknown_uk_mode_allowed must be exact bool")
+    bucket, rank = _preparation_geography_row(country_code, work_mode)
+    if bucket is None and not (current_runtime is True and unknown_uk_mode_allowed is True):
+        raise ValueError(
+            "unknown UK mode requires both current_runtime and unknown_uk_mode_allowed True"
+        )
+    return PreparationGeography(country_code, work_mode, bucket, rank)
+
+
+def validate_preparation_geography(
+    document: object, *, current_runtime: object, unknown_uk_mode_allowed: object
+) -> PreparationGeography:
+    if type(document) is not dict:
+        raise ValueError("document must be an exact dict")
+    if type(current_runtime) is not bool or type(unknown_uk_mode_allowed) is not bool:
+        raise ValueError("current_runtime and unknown_uk_mode_allowed must be exact bool")
+    if any(type(key) is not str for key in document):
+        raise ValueError("document keys must be exact str")
+    if set(document) != set(_PREPARATION_GEOGRAPHY_KEYS):
+        raise ValueError("document keys must match the preparation geography schema exactly")
+    if type(document["schema_version"]) is not str or document["schema_version"] != _PREPARATION_GEOGRAPHY_SCHEMA:
+        raise ValueError("unsupported schema_version")
+    for key in ("application_authority", "release_authority", "submission_authority"):
+        if document[key] is not False:
+            raise ValueError("authority flags must each be literal False")
+    candidate = PreparationGeography(
+        document["country_code"],
+        document["work_mode"],
+        document["geography_bucket"],
+        document["geography_priority_rank"],
+    )
+    expected = resolve_preparation_geography(
+        country_code=document["country_code"],
+        work_mode=document["work_mode"],
+        current_runtime=current_runtime,
+        unknown_uk_mode_allowed=unknown_uk_mode_allowed,
+    )
+    if candidate != expected:
+        raise ValueError("document fields do not match resolved preparation geography")
+    return candidate
+
+
+def preparation_geography_document(
+    value: PreparationGeography, *, current_runtime: object,
+    unknown_uk_mode_allowed: object,
+) -> dict[str, Any]:
+    if type(value) is not PreparationGeography:
+        raise ValueError("value must be an exact PreparationGeography instance")
+    expected = resolve_preparation_geography(
+        country_code=value.country_code,
+        work_mode=value.work_mode,
+        current_runtime=current_runtime,
+        unknown_uk_mode_allowed=unknown_uk_mode_allowed,
+    )
+    for name in (
+        "country_code", "work_mode", "geography_bucket", "geography_priority_rank"
+    ):
+        field_value = getattr(value, name)
+        reference_value = getattr(expected, name)
+        if type(field_value) is not type(reference_value) or field_value != reference_value:
+            raise ValueError("value field does not match resolved preparation geography")
+    document = {
+        "schema_version": _PREPARATION_GEOGRAPHY_SCHEMA,
+        "country_code": value.country_code,
+        "work_mode": value.work_mode,
+        "geography_bucket": value.geography_bucket,
+        "geography_priority_rank": value.geography_priority_rank,
+        "application_authority": False,
+        "release_authority": False,
+        "submission_authority": False,
+    }
+    validate_preparation_geography(
+        document,
+        current_runtime=current_runtime,
+        unknown_uk_mode_allowed=unknown_uk_mode_allowed,
+    )
+    return document
+
+
 def job_key_for(
     *, adapter: str, canonical_url: str, source_job_id: str, strict_strings: bool = True
 ) -> str:
@@ -160,8 +337,16 @@ def _validate_canonical_url(value: Any, *, strict_profile: bool) -> str:
     return url
 
 
-def validate_handoff_payload(payload: Mapping[str, Any], *, strict_profile: bool) -> None:
-    require_exact_keys(payload, _PAYLOAD_KEYS, "handoff payload")
+def validate_handoff_payload(
+    payload: Mapping[str, Any], *, strict_profile: bool, current_runtime: bool = False
+) -> None:
+    if type(current_runtime) is not bool:
+        raise ContractValidationError("current_runtime must be a JSON boolean")
+    require_exact_keys(
+        payload,
+        _CURRENT_RUNTIME_PAYLOAD_KEYS if current_runtime else _PAYLOAD_KEYS,
+        "handoff payload",
+    )
     require_pattern(payload["profile_id"], PROFILE_ID_PATTERN, "profile_id")
     _require_wire_text(
         payload["profile_version"], "profile_version", strict_profile=strict_profile
@@ -229,18 +414,50 @@ def validate_handoff_payload(payload: Mapping[str, Any], *, strict_profile: bool
         raise ContractValidationError("eligibility checks must sort by unique code")
 
     selection = require_mapping(payload["selection"], "selection")
-    require_exact_keys(selection, _SELECTION_KEYS, "selection")
+    require_exact_keys(
+        selection,
+        _CURRENT_RUNTIME_SELECTION_KEYS if current_runtime else _SELECTION_KEYS,
+        "selection",
+    )
     if selection["decision"] != "selected_for_application" or selection["hard_gate_passed"] is not True:
         raise ContractValidationError("handoff selection must be selected with hard gates passed")
     bucket = selection["geography_bucket"]
     rank = selection["geography_priority_rank"]
-    if isinstance(rank, bool) or not isinstance(rank, int):
-        raise ContractValidationError("selection geography rank must be an integer")
-    if bucket not in {*_BUCKETS, "EU_REMOTE"}:
-        raise ContractValidationError("unknown geography bucket")
-    expected_rank = _BUCKETS[bucket][0] if bucket in _BUCKETS else 5
-    if rank != expected_rank:
-        raise ContractValidationError("geography bucket/rank pair differs")
+    preparation_geography = None
+    if current_runtime:
+        try:
+            preparation_geography = validate_preparation_geography(
+                payload["preparation_geography"],
+                current_runtime=True,
+                unknown_uk_mode_allowed=True,
+            )
+        except ValueError as exc:
+            raise ContractValidationError(
+                "current-runtime preparation geography is invalid"
+            ) from exc
+        expected_geography = (
+            preparation_geography.geography_bucket,
+            preparation_geography.geography_priority_rank,
+        )
+        if any(
+            type(actual) is not type(expected) or actual != expected
+            for actual, expected in zip((bucket, rank), expected_geography, strict=True)
+        ):
+            raise ContractValidationError(
+                "selection geography differs from preparation geography"
+            )
+        require_sha256(
+            selection["geographic_preference_policy_sha256"],
+            "selection.geographic_preference_policy_sha256",
+        )
+    else:
+        if isinstance(rank, bool) or not isinstance(rank, int):
+            raise ContractValidationError("selection geography rank must be an integer")
+        if bucket not in {*_BUCKETS, "EU_REMOTE"}:
+            raise ContractValidationError("unknown geography bucket")
+        expected_rank = _BUCKETS[bucket][0] if bucket in _BUCKETS else 5
+        if rank != expected_rank:
+            raise ContractValidationError("geography bucket/rank pair differs")
     require_sorted_unique_strings(
         selection["rationale_codes"], "selection.rationale_codes", code_values=True
     )
@@ -271,14 +488,23 @@ def validate_handoff_payload(payload: Mapping[str, Any], *, strict_profile: bool
     if not location["raw_text"]:
         raise ContractValidationError("vacancy.location.raw_text must retain listing evidence")
     mode = location["work_mode"]
-    if mode not in {"remote", "hybrid", "onsite"}:
-        raise ContractValidationError("selected handoff requires a known work mode")
-    if bucket in _BUCKETS:
-        _, expected_country, expected_mode = _BUCKETS[bucket]
-        if (country, mode) != (expected_country, expected_mode):
-            raise ContractValidationError("location facts disagree with selected geography bucket")
-    elif country not in EU_REMOTE_COUNTRIES or mode != "remote":
-        raise ContractValidationError("EU_REMOTE requires EU27-minus-RO country and remote mode")
+    if current_runtime:
+        if (country, mode) != (
+            preparation_geography.country_code,
+            preparation_geography.work_mode,
+        ):
+            raise ContractValidationError(
+                "location facts differ from current-runtime preparation geography"
+            )
+    else:
+        if mode not in {"remote", "hybrid", "onsite"}:
+            raise ContractValidationError("selected handoff requires a known work mode")
+        if bucket in _BUCKETS:
+            _, expected_country, expected_mode = _BUCKETS[bucket]
+            if (country, mode) != (expected_country, expected_mode):
+                raise ContractValidationError("location facts disagree with selected geography bucket")
+        elif country not in EU_REMOTE_COUNTRIES or mode != "remote":
+            raise ContractValidationError("EU_REMOTE requires EU27-minus-RO country and remote mode")
 
     provenance = require_mapping(vacancy["provenance"], "vacancy.provenance")
     require_exact_keys(provenance, _PROVENANCE_KEYS, "vacancy.provenance")
@@ -328,6 +554,7 @@ class HandoffEnvelope:
     root_sha256: str
     emission_profile: str
     delivery_trust_class: str
+    schema_version: str = JAA_HANDOFF_VERSION
 
     def __post_init__(self) -> None:
         if self.delivery_trust_class not in _TRUST_CLASSES:
@@ -340,7 +567,8 @@ class HandoffEnvelope:
     @property
     def application_id(self) -> str:
         return application_id_for(
-            self.payload, strict_strings=self.emission_profile == STRICT_PROFILE
+            self.payload,
+            strict_strings=_uses_strict_string_validation(self.emission_profile),
         )
 
     @property
@@ -349,9 +577,10 @@ class HandoffEnvelope:
 
     @property
     def release_blocked(self) -> bool:
-        return (
-            self.emission_profile != STRICT_PROFILE
-            or self.delivery_trust_class != INSTALLED_PRODUCTION_TRUST_CLASS
+        return handoff_release_blocked(
+            self.schema_version,
+            self.emission_profile,
+            self.delivery_trust_class,
         )
 
     def with_delivery_trust(self, trust_class: str) -> "HandoffEnvelope":
@@ -366,6 +595,7 @@ class HandoffEnvelope:
             self.root_sha256,
             self.emission_profile,
             trust_class,
+            self.schema_version,
         )
 
 
@@ -388,6 +618,56 @@ def encode_handoff_v1(payload: Mapping[str, Any]) -> HandoffEnvelope:
         STRICT_PROFILE,
         UNCLASSIFIED_TRUST_CLASS,
     )
+
+
+def encode_current_runtime_handoff_v1(payload: Mapping[str, Any]) -> HandoffEnvelope:
+    value = deep_thaw_json(payload)
+    validate_handoff_payload(value, strict_profile=True, current_runtime=True)
+    payload_bytes = canonical_json_bytes(value)
+    payload_sha = digest_bytes(payload_bytes)
+    exact_bytes = canonical_json_bytes(
+        {
+            "payload": value,
+            "payload_sha256": payload_sha,
+            "schema_version": CURRENT_RUNTIME_HANDOFF_VERSION,
+        }
+    )
+    return HandoffEnvelope(
+        deep_freeze_json(value),
+        exact_bytes,
+        payload_sha,
+        digest_bytes(exact_bytes),
+        CURRENT_RUNTIME_NON_RELEASE_PROFILE,
+        UNCLASSIFIED_TRUST_CLASS,
+        CURRENT_RUNTIME_HANDOFF_VERSION,
+    )
+
+
+def encode_handoff_for_runtime(
+    payload: Mapping[str, Any],
+    *,
+    current_runtime: bool = False,
+    preparation_geography: Mapping[str, Any] | None = None,
+) -> HandoffEnvelope:
+    if (
+        type(current_runtime) is not bool
+        or not isinstance(payload, Mapping)
+        or any(type(key) is not str for key in payload)
+        or "preparation_geography" in payload
+    ):
+        raise ContractValidationError(_HANDOFF_RUNTIME_DISPATCH_ERROR)
+    if not current_runtime:
+        if preparation_geography is not None:
+            raise ContractValidationError(_HANDOFF_RUNTIME_DISPATCH_ERROR)
+        return encode_handoff_v1(payload)
+    if (
+        not isinstance(preparation_geography, Mapping)
+        or any(type(key) is not str for key in preparation_geography)
+    ):
+        raise ContractValidationError(_HANDOFF_RUNTIME_DISPATCH_ERROR)
+    current_payload = dict(payload)
+    current_payload["preparation_geography"] = dict(preparation_geography)
+    return encode_current_runtime_handoff_v1(current_payload)
 
 
 def parse_handoff_v1(data: bytes) -> HandoffEnvelope:
@@ -418,6 +698,28 @@ def parse_handoff_v1(data: bytes) -> HandoffEnvelope:
     )
 
 
+def parse_current_runtime_handoff_v1(data: bytes) -> HandoffEnvelope:
+    envelope = require_mapping(parse_canonical_json(data), "current-runtime handoff envelope")
+    require_exact_keys(envelope, _ENVELOPE_KEYS, "current-runtime handoff envelope")
+    if envelope["schema_version"] != CURRENT_RUNTIME_HANDOFF_VERSION:
+        raise ContractValidationError("unsupported current-runtime handoff schema")
+    require_sha256(envelope["payload_sha256"], "payload_sha256")
+    payload = require_mapping(envelope["payload"], "current-runtime handoff payload")
+    payload_bytes = canonical_json_bytes(payload, strict_strings=False)
+    if digest_bytes(payload_bytes) != envelope["payload_sha256"]:
+        raise ContractValidationError("current-runtime handoff payload digest differs")
+    validate_handoff_payload(payload, strict_profile=True, current_runtime=True)
+    return HandoffEnvelope(
+        deep_freeze_json(payload),
+        data,
+        str(envelope["payload_sha256"]),
+        digest_bytes(data),
+        CURRENT_RUNTIME_NON_RELEASE_PROFILE,
+        UNCLASSIFIED_TRUST_CLASS,
+        CURRENT_RUNTIME_HANDOFF_VERSION,
+    )
+
+
 class HandoffReplayIndex:
     """Exact-root and logical-tuple conflict semantics independent of persistence."""
 
@@ -433,7 +735,9 @@ class HandoffReplayIndex:
             return existing, True
         tuple_bytes = canonical_json_bytes(
             dict(handoff.logical_tuple),
-            strict_strings=handoff.emission_profile == STRICT_PROFILE,
+            strict_strings=_uses_strict_string_validation(
+                handoff.emission_profile
+            ),
         )
         previous_root = self._root_by_tuple.get(tuple_bytes)
         if previous_root is not None and previous_root != handoff.root_sha256:

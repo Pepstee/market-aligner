@@ -16117,6 +16117,195 @@ class EligibilityStaticContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicates an earlier id"):
             admit_candidate_facts(duplicate_in_one_array)
 
+    def test_current_policy_refs_bind_catalog_and_invalidate_stale_rows(self):
+        def make_entry(evidence_id, status, claim, source_ref, kind="profile_field"):
+            return {
+                "evidence_id": evidence_id,
+                "kind": kind,
+                "status": status,
+                "claim": claim,
+                "source_ref": source_ref,
+                "content_sha256": hashlib.sha256(
+                    ("content:" + evidence_id).encode("utf-8")
+                ).hexdigest(),
+            }
+
+        def make_ref(entry, *, status=None):
+            return {
+                "evidence_id": entry["evidence_id"],
+                "kind": entry["kind"],
+                "status": entry["status"] if status is None else status,
+                "claim_sha256": hashlib.sha256(
+                    entry["claim"].encode("utf-8")
+                ).hexdigest(),
+                "source_ref_sha256": hashlib.sha256(
+                    entry["source_ref"].encode("utf-8")
+                ).hexdigest(),
+                "content_sha256": entry["content_sha256"],
+            }
+
+        current = make_entry(
+            "profile-field:constraints.work_authorisation_uk",
+            "explicit",
+            "current structured profile field ✓",
+            "profile.yaml#constraints.work_authorisation_uk",
+        )
+        stale = make_entry(
+            "ev-old-residence", "verified", "older residence claim", "evidence.jsonl:4",
+            kind="residence",
+        )
+        uncertain = make_entry(
+            "ev-uncertain", "inference", "uncertain work-rights claim", "evidence.jsonl:8",
+            kind="work_authorisation",
+        )
+        known_empty = make_entry(
+            "profile-field:constraints.employment_type_policy",
+            "explicit",
+            '"no hard exclusions"',
+            "profile.yaml#constraints.employment_type_policy",
+        )
+        catalog = {
+            entry["evidence_id"]: entry
+            for entry in (current, stale, uncertain, known_empty)
+        }
+        refs = [make_ref(current)]
+        before = copy.deepcopy((refs, catalog))
+
+        admitted = processing_module.validate_candidate_evidence_refs(
+            refs, catalog=catalog, invalidated_ids=frozenset({"ev-old-residence"})
+        )
+        self.assertEqual(admitted.evidence_ids, (current["evidence_id"],))
+        self.assertTrue(admitted.supported)
+        self.assertEqual((refs, catalog), before)
+
+        mixed = processing_module.validate_candidate_evidence_refs(
+            [make_ref(current), make_ref(uncertain)],
+            catalog=catalog,
+            invalidated_ids=frozenset(),
+        )
+        self.assertEqual(
+            mixed.evidence_ids,
+            (current["evidence_id"], uncertain["evidence_id"]),
+        )
+        self.assertFalse(mixed.supported)
+
+        with self.assertRaisesRegex(ValueError, "invalid candidate reference"):
+            processing_module.validate_candidate_evidence_refs(
+                [make_ref(stale)],
+                catalog=catalog,
+                invalidated_ids=frozenset({"ev-old-residence"}),
+            )
+        tampered = make_ref(current)
+        tampered["claim_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "invalid candidate reference"):
+            processing_module.validate_candidate_evidence_refs(
+                [tampered], catalog=catalog, invalidated_ids=frozenset()
+            )
+        for invalid_refs in ((make_ref(current),), True, [dict(make_ref(current), extra=True)]):
+            with self.assertRaisesRegex(ValueError, "invalid candidate reference"):
+                processing_module.validate_candidate_evidence_refs(
+                    invalid_refs, catalog=catalog, invalidated_ids=frozenset()
+                )
+
+        selection = {
+            "authorised_jurisdictions": {
+                "value": [{"value": "GB", "source_ids": [current["evidence_id"]]}],
+                "source_ids": [current["evidence_id"]],
+            },
+            "current_residence": None,
+            "requires_sponsorship": None,
+            "maximum_years_required": None,
+            "excluded_contract_types": {
+                "value": [],
+                "source_ids": [known_empty["evidence_id"]],
+            },
+        }
+        bound = processing_module.bind_current_candidate_policy_refs(
+            selection, catalog=catalog
+        )
+        admitted = processing_module.admit_current_candidate_facts(
+            bound, catalog=catalog, invalidated_ids=frozenset()
+        )
+        self.assertEqual(admitted.effective["authorised_jurisdictions"], ["GB"])
+        self.assertEqual(admitted.effective["excluded_contract_types"], [])
+        self.assertFalse(admitted.status_downgraded)
+
+    def test_current_exclusion_member_refs_are_bound_and_downgraded(self):
+        def make_entry(evidence_id, status, claim, source_ref):
+            return {
+                "evidence_id": evidence_id,
+                "kind": "employment_type_policy",
+                "status": status,
+                "claim": claim,
+                "source_ref": source_ref,
+                "content_sha256": hashlib.sha256(
+                    ("content:" + evidence_id).encode("utf-8")
+                ).hexdigest(),
+            }
+
+        def make_ref(entry):
+            return {
+                "evidence_id": entry["evidence_id"],
+                "kind": entry["kind"],
+                "status": entry["status"],
+                "claim_sha256": hashlib.sha256(
+                    entry["claim"].encode("utf-8")
+                ).hexdigest(),
+                "source_ref_sha256": hashlib.sha256(
+                    entry["source_ref"].encode("utf-8")
+                ).hexdigest(),
+                "content_sha256": entry["content_sha256"],
+            }
+
+        outer = make_entry("policy-outer", "explicit", "The policy is sourced.", "profile.yaml#policy")
+        explicit = make_entry("policy-explicit", "explicit", "Exclude freelance.", "evidence.jsonl:1")
+        inferred = make_entry("policy-inferred", "inference", "Maybe exclude freelance.", "evidence.jsonl:2")
+        catalog = {item["evidence_id"]: item for item in (outer, explicit, inferred)}
+
+        def payload(member_ref):
+            return {
+                "authorised_jurisdictions": None,
+                "current_residence": None,
+                "requires_sponsorship": None,
+                "maximum_years_required": None,
+                "excluded_contract_types": {
+                    "refs": [make_ref(outer)],
+                    "value": [{"refs": [member_ref], "value": "freelance"}],
+                },
+            }
+
+        explicit_payload = payload(make_ref(explicit))
+        explicit_admission = processing_module.admit_current_candidate_facts(
+            explicit_payload, catalog=catalog, invalidated_ids=frozenset()
+        )
+        self.assertEqual(explicit_admission.effective["excluded_contract_types"], ["freelance"])
+        self.assertFalse(explicit_admission.status_downgraded)
+
+        with self.assertRaisesRegex(ValueError, "invalid candidate reference"):
+            processing_module.admit_current_candidate_facts(
+                payload(make_ref(explicit)),
+                catalog=catalog,
+                invalidated_ids=frozenset({"policy-explicit"}),
+            )
+        changed = make_ref(explicit)
+        changed["claim_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "invalid candidate reference"):
+            processing_module.admit_current_candidate_facts(
+                payload(changed), catalog=catalog, invalidated_ids=frozenset()
+            )
+        missing = make_ref(explicit)
+        missing["evidence_id"] = "not-in-catalog"
+        with self.assertRaisesRegex(ValueError, "invalid candidate reference"):
+            processing_module.admit_current_candidate_facts(
+                payload(missing), catalog=catalog, invalidated_ids=frozenset()
+            )
+
+        inferred_admission = processing_module.admit_current_candidate_facts(
+            payload(make_ref(inferred)), catalog=catalog, invalidated_ids=frozenset()
+        )
+        self.assertIsNone(inferred_admission.effective["excluded_contract_types"])
+        self.assertTrue(inferred_admission.status_downgraded)
+
 
 class EligibilityEndToEndTests(unittest.TestCase):
     def setUp(self):

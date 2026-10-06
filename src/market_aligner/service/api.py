@@ -699,6 +699,7 @@ class MarketAlignerService:
         manifest: Mapping[str, Any],
         *,
         handoff_job_key: str | None = None,
+        current_runtime: bool = False,
     ) -> HandoffEnvelope:
         profile, _evidence = self.profiles.load(profile_id)
         return produce_handoff(
@@ -708,4 +709,5 @@ class MarketAlignerService:
             job_key=job_key,
             manifest=manifest,
             handoff_job_key=handoff_job_key,
+            current_runtime=current_runtime,
         )

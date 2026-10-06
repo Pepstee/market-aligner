@@ -12,7 +12,23 @@ import pytest
 import yaml
 
 from market_aligner.applications import production_handoff as production_module
-from market_aligner.applications.handoff import canonical_json_bytes
+from market_aligner.applications.canonical import ContractValidationError
+from market_aligner.applications.handoff import (
+    CURRENT_RUNTIME_HANDOFF_VERSION,
+    CURRENT_RUNTIME_NON_RELEASE_PROFILE,
+    INSTALLED_PRODUCTION_TRUST_CLASS,
+    JAA_HANDOFF_VERSION,
+    STRICT_PROFILE,
+    canonical_json_bytes,
+    encode_current_runtime_handoff_v1,
+    encode_handoff_for_runtime,
+    encode_handoff_v1,
+    handoff_release_blocked,
+    parse_current_runtime_handoff_v1,
+    preparation_geography_document,
+    resolve_preparation_geography,
+    validate_preparation_geography,
+)
 from market_aligner.applications.production_handoff import (
     PRODUCTION_CANDIDATE_AUTHORITY_PATH,
     PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
@@ -23,8 +39,13 @@ from market_aligner.applications.production_handoff import (
     _greenhouse_identity,
     _persist_execution_receipt,
     _protected_candidate_authority,
+    _require_explicit_unknown_mode,
     _research_evidence,
     _workable_identity,
+)
+from market_aligner.assessment.geography import (
+    GeographicPreferencePolicy,
+    classify_geographic_preference,
 )
 from market_aligner.assessment.opportunity import apply_gate
 from market_aligner.assessment.scoring import AssessmentAxes, score
@@ -53,8 +74,331 @@ SOURCE_SHA = "a" * 64
 PROMOTION_SHA = "b" * 64
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "unknown",
+        " UNSPECIFIED\t\n",
+        "not specified",
+        "not\nstated",
+        "   ",
+    ],
+)
+def test_unknown_work_mode_requires_explicit_unknown_remote_policy(value: str) -> None:
+    assert _require_explicit_unknown_mode(value) == "unknown"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "remote",
+        "hybrid",
+        "onsite",
+        "mostly remote",
+        "remote unknown",
+        "not specified hybrid",
+        "unknown_other",
+        "unknоwn",
+        None,
+        1,
+        True,
+    ],
+)
+def test_unknown_work_mode_does_not_overwrite_known_or_malformed_remote_policy(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="remote policy must explicitly state an unknown work mode"):
+        _require_explicit_unknown_mode(value)
+
+
+def test_unknown_other_with_explicit_remote_policy_is_not_unknown_mode() -> None:
+    preference = classify_geographic_preference(
+        location="Reading",
+        remote_policy="remote",
+        policy=GeographicPreferencePolicy(),
+    )
+    assert (preference.category, preference.rank) == ("unknown_other", 5)
+    with pytest.raises(ValueError, match="remote policy must explicitly state an unknown work mode"):
+        _require_explicit_unknown_mode("remote")
+
+
+@pytest.mark.parametrize(
+    ("country_code", "work_mode", "bucket", "rank"),
+    [
+        ("GB", "remote", "UK_REMOTE", 1),
+        ("GB", "hybrid", "UK_HYBRID", 2),
+        ("GB", "onsite", "UK_ONSITE", 3),
+        ("RO", "remote", "RO_REMOTE", 4),
+        ("AT", "remote", "EU_REMOTE", 5),
+    ],
+)
+def test_preparation_geography_preserves_all_known_rows(
+    country_code: str, work_mode: str, bucket: str, rank: int
+) -> None:
+    resolved = resolve_preparation_geography(
+        country_code=country_code,
+        work_mode=work_mode,
+        current_runtime=False,
+        unknown_uk_mode_allowed=False,
+    )
+    assert (resolved.geography_bucket, resolved.geography_priority_rank) == (bucket, rank)
+
+
+def test_preparation_geography_allows_only_non_authoritative_current_gb_unknown() -> None:
+    resolved = resolve_preparation_geography(
+        country_code="GB",
+        work_mode="unknown",
+        current_runtime=True,
+        unknown_uk_mode_allowed=True,
+    )
+    assert (resolved.geography_bucket, resolved.geography_priority_rank) == (None, None)
+    document = preparation_geography_document(
+        resolved, current_runtime=True, unknown_uk_mode_allowed=True
+    )
+    assert document["application_authority"] is False
+    assert document["release_authority"] is False
+    assert document["submission_authority"] is False
+    assert validate_preparation_geography(
+        document, current_runtime=True, unknown_uk_mode_allowed=True
+    ) == resolved
+
+
+@pytest.mark.parametrize(
+    ("current_runtime", "unknown_uk_mode_allowed"),
+    [(False, False), (False, True), (True, False)],
+)
+def test_preparation_geography_refuses_unknown_mode_without_both_current_gates(
+    current_runtime: bool, unknown_uk_mode_allowed: bool
+) -> None:
+    with pytest.raises(ValueError, match="unknown UK mode requires"):
+        resolve_preparation_geography(
+            country_code="GB",
+            work_mode="unknown",
+            current_runtime=current_runtime,
+            unknown_uk_mode_allowed=unknown_uk_mode_allowed,
+        )
+
+
 def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def test_handoff_release_gate_is_bound_to_schema_profile_and_trust() -> None:
+    schemas = (
+        JAA_HANDOFF_VERSION,
+        CURRENT_RUNTIME_HANDOFF_VERSION,
+        "market-aligner.jaa-handoff.future.v9",
+    )
+    profiles = (
+        STRICT_PROFILE,
+        "base_v1_compatibility",
+        CURRENT_RUNTIME_NON_RELEASE_PROFILE,
+    )
+    trusts = (
+        "unclassified",
+        "synthetic_fixture",
+        INSTALLED_PRODUCTION_TRUST_CLASS,
+    )
+    for schema in schemas:
+        for profile in profiles:
+            for trust in trusts:
+                expected_blocked = (
+                    schema,
+                    profile,
+                    trust,
+                ) != (
+                    JAA_HANDOFF_VERSION,
+                    STRICT_PROFILE,
+                    INSTALLED_PRODUCTION_TRUST_CLASS,
+                )
+                assert handoff_release_blocked(schema, profile, trust) is expected_blocked
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (field, value)
+        for field in ("schema_version", "emission_profile", "delivery_trust_class")
+        for value in (
+            None,
+            1,
+            True,
+            [],
+            {},
+            b"installed_production",
+            type("StringSubclass", (str,), {})("strict_v1"),
+        )
+    ],
+)
+def test_handoff_release_gate_blocks_malformed_metadata(field: str, value: object) -> None:
+    metadata = {
+        "schema_version": JAA_HANDOFF_VERSION,
+        "emission_profile": STRICT_PROFILE,
+        "delivery_trust_class": INSTALLED_PRODUCTION_TRUST_CLASS,
+    }
+    metadata[field] = value
+    assert handoff_release_blocked(**metadata) is True
+
+
+def _synthetic_current_runtime_handoff_payload(*, unknown_mode: bool = False) -> dict:
+    from test_jaa_events_v1 import _handoff
+
+    payload = json.loads(_handoff().exact_bytes)["payload"]
+    location = payload["vacancy"]["location"]
+    if unknown_mode:
+        location["country_code"] = "GB"
+        location["work_mode"] = "unknown"
+        payload["selection"]["geography_bucket"] = None
+        payload["selection"]["geography_priority_rank"] = None
+    preparation_geography = resolve_preparation_geography(
+        country_code=location["country_code"],
+        work_mode=location["work_mode"],
+        current_runtime=True,
+        unknown_uk_mode_allowed=unknown_mode,
+    )
+    if not unknown_mode:
+        assert (
+            payload["selection"]["geography_bucket"],
+            payload["selection"]["geography_priority_rank"],
+        ) == (
+            preparation_geography.geography_bucket,
+            preparation_geography.geography_priority_rank,
+        )
+    payload["selection"]["geographic_preference_policy_sha256"] = "a" * 64
+    payload["preparation_geography"] = preparation_geography_document(
+        preparation_geography,
+        current_runtime=True,
+        unknown_uk_mode_allowed=unknown_mode,
+    )
+    return payload
+
+
+def test_current_runtime_handoff_codec_stays_non_release_after_install_trust() -> None:
+    from test_jaa_events_v1 import _handoff
+
+    legacy = _handoff()
+    assert legacy.with_delivery_trust(INSTALLED_PRODUCTION_TRUST_CLASS).release_blocked is False
+
+    current = encode_current_runtime_handoff_v1(
+        _synthetic_current_runtime_handoff_payload()
+    )
+    assert current.schema_version == CURRENT_RUNTIME_HANDOFF_VERSION
+    assert current.emission_profile == CURRENT_RUNTIME_NON_RELEASE_PROFILE
+    assert current.release_blocked is True
+    assert current.with_delivery_trust(INSTALLED_PRODUCTION_TRUST_CLASS).release_blocked is True
+
+    parsed = parse_current_runtime_handoff_v1(current.exact_bytes)
+    assert parsed.emission_profile == CURRENT_RUNTIME_NON_RELEASE_PROFILE
+    assert parsed.release_blocked is True
+    assert parsed.with_delivery_trust(INSTALLED_PRODUCTION_TRUST_CLASS).release_blocked is True
+
+    unknown = encode_current_runtime_handoff_v1(
+        _synthetic_current_runtime_handoff_payload(unknown_mode=True)
+    )
+    unknown_payload = json.loads(unknown.exact_bytes)["payload"]
+    assert unknown_payload["selection"]["geography_bucket"] is None
+    assert unknown_payload["selection"]["geography_priority_rank"] is None
+    unknown_parsed = parse_current_runtime_handoff_v1(unknown.exact_bytes)
+    assert unknown_parsed.payload["selection"]["geography_bucket"] is None
+    assert unknown_parsed.payload["selection"]["geography_priority_rank"] is None
+
+
+def test_current_runtime_handoff_is_consumed_by_jaa_without_release_profile() -> None:
+    from career_automation.market_aligner_handoff import (
+        ParsedHandoff as JAAPparsedHandoff,
+        parse_handoff as parse_legacy_handoff,
+        parse_handoff_for_runtime,
+    )
+
+    from market_aligner.applications.handoff import parse_current_runtime_handoff_v1
+
+    current = encode_current_runtime_handoff_v1(
+        _synthetic_current_runtime_handoff_payload(unknown_mode=True)
+    )
+    consumed = parse_handoff_for_runtime(
+        current.exact_bytes,
+        current_runtime=True,
+        require_strict_profile=False,
+        legacy_parser=parse_legacy_handoff,
+        current_parser=parse_current_runtime_handoff_v1,
+        make_parsed=JAAPparsedHandoff,
+    )
+    assert consumed.original_bytes == current.exact_bytes
+    assert consumed.root_sha256 == current.root_sha256
+    assert consumed.application_id == current.application_id
+    assert consumed.emission_profile == CURRENT_RUNTIME_NON_RELEASE_PROFILE
+    assert consumed.strict_profile is False
+
+    from test_jaa_events_v1 import _handoff
+
+    legacy = _handoff()
+    legacy_consumed = parse_handoff_for_runtime(
+        legacy.exact_bytes,
+        current_runtime=False,
+        require_strict_profile=False,
+        legacy_parser=parse_legacy_handoff,
+        current_parser=parse_current_runtime_handoff_v1,
+        make_parsed=JAAPparsedHandoff,
+    )
+    assert legacy_consumed.original_bytes == legacy.exact_bytes
+    assert legacy_consumed.application_id == legacy.application_id
+    assert legacy_consumed.strict_profile is True
+
+
+def test_handoff_runtime_dispatch_preserves_legacy_and_selects_current_codec() -> None:
+    from test_jaa_events_v1 import _handoff
+
+    legacy_payload = json.loads(_handoff().exact_bytes)["payload"]
+    legacy = encode_handoff_for_runtime(legacy_payload)
+    assert legacy.exact_bytes == encode_handoff_v1(legacy_payload).exact_bytes
+    assert legacy.schema_version == JAA_HANDOFF_VERSION
+    assert legacy.emission_profile == STRICT_PROFILE
+
+    current_payload = _synthetic_current_runtime_handoff_payload(unknown_mode=True)
+    preparation_geography = current_payload.pop("preparation_geography")
+    current = encode_handoff_for_runtime(
+        current_payload,
+        current_runtime=True,
+        preparation_geography=preparation_geography,
+    )
+    assert current.schema_version == CURRENT_RUNTIME_HANDOFF_VERSION
+    assert current.emission_profile == CURRENT_RUNTIME_NON_RELEASE_PROFILE
+    assert current.release_blocked is True
+    assert parse_current_runtime_handoff_v1(current.exact_bytes).payload[
+        "selection"
+    ]["geography_priority_rank"] is None
+    assert "preparation_geography" not in current_payload
+
+    with pytest.raises(ContractValidationError, match="invalid handoff runtime dispatch"):
+        encode_handoff_for_runtime(legacy_payload, current_runtime=1)
+    with pytest.raises(ContractValidationError):
+        encode_handoff_for_runtime(current_payload)
+    with pytest.raises(
+        ContractValidationError, match="invalid handoff runtime dispatch"
+    ):
+        encode_handoff_for_runtime(
+            legacy_payload, preparation_geography=preparation_geography
+        )
+
+
+@pytest.mark.parametrize("rank", [True, 1.0])
+def test_current_runtime_handoff_codec_rejects_coercive_geography_rank(rank) -> None:
+    payload = _synthetic_current_runtime_handoff_payload()
+    payload["selection"]["geography_priority_rank"] = rank
+    with pytest.raises(ContractValidationError, match="selection geography"):
+        encode_current_runtime_handoff_v1(payload)
+
+    valid = encode_current_runtime_handoff_v1(
+        _synthetic_current_runtime_handoff_payload()
+    )
+    envelope = json.loads(valid.exact_bytes)
+    envelope["payload"]["selection"]["geography_priority_rank"] = rank
+    envelope["payload_sha256"] = _sha(
+        canonical_json_bytes(envelope["payload"])
+    )
+    with pytest.raises(ContractValidationError, match="selection geography"):
+        parse_current_runtime_handoff_v1(canonical_json_bytes(envelope))
 
 
 def test_handoff_issuance_uses_latest_durable_input_and_not_evaluation_clock() -> None:

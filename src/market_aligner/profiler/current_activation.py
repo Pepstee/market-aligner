@@ -51,6 +51,7 @@ _CURRENT_ACTIVATION_NAME = re.compile(r"activation-[0-9a-f]{32}\.json\Z")
 _CURRENT_PROJECTION_AUTHORITY_NAME = re.compile(
     r"projection-([0-9a-f]{32})-candidate-authority\.json\Z"
 )
+_CURRENT_POLICY_CANARY_NAME = re.compile(r"candidate-policy-([0-9a-f]{64})\.json\Z")
 _INVALID_PROJECTION = "current_profile_projection_invalid"
 _CURRENT_INVALIDATING_RELATIONSHIPS = frozenset(
     {"retracts", "corrects", "contradicts", "limits"}
@@ -927,6 +928,78 @@ def _evidence_spans(
     return spans
 
 
+_CURRENT_CANDIDATE_POLICY_PROFILE_FIELDS = {
+    "work_authorisation_uk": str,
+    "work_authorisation_uk_requires_sponsorship": bool,
+    "residence": str,
+    "employment_location_on_hire": str,
+    "employment_type_policy": str,
+    "employment_type_preference": str,
+}
+
+
+def build_current_candidate_policy_catalog(snapshot: Any) -> dict[str, dict[str, str]]:
+    """Bind policy source entries to the retained current profile and ledger bytes."""
+    try:
+        snapshot.revalidate()
+        profile_bytes = snapshot._bytes["profile.yaml"]
+        evidence_bytes = snapshot._bytes["evidence.jsonl"]
+        constraints = snapshot.profile.constraints
+        if (
+            type(profile_bytes) is not bytes
+            or type(evidence_bytes) is not bytes
+            or type(constraints) is not dict
+        ):
+            raise ValueError(_INVALID)
+        profile_sha256 = _sha256(profile_bytes)
+        catalog: dict[str, dict[str, str]] = {}
+        for field, expected_type in _CURRENT_CANDIDATE_POLICY_PROFILE_FIELDS.items():
+            if field not in constraints or constraints[field] is None:
+                continue
+            value = constraints[field]
+            if type(value) is not expected_type or (type(value) is str and not value.strip()):
+                raise ValueError(_INVALID)
+            try:
+                claim = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                claim.encode("utf-8", errors="strict")
+            except (TypeError, ValueError, UnicodeEncodeError):
+                raise ValueError(_INVALID) from None
+            evidence_id = f"profile-field:constraints.{field}"
+            catalog[evidence_id] = {
+                "evidence_id": evidence_id,
+                "kind": "current_profile_field",
+                "status": "explicit",
+                "claim": claim,
+                "source_ref": f"profile.yaml#/constraints/{field}",
+                "content_sha256": profile_sha256,
+            }
+        spans = _evidence_spans(evidence_bytes, snapshot.evidence_ledger)
+        for item in snapshot.evidence_ledger:
+            span = spans[item.evidence_id]
+            if item.evidence_id in catalog:
+                raise ValueError(_INVALID)
+            catalog[item.evidence_id] = {
+                "evidence_id": item.evidence_id,
+                "kind": item.kind,
+                "status": item.status,
+                "claim": item.claim,
+                "source_ref": item.source_ref,
+                "content_sha256": span["row_sha256"],
+            }
+        if not catalog or len(catalog) > 512:
+            raise ValueError(_INVALID)
+        snapshot.revalidate()
+        return catalog
+    except (KeyError, TypeError, UnicodeEncodeError, json.JSONDecodeError):
+        raise ValueError(_INVALID) from None
+
+
 def compile_current_profile_activation(
     *,
     profile_id: str,
@@ -1156,4 +1229,319 @@ def write_current_activation_artifact(
         for directory in (profile_root, activation_root, output_root):
             if directory is not None:
                 directory.close()
+        root_chain.close()
+
+
+def _current_policy_canary_name(
+    *, profile_id: str, track: str, source_job_key: str, activation_sha256: str
+) -> str:
+    validate_profile_id(profile_id)
+    for value in (track, source_job_key):
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or len(value) > 256
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+        ):
+            raise ValueError(_INVALID_PROJECTION)
+    if (
+        type(activation_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", activation_sha256) is None
+    ):
+        raise ValueError(_INVALID_PROJECTION)
+    binding = {
+        "activation_sha256": activation_sha256,
+        "profile_id": profile_id,
+        "source_job_key": source_job_key,
+        "track": track,
+    }
+    return f"candidate-policy-{canonical_hash(binding)}.json"
+
+
+def _validate_current_policy_canary_identity(
+    raw: bytes,
+    *,
+    profile_id: str,
+    track: str,
+    source_job_key: str,
+    target_job_jurisdiction: str,
+    activation_name: str,
+    activation_sha256: str,
+    activation_file_sha256: str,
+    recovery_manifest_sha256: str,
+    active_snapshot_hashes: dict[str, str],
+) -> None:
+    try:
+        document = _strict_json_loads(raw)
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError(_INVALID_PROJECTION) from None
+    if (
+        type(document) is not dict
+        or document.get("schema") != "market-aligner.current-candidate-policy-canary.v1"
+        or document.get("profile_id") != profile_id
+        or document.get("target_job_key") != source_job_key
+        or document.get("target_job_jurisdiction") != target_job_jurisdiction
+        or document.get("activation_name") != activation_name
+        or document.get("activation_sha256") != activation_sha256
+        or document.get("activation_file_sha256") != activation_file_sha256
+        or document.get("recovery_manifest_sha256") != recovery_manifest_sha256
+        or document.get("active_snapshot_hashes") != active_snapshot_hashes
+        or document.get("request_matches_receipt") is not True
+    ):
+        raise ValueError(_INVALID_PROJECTION)
+    request = document.get("request")
+    receipt = document.get("receipt")
+    if (
+        type(request) is not dict
+        or request.get("schema") != "market-aligner.candidate-policy-input.v1"
+        or request.get("target_job_jurisdiction") != target_job_jurisdiction
+        or type(receipt) is not dict
+        or type(receipt.get("transport")) is not dict
+        or type(receipt["transport"].get("invocation_count")) is not int
+        or receipt["transport"].get("invocation_count") != 1
+    ):
+        raise ValueError(_INVALID_PROJECTION)
+    _current_policy_canary_name(
+        profile_id=profile_id,
+        track=track,
+        source_job_key=source_job_key,
+        activation_sha256=activation_sha256,
+    )
+
+
+def _current_policy_canary_directory(
+    data_home: str | Path | None, profile_id: str
+) -> tuple[Any, list[_RetainedDirectory]]:
+    validate_profile_id(profile_id)
+    root_chain = open_existing_private_data_root(data_home)
+    directories: list[_RetainedDirectory] = []
+    parent_fd = root_chain.deepest_fd
+    try:
+        for name, label in (
+            ("outputs", "data_home/outputs"),
+            ("current-profile-facts", "current profile fact artifacts"),
+            (profile_id, "current profile fact profile directory"),
+        ):
+            directory = _RetainedDirectory(
+                parent_fd=parent_fd,
+                name=name,
+                path_label=label,
+                private=True,
+            )
+            directories.append(directory)
+            directory.initial_proof()
+            parent_fd = directory.fd
+        return root_chain, directories
+    except BaseException:
+        for directory in reversed(directories):
+            directory.close()
+        root_chain.close()
+        raise
+
+
+def write_current_candidate_policy_canary(
+    *,
+    data_home: str | Path | None,
+    profile_id: str,
+    track: str,
+    source_job_key: str,
+    target_job_jurisdiction: str,
+    activation_name: str,
+    activation_sha256: str,
+    activation_file_sha256: str,
+    recovery_manifest_sha256: str,
+    active_snapshot_hashes: dict[str, str],
+    canary_bytes: bytes,
+    expected_sha256: str,
+) -> tuple[Path, str]:
+    """Persist one already-validated provider result as an immutable private sibling."""
+    if (
+        type(canary_bytes) is not bytes
+        or not canary_bytes
+        or len(canary_bytes) > _MAX_CURRENT_ACTIVATION_BYTES
+        or type(expected_sha256) is not str
+        or _sha256(canary_bytes) != expected_sha256
+    ):
+        raise ValueError(_INVALID_PROJECTION)
+    _validate_current_policy_canary_identity(
+        canary_bytes,
+        profile_id=profile_id,
+        track=track,
+        source_job_key=source_job_key,
+        target_job_jurisdiction=target_job_jurisdiction,
+        activation_name=activation_name,
+        activation_sha256=activation_sha256,
+        activation_file_sha256=activation_file_sha256,
+        recovery_manifest_sha256=recovery_manifest_sha256,
+        active_snapshot_hashes=active_snapshot_hashes,
+    )
+    name = _current_policy_canary_name(
+        profile_id=profile_id,
+        track=track,
+        source_job_key=source_job_key,
+        activation_sha256=activation_sha256,
+    )
+    root_chain, directories = _current_policy_canary_directory(data_home, profile_id)
+    output_fd: int | None = None
+    existing_fd: int | None = None
+    try:
+        profile_directory = directories[-1]
+        try:
+            output_fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=profile_directory.fd,
+            )
+        except FileExistsError:
+            existing, _identity, existing_fd = _open_verified_leaf(
+                profile_directory.fd, name, _MAX_CURRENT_ACTIVATION_BYTES
+            )
+            if existing != canary_bytes:
+                raise ValueError(_INVALID_PROJECTION)
+        else:
+            view = memoryview(canary_bytes)
+            while view:
+                written = os.write(output_fd, view)
+                if written <= 0:
+                    raise OSError("short write while creating current policy canary")
+                view = view[written:]
+            os.fsync(output_fd)
+            info = os.fstat(output_fd)
+            named = os.stat(name, dir_fd=profile_directory.fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_size != len(canary_bytes)
+                or (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise ValueError(_INVALID_PROJECTION)
+        root_chain.revalidate()
+        for directory in directories:
+            directory.revalidate()
+        os.fsync(profile_directory.fd)
+        path = (
+            ProductPaths.resolve(data_home).outputs
+            / "current-profile-facts"
+            / profile_id
+            / name
+        )
+        return path, expected_sha256
+    finally:
+        if output_fd is not None:
+            os.close(output_fd)
+        if existing_fd is not None:
+            os.close(existing_fd)
+        for directory in reversed(directories):
+            directory.close()
+        root_chain.close()
+
+
+def read_current_candidate_policy_canary(
+    *,
+    data_home: str | Path | None,
+    profile_id: str,
+    track: str,
+    source_job_key: str,
+    target_job_jurisdiction: str,
+    activation_name: str,
+    activation_sha256: str,
+    activation_file_sha256: str,
+    recovery_manifest_sha256: str,
+    active_snapshot_hashes: dict[str, str],
+) -> tuple[bytes, str]:
+    """Read the exact create-only canary sibling selected by its live binding."""
+    name = _current_policy_canary_name(
+        profile_id=profile_id,
+        track=track,
+        source_job_key=source_job_key,
+        activation_sha256=activation_sha256,
+    )
+    root_chain, directories = _current_policy_canary_directory(data_home, profile_id)
+    descriptor: int | None = None
+    try:
+        raw, _identity, descriptor = _open_verified_leaf(
+            directories[-1].fd, name, _MAX_CURRENT_ACTIVATION_BYTES
+        )
+        digest = _sha256(raw)
+        _validate_current_policy_canary_identity(
+            raw,
+            profile_id=profile_id,
+            track=track,
+            source_job_key=source_job_key,
+            target_job_jurisdiction=target_job_jurisdiction,
+            activation_name=activation_name,
+            activation_sha256=activation_sha256,
+            activation_file_sha256=activation_file_sha256,
+            recovery_manifest_sha256=recovery_manifest_sha256,
+            active_snapshot_hashes=active_snapshot_hashes,
+        )
+        root_chain.revalidate()
+        for directory in directories:
+            directory.revalidate()
+        return raw, digest
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        for directory in reversed(directories):
+            directory.close()
+        root_chain.close()
+
+
+def read_current_candidate_policy_canary_for_activation(
+    *,
+    data_home: str | Path | None,
+    profile_id: str,
+    track: str,
+    source_job_key: str,
+    activation_sha256: str,
+) -> tuple[bytes, str]:
+    """Read the create-only canary selected by a live activation hash.
+
+    The returned bytes are only a lookup result. Callers must validate the
+    activation file and pass the document through native receipt/reference
+    admission before consuming its selected policy.
+    """
+    name = _current_policy_canary_name(
+        profile_id=profile_id,
+        track=track,
+        source_job_key=source_job_key,
+        activation_sha256=activation_sha256,
+    )
+    root_chain, directories = _current_policy_canary_directory(data_home, profile_id)
+    descriptor: int | None = None
+    try:
+        raw, _identity, descriptor = _open_verified_leaf(
+            directories[-1].fd, name, _MAX_CURRENT_ACTIVATION_BYTES
+        )
+        try:
+            document = _strict_json_loads(raw)
+            if type(document) is not dict:
+                raise ValueError(_INVALID_PROJECTION)
+            _validate_current_policy_canary_identity(
+                raw,
+                profile_id=profile_id,
+                track=track,
+                source_job_key=source_job_key,
+                target_job_jurisdiction=document.get("target_job_jurisdiction"),
+                activation_name=document.get("activation_name"),
+                activation_sha256=activation_sha256,
+                activation_file_sha256=document.get("activation_file_sha256"),
+                recovery_manifest_sha256=document.get("recovery_manifest_sha256"),
+                active_snapshot_hashes=document.get("active_snapshot_hashes"),
+            )
+        except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError(_INVALID_PROJECTION) from None
+        root_chain.revalidate()
+        for directory in directories:
+            directory.revalidate()
+        return raw, _sha256(raw)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        for directory in reversed(directories):
+            directory.close()
         root_chain.close()

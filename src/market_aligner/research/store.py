@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import math
 import re
@@ -98,6 +99,130 @@ def _vacancy_snapshot_sha256(values: dict[str, Any]) -> str | None:
             allow_nan=False,
         ).encode("utf-8")
     ).hexdigest()
+
+
+_PROMOTION_TRANSITION_FIELDS = frozenset(
+    {
+        "profile_id",
+        "job_key",
+        "track",
+        "source_sha256",
+        "receipt_sha256",
+        "receipt_bytes",
+    }
+)
+_PROMOTION_TRANSITION_IDENT_FIELDS = ("profile_id", "job_key", "track")
+_PROMOTION_TRANSITION_HASH_FIELDS = ("source_sha256", "receipt_sha256")
+_PROMOTION_TRANSITION_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _validate_promotion_transition_record(record: object) -> None:
+    if type(record) is not dict or any(type(key) is not str for key in record):
+        raise ValueError("promotion transition refused")
+    if set(record) != _PROMOTION_TRANSITION_FIELDS:
+        raise ValueError("promotion transition refused")
+    for field in _PROMOTION_TRANSITION_IDENT_FIELDS:
+        value = record[field]
+        if type(value) is not str or not value or value != value.strip():
+            raise ValueError("promotion transition refused")
+    for field in _PROMOTION_TRANSITION_HASH_FIELDS:
+        value = record[field]
+        if type(value) is not str or _PROMOTION_TRANSITION_SHA256.fullmatch(value) is None:
+            raise ValueError("promotion transition refused")
+    if type(record["receipt_bytes"]) is not bytes or not record["receipt_bytes"]:
+        raise ValueError("promotion transition refused")
+
+
+def choose_processing_promotion_transition(
+    existing: dict[str, object] | None,
+    proposed: dict[str, object],
+    *,
+    publication_exists: bool,
+    research_lease_active: bool,
+) -> str:
+    """Choose an insert, exact replay or source-and-receipt supersede."""
+
+    if type(publication_exists) is not bool or type(research_lease_active) is not bool:
+        raise ValueError("promotion transition refused")
+    _validate_promotion_transition_record(proposed)
+    if existing is None:
+        if publication_exists or research_lease_active:
+            raise ValueError("promotion transition refused")
+        return "insert"
+    _validate_promotion_transition_record(existing)
+    for field in _PROMOTION_TRANSITION_IDENT_FIELDS:
+        if existing[field] != proposed[field]:
+            raise ValueError("promotion transition refused")
+    if existing == proposed:
+        return "replay"
+    if (
+        existing["source_sha256"] == proposed["source_sha256"]
+        or existing["receipt_sha256"] == proposed["receipt_sha256"]
+        or publication_exists
+        or research_lease_active
+    ):
+        raise ValueError("promotion transition refused")
+    return "supersede"
+
+
+def _promotion_transition_record(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "profile_id": row["profile_id"],
+        "job_key": row["job_key"],
+        "track": row["track"],
+        "source_sha256": row["source_content_sha256"],
+        "receipt_sha256": row["receipt_sha256"],
+        "receipt_bytes": bytes(row["receipt_bytes"]),
+    }
+
+
+def _promotion_has_active_research_lease(
+    connection: sqlite3.Connection, profile_id: str, job_key: str
+) -> bool:
+    row = connection.execute(
+        "SELECT status,lease_until FROM employer_research_queue "
+        "WHERE profile_id=? AND job_key=?",
+        (profile_id, job_key),
+    ).fetchone()
+    if row is None or row["status"] != "leased":
+        return False
+    lease_until = row["lease_until"]
+    if type(lease_until) is not str:
+        return True
+    try:
+        expiry = datetime.fromisoformat(lease_until.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if expiry.tzinfo is None or expiry.utcoffset() is None:
+        return True
+    return expiry >= datetime.now(timezone.utc)
+
+
+def _promotion_has_published_handoff(
+    connection: sqlite3.Connection, profile_id: str, job_key: str
+) -> bool:
+    from market_aligner.applications.handoff import parse_handoff_v1
+
+    published = connection.execute(
+        "SELECT application_id,handoff_root_sha256,handoff_exact_bytes "
+        "FROM published_application_handoffs"
+    ).fetchall()
+    for row in published:
+        try:
+            handoff = parse_handoff_v1(bytes(row["handoff_exact_bytes"]))
+        except (TypeError, ValueError, KeyError):
+            raise ValueError("promotion transition refused") from None
+        if (
+            handoff.application_id != row["application_id"]
+            or handoff.root_sha256 != row["handoff_root_sha256"]
+        ):
+            raise ValueError("promotion transition refused")
+        if (
+            handoff.payload.get("profile_id") == profile_id
+            and handoff.payload.get("job_key") == job_key
+        ):
+            return True
+    return False
 
 
 SCHEMA = """
@@ -1637,45 +1762,146 @@ class AssessmentStore:
                 "SELECT * FROM assessment_promotions WHERE profile_id=? AND job_key=?",
                 (profile_id, job_key),
             ).fetchone()
-            if existing is not None:
+            proposed_record = {
+                "profile_id": profile_id,
+                "job_key": job_key,
+                "track": track,
+                "source_sha256": source_content_sha256,
+                "receipt_sha256": receipt_sha256,
+                "receipt_bytes": receipt_bytes,
+            }
+            existing_record = (
+                None if existing is None else _promotion_transition_record(existing)
+            )
+            publication_exists = _promotion_has_published_handoff(
+                connection, profile_id, job_key
+            )
+            research_lease_active = _promotion_has_active_research_lease(
+                connection, profile_id, job_key
+            )
+            transition = choose_processing_promotion_transition(
+                existing_record,
+                proposed_record,
+                publication_exists=publication_exists,
+                research_lease_active=research_lease_active,
+            )
+            if transition == "replay":
+                expected_existing = {
+                    "track": track,
+                    "authority_sha256": authority_sha256,
+                    "source_content_sha256": source_content_sha256,
+                    "processing_config_sha256": processing_config_sha256,
+                    "processing_receipt_sha256": processing_receipt_sha256,
+                    "processing_result_sha256": processing_result_sha256,
+                    "score_payload_hash": current["score_payload_hash"],
+                    "policy_hash": policy_hash,
+                }
                 if (
-                    existing["receipt_sha256"] != receipt_sha256
+                    any(existing[field] != value for field, value in expected_existing.items())
                     or bytes(existing["receipt_bytes"]) != receipt_bytes
+                    or existing["receipt_sha256"] != receipt_sha256
                     or current["opportunity_decision"] != "pass"
                     or current["policy_hash"] != policy_hash
                 ):
-                    raise ValueError("processing promotion conflicts with sealed prior promotion")
-                connection.execute(
-                    """INSERT INTO employer_research_queue(profile_id,job_key,priority)
-                       VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
-                       priority=excluded.priority,refresh_event_id=NULL,
-                       refresh_bridge_sha256=NULL,
-                       updated_at=CURRENT_TIMESTAMP""",
-                    (profile_id, job_key, research_priority),
-                )
+                    raise ValueError(
+                        "processing promotion conflicts with sealed prior promotion"
+                    )
+                if not publication_exists and not research_lease_active:
+                    connection.execute(
+                        """INSERT INTO employer_research_queue(profile_id,job_key,priority)
+                           VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
+                           priority=excluded.priority""",
+                        (profile_id, job_key, research_priority),
+                    )
                 return False
-            connection.execute(
-                """INSERT INTO assessment_promotions(
-                     profile_id,job_key,track,authority_sha256,source_content_sha256,
-                     processing_config_sha256,processing_receipt_sha256,
-                     processing_result_sha256,score_payload_hash,policy_hash,
-                     receipt_bytes,receipt_sha256
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    profile_id,
-                    job_key,
-                    track,
-                    authority_sha256,
-                    source_content_sha256,
-                    processing_config_sha256,
-                    processing_receipt_sha256,
-                    processing_result_sha256,
-                    current["score_payload_hash"],
-                    policy_hash,
-                    sqlite3.Binary(receipt_bytes),
-                    receipt_sha256,
-                ),
-            )
+
+            if transition == "supersede":
+                previous_receipt_bytes = bytes(existing["receipt_bytes"])
+                previous_promotion = {
+                    field: existing[field]
+                    for field in existing.keys()
+                    if field != "receipt_bytes"
+                }
+                previous_promotion["receipt_bytes_base64"] = base64.b64encode(
+                    previous_receipt_bytes
+                ).decode("ascii")
+                supersede_payload = json.dumps(
+                    {
+                        "prior_promotion": previous_promotion,
+                        "replacement_receipt_sha256": receipt_sha256,
+                        "replacement_source_content_sha256": source_content_sha256,
+                        "schema_version": "market-aligner.processing-promotion-supersede-audit.v1",
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                connection.execute(
+                    """INSERT INTO assessment_events(
+                         profile_id,job_key,event_type,actor_kind,payload_json,idempotency_key
+                       ) VALUES(?,?,?,?,?,?)""",
+                    (
+                        profile_id,
+                        job_key,
+                        "processing_assessment_promotion_superseded",
+                        "deterministic",
+                        supersede_payload,
+                        f"processing-promotion-superseded:{profile_id}:{job_key}:"
+                        f"{existing['receipt_sha256']}:{receipt_sha256}",
+                    ),
+                )
+                changed = connection.execute(
+                    """UPDATE assessment_promotions SET
+                         track=?,authority_sha256=?,source_content_sha256=?,
+                         processing_config_sha256=?,processing_receipt_sha256=?,
+                         processing_result_sha256=?,score_payload_hash=?,policy_hash=?,
+                         receipt_bytes=?,receipt_sha256=?,created_at=CURRENT_TIMESTAMP
+                       WHERE profile_id=? AND job_key=? AND source_content_sha256=?
+                         AND receipt_sha256=? AND receipt_bytes=?""",
+                    (
+                        track,
+                        authority_sha256,
+                        source_content_sha256,
+                        processing_config_sha256,
+                        processing_receipt_sha256,
+                        processing_result_sha256,
+                        current["score_payload_hash"],
+                        policy_hash,
+                        sqlite3.Binary(receipt_bytes),
+                        receipt_sha256,
+                        profile_id,
+                        job_key,
+                        existing["source_content_sha256"],
+                        existing["receipt_sha256"],
+                        sqlite3.Binary(previous_receipt_bytes),
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise ValueError("processing promotion pointer changed during transition")
+            else:
+                connection.execute(
+                    """INSERT INTO assessment_promotions(
+                         profile_id,job_key,track,authority_sha256,source_content_sha256,
+                         processing_config_sha256,processing_receipt_sha256,
+                         processing_result_sha256,score_payload_hash,policy_hash,
+                         receipt_bytes,receipt_sha256
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        profile_id,
+                        job_key,
+                        track,
+                        authority_sha256,
+                        source_content_sha256,
+                        processing_config_sha256,
+                        processing_receipt_sha256,
+                        processing_result_sha256,
+                        current["score_payload_hash"],
+                        policy_hash,
+                        sqlite3.Binary(receipt_bytes),
+                        receipt_sha256,
+                    ),
+                )
             connection.execute(
                 """UPDATE assessments SET state='opportunity_promoted',
                      opportunity_decision='pass',opportunity_reason=?,policy_hash=?,
@@ -1687,14 +1913,35 @@ class AssessmentStore:
                     job_key,
                 ),
             )
-            connection.execute(
-                """INSERT INTO employer_research_queue(profile_id,job_key,priority)
-                   VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
-                   priority=excluded.priority,refresh_event_id=NULL,
-                   refresh_bridge_sha256=NULL,
-                   updated_at=CURRENT_TIMESTAMP""",
-                (profile_id, job_key, research_priority),
-            )
+            queue = connection.execute(
+                """SELECT status,refresh_event_id FROM employer_research_queue
+                   WHERE profile_id=? AND job_key=?""",
+                (profile_id, job_key),
+            ).fetchone()
+            if queue is not None and queue["status"] == "leased" and queue["refresh_event_id"] is not None:
+                connection.execute(
+                    """UPDATE employer_research_queue SET status='queued',priority=?,attempts=0,
+                         available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,
+                         last_error=NULL,queued_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                       WHERE profile_id=? AND job_key=?""",
+                    (research_priority, profile_id, job_key),
+                )
+                connection.execute(
+                    """UPDATE employer_research_queue SET refresh_event_id=NULL,
+                         refresh_bridge_sha256=NULL,updated_at=CURRENT_TIMESTAMP
+                       WHERE profile_id=? AND job_key=?""",
+                    (profile_id, job_key),
+                )
+            else:
+                connection.execute(
+                    """INSERT INTO employer_research_queue(profile_id,job_key,priority)
+                       VALUES(?,?,?) ON CONFLICT(profile_id,job_key) DO UPDATE SET
+                       status='queued',priority=excluded.priority,attempts=0,
+                       available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,
+                       last_error=NULL,refresh_event_id=NULL,refresh_bridge_sha256=NULL,
+                       queued_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP""",
+                    (profile_id, job_key, research_priority),
+                )
             connection.execute(
                 """INSERT INTO assessment_events(
                      profile_id,job_key,event_type,actor_kind,payload_json,idempotency_key

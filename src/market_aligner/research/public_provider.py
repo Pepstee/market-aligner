@@ -59,6 +59,95 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def derive_selector_rows(
+    prior_bytes: bytes, current_bytes: bytes, selectors: list[str]
+) -> list[dict[str, str]]:
+    message = "selector value anchor is invalid"
+    if type(prior_bytes) is not bytes or type(current_bytes) is not bytes:
+        raise ValueError(message)
+    if type(selectors) is not list or any(type(value) is not str for value in selectors):
+        raise ValueError(message)
+    try:
+        prior_document = json.loads(prior_bytes)
+        current_document = json.loads(current_bytes)
+        if (
+            type(prior_document) is not dict
+            or type(current_document) is not dict
+            or _canonical_bytes(prior_document) != prior_bytes
+            or _canonical_bytes(current_document) != current_bytes
+        ):
+            raise ValueError
+
+        def string_values(value: object, path: tuple[object, ...] = ()):
+            if type(value) is str:
+                yield path, value
+            elif type(value) is dict:
+                for key, child in value.items():
+                    yield from string_values(child, path + (key,))
+            elif type(value) is list:
+                for index, child in enumerate(value):
+                    yield from string_values(child, path + (index,))
+
+        prior_values = tuple(string_values(prior_document))
+        current_values = dict(string_values(current_document))
+        seen: set[str] = set()
+        rows: list[dict[str, str]] = []
+        for selector in selectors:
+            match = _BYTE_SELECTOR.fullmatch(selector)
+            if match is None or selector in seen:
+                raise ValueError
+            seen.add(selector)
+            start, end = int(match.group(1)), int(match.group(2))
+            if not 0 <= start < end <= len(prior_bytes):
+                raise ValueError
+            selected = prior_bytes[start:end]
+            if not selected.decode("utf-8"):
+                raise ValueError
+
+            anchors: list[tuple[tuple[object, ...], str, int]] = []
+            for path, value in prior_values:
+                token = json.dumps(
+                    value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+                if prior_bytes.count(token) != 1:
+                    continue
+                token_start = prior_bytes.find(token)
+                if (
+                    start >= token_start + 1
+                    and end <= token_start + len(token) - 1
+                ):
+                    anchors.append((path, value, token_start))
+            if len(anchors) != 1:
+                raise ValueError
+
+            path, value, old_token_start = anchors[0]
+            if current_values.get(path) != value or path not in current_values:
+                raise ValueError
+            current_token = json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+            if current_bytes.count(current_token) != 1:
+                raise ValueError
+            current_token_start = current_bytes.find(current_token)
+            relative_start = start - old_token_start
+            relative_end = end - old_token_start
+            new_start = current_token_start + relative_start
+            new_end = current_token_start + relative_end
+            if (
+                new_start < current_token_start + 1
+                or new_end > current_token_start + len(current_token) - 1
+                or current_bytes[new_start:new_end] != selected
+            ):
+                raise ValueError
+            rows.append({
+                "prior_selector": selector,
+                "reviewed_current_selector": f"bytes:{new_start}-{new_end}",
+            })
+        return rows
+    except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError):
+        raise ValueError(message) from None
+
+
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -1786,6 +1875,13 @@ class RefreshDerivedResearchProvider:
             )
         citation = prior.citations[0]
         planned_claims: list[PlannedClaim] = []
+        selector_mapping = self._selector_map
+        selector_derivation_attempted = False
+        prior_selectors = [
+            support.selector
+            for claim in prior.claims
+            for support in claim.supports
+        ]
         for claim in prior.claims:
             if (
                 tuple(claim.citation_ids) != (citation.citation_id,)
@@ -1814,33 +1910,52 @@ class RefreshDerivedResearchProvider:
                 ):
                     raise PublicResearchError("prior claim support differs from dossier")
                 reviewed_selector = (
-                    self._selector_map.get(support.selector, support.selector)
-                    if self._selector_map is not None
+                    selector_mapping.get(support.selector, support.selector)
+                    if selector_mapping is not None
                     else support.selector
                 )
-                reviewed_match = _BYTE_SELECTOR.fullmatch(reviewed_selector)
-                if reviewed_match is None:
-                    raise PublicResearchError("reviewed current selector is invalid")
-                current_start, current_end = (
-                    int(reviewed_match.group(1)), int(reviewed_match.group(2))
-                )
-                current_selected = current.body[current_start:current_end]
-                try:
-                    current_excerpt = current_selected.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise PublicResearchError(
-                        "current support at prior selector is not UTF-8"
-                    ) from exc
-                if (
-                    current_end > len(current.body)
-                    or current_excerpt != support.excerpt
-                    or _sha256(current_selected) != support.excerpt_sha256
-                    or " ".join(claim.claim.split())
-                    != " ".join(current_excerpt.split())
-                ):
-                    raise PublicResearchError(
-                        "current claim differs at the exact prior selector"
+                def current_support_matches(selector: str) -> bool:
+                    reviewed_match = _BYTE_SELECTOR.fullmatch(selector)
+                    if reviewed_match is None:
+                        return False
+                    current_start, current_end = (
+                        int(reviewed_match.group(1)), int(reviewed_match.group(2))
                     )
+                    if current_end > len(current.body):
+                        return False
+                    current_selected = current.body[current_start:current_end]
+                    try:
+                        current_excerpt = current_selected.decode("utf-8")
+                    except UnicodeDecodeError:
+                        return False
+                    return (
+                        current_excerpt == support.excerpt
+                        and _sha256(current_selected) == support.excerpt_sha256
+                        and " ".join(claim.claim.split())
+                        == " ".join(current_excerpt.split())
+                    )
+
+                if not current_support_matches(reviewed_selector):
+                    if (
+                        self._selector_map is None
+                        and not selector_derivation_attempted
+                    ):
+                        selector_derivation_attempted = True
+                        try:
+                            rows = derive_selector_rows(
+                                prior_bytes, current.body, prior_selectors
+                            )
+                            selector_mapping = self._selector_map_rows(
+                                prior, prior_bytes, current, rows
+                            )
+                        except ValueError:
+                            selector_mapping = None
+                        if selector_mapping is not None:
+                            reviewed_selector = selector_mapping[support.selector]
+                    if not current_support_matches(reviewed_selector):
+                        raise PublicResearchError(
+                            "current claim differs at the exact prior selector"
+                        )
                 planned_supports.append(
                     PlannedSupport(
                         citation.citation_id,

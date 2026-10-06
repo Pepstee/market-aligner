@@ -282,10 +282,7 @@ def _structured_work_country_quote_supports(
     if not isinstance(location, Mapping):
         return False
     location_name = location.get("name")
-    offices = source_listing.get("offices")
     if not isinstance(location_name, str) or not location_name.strip():
-        return False
-    if not isinstance(offices, (list, tuple)):
         return False
 
     def normalize(text: str) -> str:
@@ -293,6 +290,18 @@ def _structured_work_country_quote_supports(
 
     normalized_quote = normalize(quote)
     normalized_location = normalize(location_name)
+    if (
+        code == "GB"
+        and normalized_quote == normalized_location
+        and (
+            normalized_location == "united kingdom"
+            or normalized_location.endswith(", united kingdom")
+        )
+    ):
+        return True
+    offices = source_listing.get("offices")
+    if not isinstance(offices, (list, tuple)):
+        return False
     for office in offices:
         if not isinstance(office, Mapping):
             continue

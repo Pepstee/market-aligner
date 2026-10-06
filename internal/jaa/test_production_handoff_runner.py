@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from career_automation import production_handoff_runner as runner
+from career_automation.market_aligner_handoff import parse_handoff_for_runtime
 
 from market_aligner.applications import production_handoff as production_module
 from market_aligner.applications.handoff import canonical_json_bytes
@@ -602,6 +603,94 @@ def test_current_runtime_cli_arguments_are_all_or_none(provided: dict[str, str])
         )
 
 
+def test_current_recovery_manifest_locator_requires_current_runtime() -> None:
+    with pytest.raises(
+        runner.ProductionHandoffDeploymentError,
+        match="requires current runtime opt-in",
+    ):
+        runner.run_production_handoff(
+            profile_id="prf_" + "1" * 32,
+            track="software-engineering",
+            source_job_key="workable:cogna:847CFBC5F4",
+            current_recovery_manifest_relative_path=(
+                "recovered-inputs/synthetic/recovery-manifest.json"
+            ),
+        )
+
+
+def test_handoff_consumer_dispatch_is_explicit_and_keeps_current_nonrelease() -> None:
+    payload = {"synthetic": True}
+    payload_sha256 = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+    envelope = {
+        "payload": payload,
+        "payload_sha256": payload_sha256,
+        "schema_version": "market-aligner.jaa-handoff.current-runtime.v1",
+    }
+    raw = canonical_json_bytes(envelope)
+    current_value = SimpleNamespace(
+        exact_bytes=raw,
+        payload_sha256=payload_sha256,
+        root_sha256=hashlib.sha256(raw).hexdigest(),
+        schema_version=envelope["schema_version"],
+        emission_profile="current_runtime_non_release_v1",
+        release_blocked=True,
+    )
+    legacy_calls: list[bytes] = []
+    current_calls: list[bytes] = []
+    made: list[dict[str, object]] = []
+
+    def legacy_parser(value: bytes, *, require_strict_profile: bool) -> str:
+        legacy_calls.append(value)
+        assert require_strict_profile is False
+        return "legacy"
+
+    def current_parser(value: bytes) -> SimpleNamespace:
+        current_calls.append(value)
+        return current_value
+
+    def make_parsed(**values: object) -> SimpleNamespace:
+        made.append(values)
+        return SimpleNamespace(**values)
+
+    legacy_result = parse_handoff_for_runtime(
+        b"legacy-bytes",
+        current_runtime=False,
+        require_strict_profile=False,
+        legacy_parser=legacy_parser,
+        current_parser=current_parser,
+        make_parsed=make_parsed,
+    )
+    assert legacy_result == "legacy"
+    assert legacy_calls == [b"legacy-bytes"]
+    assert current_calls == []
+    assert made == []
+
+    parsed = parse_handoff_for_runtime(
+        raw,
+        current_runtime=True,
+        require_strict_profile=False,
+        legacy_parser=legacy_parser,
+        current_parser=current_parser,
+        make_parsed=make_parsed,
+    )
+    assert current_calls == [raw]
+    assert parsed.original_bytes == raw
+    assert parsed.emission_profile == "current_runtime_non_release_v1"
+    assert parsed.strict_profile_violations == ()
+    assert legacy_calls == [b"legacy-bytes"]
+
+    with pytest.raises(ValueError, match="invalid handoff consumer dispatch"):
+        parse_handoff_for_runtime(
+            raw,
+            current_runtime=True,
+            require_strict_profile=True,
+            legacy_parser=legacy_parser,
+            current_parser=current_parser,
+            make_parsed=make_parsed,
+        )
+    assert legacy_calls == [b"legacy-bytes"]
+
+
 def test_current_runtime_runner_uses_local_time_and_never_calls_production_witness(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -652,10 +741,16 @@ def test_current_runtime_runner_uses_local_time_and_never_calls_production_witne
         current_runtime_config_path="/private/config.json",
         current_runtime_config_sha256="e" * 64,
         current_runtime_private_root="/private",
+        current_recovery_manifest_relative_path=(
+            "recovered-inputs/synthetic/recovery-manifest.json"
+        ),
     )
     assert result is expected
     assert observed["deployment"].environment == "current_runtime"
     assert observed["freshness_time"].tzinfo == timezone.utc
+    assert observed["current_recovery_manifest_relative_path"] == (
+        "recovered-inputs/synthetic/recovery-manifest.json"
+    )
 
 
 def test_current_runtime_receipt_document_is_distinct_and_nonrelease() -> None:

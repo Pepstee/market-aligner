@@ -7804,6 +7804,609 @@ class CandidateFactsAdmission:
     status_downgraded: bool
 
 
+_CURRENT_ELIGIBILITY_RECEIPT_SCHEMA = "market-aligner.current-eligibility-receipt.v1"
+_CURRENT_ELIGIBILITY_RECEIPT_INVALID = "invalid current eligibility receipt"
+_CURRENT_ELIGIBILITY_RECEIPT_MAX_BYTES = 65_536
+_CURRENT_ELIGIBILITY_RECEIPT_MAX_TEXT = 512
+_CURRENT_ELIGIBILITY_BINDING_TEXT_KEYS = (
+    "profile_id", "profile_version", "track", "source_job_key",
+)
+_CURRENT_ELIGIBILITY_BINDING_HASH_KEYS = (
+    "profile_file_sha256", "evidence_file_sha256", "normalized_json_sha256",
+    "source_content_sha256", "processing_receipt_sha256",
+    "promotion_receipt_sha256", "candidate_policy_receipt_sha256",
+    "vacancy_facts_receipt_sha256", "activation_receipt_sha256",
+    "candidate_facts_sha256", "vacancy_facts_sha256",
+)
+_CURRENT_ELIGIBILITY_BINDING_KEYS = frozenset(
+    _CURRENT_ELIGIBILITY_BINDING_TEXT_KEYS
+) | frozenset(_CURRENT_ELIGIBILITY_BINDING_HASH_KEYS)
+_CURRENT_ELIGIBILITY_RECEIPT_KEYS = frozenset({
+    "schema_version", "binding", "decision", "reasons", "unknowns",
+    "eligibility_authority", "release_authority", "submission_authority",
+})
+_CURRENT_ELIGIBILITY_TOKEN_RE = re.compile(r"[a-z][a-z0-9_]{0,95}\Z")
+_CURRENT_ELIGIBILITY_HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _current_eligibility_receipt_fail() -> None:
+    raise ValueError(_CURRENT_ELIGIBILITY_RECEIPT_INVALID)
+
+
+def _current_eligibility_exact_keys(value: object, expected: frozenset[str]) -> bool:
+    return (
+        type(value) is dict
+        and all(type(key) is str for key in value)
+        and set(value) == expected
+    )
+
+
+def validate_current_eligibility_binding(binding: object) -> dict[str, str]:
+    if not _current_eligibility_exact_keys(
+        binding, _CURRENT_ELIGIBILITY_BINDING_KEYS
+    ):
+        _current_eligibility_receipt_fail()
+    clean: dict[str, str] = {}
+    for key in _CURRENT_ELIGIBILITY_BINDING_TEXT_KEYS:
+        value = binding[key]
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or len(value) > _CURRENT_ELIGIBILITY_RECEIPT_MAX_TEXT
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+        ):
+            _current_eligibility_receipt_fail()
+        clean[key] = value
+    for key in _CURRENT_ELIGIBILITY_BINDING_HASH_KEYS:
+        value = binding[key]
+        if (
+            type(value) is not str
+            or _CURRENT_ELIGIBILITY_HASH_RE.fullmatch(value) is None
+        ):
+            _current_eligibility_receipt_fail()
+        clean[key] = value
+    return clean
+
+
+def _current_eligibility_tokens(value: object) -> list[str]:
+    if type(value) is not list or any(
+        type(token) is not str
+        or _CURRENT_ELIGIBILITY_TOKEN_RE.fullmatch(token) is None
+        for token in value
+    ) or value != sorted(set(value)):
+        _current_eligibility_receipt_fail()
+    return list(value)
+
+
+def _current_eligibility_expected_decision(
+    reasons: list[str], unknowns: list[str]
+) -> str:
+    return "reject" if reasons else "review" if unknowns else "pass"
+
+
+def _validate_current_eligibility_document(document: object) -> dict[str, Any]:
+    if not _current_eligibility_exact_keys(
+        document, _CURRENT_ELIGIBILITY_RECEIPT_KEYS
+    ):
+        _current_eligibility_receipt_fail()
+    if (
+        type(document["schema_version"]) is not str
+        or document["schema_version"] != _CURRENT_ELIGIBILITY_RECEIPT_SCHEMA
+    ):
+        _current_eligibility_receipt_fail()
+    decision = document["decision"]
+    if type(decision) is not str or decision not in {"pass", "review", "reject"}:
+        _current_eligibility_receipt_fail()
+    reasons = _current_eligibility_tokens(document["reasons"])
+    unknowns = _current_eligibility_tokens(document["unknowns"])
+    if set(reasons) & set(unknowns):
+        _current_eligibility_receipt_fail()
+    if decision != _current_eligibility_expected_decision(reasons, unknowns):
+        _current_eligibility_receipt_fail()
+    if (
+        type(document["eligibility_authority"]) is not bool
+        or document["eligibility_authority"] is not (decision == "pass")
+        or type(document["release_authority"]) is not bool
+        or document["release_authority"] is not False
+        or type(document["submission_authority"]) is not bool
+        or document["submission_authority"] is not False
+    ):
+        _current_eligibility_receipt_fail()
+    return {
+        "schema_version": _CURRENT_ELIGIBILITY_RECEIPT_SCHEMA,
+        "binding": validate_current_eligibility_binding(document["binding"]),
+        "decision": decision,
+        "reasons": reasons,
+        "unknowns": unknowns,
+        "eligibility_authority": decision == "pass",
+        "release_authority": False,
+        "submission_authority": False,
+    }
+
+
+def _current_eligibility_canonical_bytes(document: dict[str, Any]) -> bytes:
+    try:
+        return json.dumps(
+            document,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8", errors="strict")
+    except (TypeError, ValueError, UnicodeEncodeError):
+        _current_eligibility_receipt_fail()
+
+
+def build_current_eligibility_receipt(
+    *, binding: object, decision: object, reasons: object, unknowns: object
+) -> bytes:
+    clean_binding = validate_current_eligibility_binding(binding)
+    if type(decision) is not str or decision not in {"pass", "review", "reject"}:
+        _current_eligibility_receipt_fail()
+    clean_reasons = _current_eligibility_tokens(reasons)
+    clean_unknowns = _current_eligibility_tokens(unknowns)
+    if (
+        set(clean_reasons) & set(clean_unknowns)
+        or decision != _current_eligibility_expected_decision(
+            clean_reasons, clean_unknowns
+        )
+    ):
+        _current_eligibility_receipt_fail()
+    document = _validate_current_eligibility_document({
+        "schema_version": _CURRENT_ELIGIBILITY_RECEIPT_SCHEMA,
+        "binding": clean_binding,
+        "decision": decision,
+        "reasons": clean_reasons,
+        "unknowns": clean_unknowns,
+        "eligibility_authority": decision == "pass",
+        "release_authority": False,
+        "submission_authority": False,
+    })
+    raw = _current_eligibility_canonical_bytes(document)
+    if not raw or len(raw) > _CURRENT_ELIGIBILITY_RECEIPT_MAX_BYTES:
+        _current_eligibility_receipt_fail()
+    return raw
+
+
+def _current_eligibility_reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, member in pairs:
+        if key in value:
+            _current_eligibility_receipt_fail()
+        value[key] = member
+    return value
+
+
+def _current_eligibility_reject_constant(_name: str) -> None:
+    _current_eligibility_receipt_fail()
+
+
+def parse_current_eligibility_receipt(
+    raw: object, *, expected_binding: object
+) -> dict[str, Any]:
+    if (
+        type(raw) is not bytes
+        or not raw
+        or len(raw) > _CURRENT_ELIGIBILITY_RECEIPT_MAX_BYTES
+    ):
+        _current_eligibility_receipt_fail()
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        document = json.loads(
+            text,
+            object_pairs_hook=_current_eligibility_reject_duplicate_pairs,
+            parse_constant=_current_eligibility_reject_constant,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        _current_eligibility_receipt_fail()
+    clean = _validate_current_eligibility_document(document)
+    expected = validate_current_eligibility_binding(expected_binding)
+    if any(clean["binding"][key] != expected[key] for key in _CURRENT_ELIGIBILITY_BINDING_KEYS):
+        _current_eligibility_receipt_fail()
+    if _current_eligibility_canonical_bytes(clean) != raw:
+        _current_eligibility_receipt_fail()
+    return clean
+
+
+def build_current_eligibility_receipt_from_decision(
+    *, binding: object, decision: object
+) -> bytes:
+    """Serialize a result from the existing pure eligibility decision owner.
+
+    Call only after the candidate references and vacancy extraction receipt
+    have been verified by their existing source-bound owners. This codec
+    carries no such source or release authority itself.
+    """
+    from market_aligner.assessment.eligibility import EligibilityDecision
+
+    if type(decision) is not EligibilityDecision:
+        _current_eligibility_receipt_fail()
+    return build_current_eligibility_receipt(
+        binding=binding,
+        decision=decision.decision,
+        reasons=list(decision.reasons),
+        unknowns=list(decision.unknowns),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class CandidateReferenceValidation:
+    evidence_ids: tuple[str, ...]
+    supported: bool
+
+
+def validate_candidate_evidence_refs(
+    refs: object, *, catalog: object, invalidated_ids: object
+) -> CandidateReferenceValidation:
+    """Bind selected references to a caller-verified current source catalog."""
+    reject = "invalid candidate reference"
+    ref_keys = _CANDIDATE_REF_KEYS
+    entry_keys = {
+        "evidence_id", "kind", "status", "claim", "source_ref",
+        "content_sha256",
+    }
+    statuses = {"verified", "explicit", "inference", "unverified_current"}
+    supported_statuses = {"verified", "explicit"}
+
+    def exact_keys(value: object, expected: set[str]) -> bool:
+        return (
+            type(value) is dict
+            and len(value) == len(expected)
+            and all(type(key) is str for key in value)
+            and set(value) == expected
+        )
+
+    def valid_text(value: object, *, identifier: bool = False) -> bool:
+        return (
+            type(value) is str
+            and bool(value.strip())
+            and (not identifier or len(value) <= 256)
+        )
+
+    def valid_hash(value: object) -> bool:
+        return (
+            type(value) is str
+            and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+        )
+
+    if (
+        type(refs) is not list
+        or not 1 <= len(refs) <= MAX_TOTAL_CANDIDATE_REFS
+        or type(catalog) is not dict
+        or type(invalidated_ids) is not frozenset
+        or any(not valid_text(value, identifier=True) for value in invalidated_ids)
+        or any(type(key) is not str for key in catalog)
+    ):
+        raise ValueError(reject)
+
+    collected: list[str] = []
+    seen: set[str] = set()
+    all_supported = True
+    for ref in refs:
+        if not exact_keys(ref, ref_keys):
+            raise ValueError(reject)
+        evidence_id = ref["evidence_id"]
+        kind = ref["kind"]
+        status = ref["status"]
+        if (
+            not valid_text(evidence_id, identifier=True)
+            or not valid_text(kind, identifier=True)
+            or type(status) is not str
+            or status not in statuses
+            or any(
+                not valid_hash(ref[field])
+                for field in ("claim_sha256", "source_ref_sha256", "content_sha256")
+            )
+            or evidence_id in seen
+            or evidence_id in invalidated_ids
+        ):
+            raise ValueError(reject)
+        entry = catalog.get(evidence_id)
+        if (
+            not exact_keys(entry, entry_keys)
+            or entry["evidence_id"] != evidence_id
+            or entry["kind"] != kind
+            or entry["status"] != status
+            or not valid_text(entry["evidence_id"], identifier=True)
+            or not valid_text(entry["kind"], identifier=True)
+            or not valid_text(entry["status"])
+            or entry["status"] not in statuses
+            or not valid_hash(entry["content_sha256"])
+            or entry["content_sha256"] != ref["content_sha256"]
+            or not valid_text(entry["claim"])
+            or not valid_text(entry["source_ref"])
+        ):
+            raise ValueError(reject)
+        try:
+            claim_bytes = entry["claim"].encode("utf-8", errors="strict")
+            source_bytes = entry["source_ref"].encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            raise ValueError(reject) from None
+        if (
+            hashlib.sha256(claim_bytes).hexdigest() != ref["claim_sha256"]
+            or hashlib.sha256(source_bytes).hexdigest() != ref["source_ref_sha256"]
+        ):
+            raise ValueError(reject)
+        seen.add(evidence_id)
+        collected.append(evidence_id)
+        all_supported = all_supported and status in supported_statuses
+    return CandidateReferenceValidation(tuple(collected), all_supported)
+
+
+def bind_current_candidate_policy_refs(
+    selection: object, *, catalog: object
+) -> dict[str, Any]:
+    """Bind model-selected source IDs to exact current catalog references."""
+    invalid = "current candidate policy selection is malformed"
+    if (
+        type(selection) is not dict
+        or set(selection) != _CANDIDATE_FACTS_KEYS
+        or type(catalog) is not dict
+        or any(type(key) is not str for key in catalog)
+    ):
+        raise ValueError(invalid)
+
+    entry_keys = {
+        "evidence_id", "kind", "status", "claim", "source_ref",
+        "content_sha256",
+    }
+    ref_total = 0
+
+    def bind_ids(source_ids: object) -> list[dict[str, str]]:
+        nonlocal ref_total
+        if (
+            type(source_ids) is not list
+            or not source_ids
+            or any(
+                type(source_id) is not str
+                or not source_id.strip()
+                or len(source_id) > 256
+                for source_id in source_ids
+            )
+            or len(set(source_ids)) != len(source_ids)
+        ):
+            raise ValueError(invalid)
+        ref_total += len(source_ids)
+        if ref_total > MAX_TOTAL_CANDIDATE_REFS:
+            raise ValueError(invalid)
+        refs: list[dict[str, str]] = []
+        for source_id in source_ids:
+            entry = catalog.get(source_id)
+            if (
+                type(entry) is not dict
+                or set(entry) != entry_keys
+                or entry.get("evidence_id") != source_id
+                or type(entry.get("claim")) is not str
+                or type(entry.get("source_ref")) is not str
+                or type(entry.get("kind")) is not str
+                or type(entry.get("status")) is not str
+                or type(entry.get("content_sha256")) is not str
+            ):
+                raise ValueError(invalid)
+            try:
+                claim_hash = hashlib.sha256(
+                    entry["claim"].encode("utf-8", errors="strict")
+                ).hexdigest()
+                source_hash = hashlib.sha256(
+                    entry["source_ref"].encode("utf-8", errors="strict")
+                ).hexdigest()
+            except UnicodeEncodeError:
+                raise ValueError(invalid) from None
+            refs.append(
+                {
+                    "evidence_id": source_id,
+                    "kind": entry["kind"],
+                    "status": entry["status"],
+                    "claim_sha256": claim_hash,
+                    "source_ref_sha256": source_hash,
+                    "content_sha256": entry["content_sha256"],
+                }
+            )
+        return refs
+
+    candidate_facts: dict[str, Any] = {}
+    set_fields = {"authorised_jurisdictions", "excluded_contract_types"}
+    for field in sorted(_CANDIDATE_FACTS_KEYS):
+        selected = selection[field]
+        if selected is None:
+            candidate_facts[field] = None
+            continue
+        if (
+            type(selected) is not dict
+            or set(selected) != {"value", "source_ids"}
+        ):
+            raise ValueError(invalid)
+        if field in set_fields:
+            values = selected["value"]
+            if type(values) is not list:
+                raise ValueError(invalid)
+            members: list[dict[str, Any]] = []
+            for member in values:
+                if (
+                    type(member) is not dict
+                    or set(member) != {"value", "source_ids"}
+                ):
+                    raise ValueError(invalid)
+                members.append(
+                    {
+                        "refs": bind_ids(member["source_ids"]),
+                        "value": member["value"],
+                    }
+                )
+            candidate_facts[field] = {
+                "refs": bind_ids(selected["source_ids"]),
+                "value": members,
+            }
+        else:
+            candidate_facts[field] = {
+                "refs": bind_ids(selected["source_ids"]),
+                "value": selected["value"],
+            }
+    return candidate_facts
+
+
+def admit_current_candidate_facts(
+    payload: Any, *, catalog: object, invalidated_ids: object
+) -> CandidateFactsAdmission:
+    """Admit current facts only after binding every ref to its live catalog."""
+    admission = admit_candidate_facts(payload)
+    supported = True
+    set_fields = {"authorised_jurisdictions", "excluded_contract_types"}
+    for field in sorted(_CANDIDATE_FACTS_KEYS):
+        wrapper = payload[field]
+        if wrapper is None:
+            continue
+        ref_groups = [wrapper["refs"]]
+        if field in set_fields:
+            ref_groups.extend(member["refs"] for member in wrapper["value"])
+        field_supported = True
+        for refs in ref_groups:
+            result = validate_candidate_evidence_refs(
+                refs, catalog=catalog, invalidated_ids=invalidated_ids
+            )
+            field_supported = field_supported and result.supported
+        if not field_supported:
+            admission.effective[field] = None
+            supported = False
+    return CandidateFactsAdmission(
+        staged_canonical=admission.staged_canonical,
+        effective=admission.effective,
+        status_downgraded=(admission.status_downgraded or not supported),
+    )
+
+
+_SAVED_CANDIDATE_POLICY_INVALID = "invalid saved candidate policy"
+_SAVED_CANDIDATE_POLICY_DOCUMENT_KEYS = frozenset({
+    "schema", "activation_file_sha256", "activation_name", "activation_sha256",
+    "active_snapshot_hashes", "profile_id", "receipt", "recovery_manifest_sha256",
+    "request", "request_matches_receipt", "selection", "target_job_jurisdiction",
+    "target_job_key",
+})
+_SAVED_CANDIDATE_POLICY_PROVENANCE_KEYS = frozenset({
+    "activation_file_sha256", "activation_name", "activation_sha256",
+    "active_snapshot_hashes", "profile_id", "recovery_manifest_sha256",
+})
+_SAVED_CANDIDATE_POLICY_TARGET_KEYS = frozenset({
+    "target_job_jurisdiction", "target_job_key",
+})
+
+
+def _saved_candidate_policy_canonical(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8", errors="strict")
+    except (TypeError, ValueError, RecursionError, UnicodeError):
+        raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID) from None
+
+
+def _saved_candidate_policy_exact_dict(
+    value: object, expected_keys: frozenset[str] | None = None
+) -> None:
+    if (
+        type(value) is not dict
+        or any(type(key) is not str for key in value)
+        or (expected_keys is not None and set(value) != expected_keys)
+    ):
+        raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+
+
+def _saved_candidate_policy_invalidated_ids(value: object) -> list[str]:
+    if type(value) is not list or len(value) > 512:
+        raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+    seen: set[str] = set()
+    for evidence_id in value:
+        if (
+            type(evidence_id) is not str
+            or not evidence_id
+            or evidence_id != evidence_id.strip()
+            or evidence_id in seen
+        ):
+            raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+        seen.add(evidence_id)
+    return list(value)
+
+
+def admit_saved_candidate_policy(
+    document: object,
+    *,
+    expected_provenance: object,
+    expected_target: object,
+    expected_request: object,
+    catalog: object,
+    verify_receipt: Any,
+    bind_refs: Any,
+    admit_refs: Any,
+) -> CandidateFactsAdmission:
+    """Validate a saved policy canary against live inputs, then admit its refs."""
+    _saved_candidate_policy_exact_dict(
+        document, _SAVED_CANDIDATE_POLICY_DOCUMENT_KEYS
+    )
+    if (
+        type(document["schema"]) is not str
+        or document["schema"] != "market-aligner.current-candidate-policy-canary.v1"
+        or document["request_matches_receipt"] is not True
+        or len(_saved_candidate_policy_canonical(document)) > 1024 * 1024
+    ):
+        raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+    _saved_candidate_policy_exact_dict(
+        expected_provenance, _SAVED_CANDIDATE_POLICY_PROVENANCE_KEYS
+    )
+    _saved_candidate_policy_exact_dict(
+        expected_target, _SAVED_CANDIDATE_POLICY_TARGET_KEYS
+    )
+    _saved_candidate_policy_exact_dict(expected_request)
+    _saved_candidate_policy_exact_dict(document["request"])
+    _saved_candidate_policy_exact_dict(document["receipt"])
+    _saved_candidate_policy_exact_dict(document["selection"])
+    _saved_candidate_policy_exact_dict(catalog)
+    if "invalidated_ids" not in expected_request:
+        raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+    invalidated_ids = _saved_candidate_policy_invalidated_ids(
+        expected_request["invalidated_ids"]
+    )
+    for key in sorted(_SAVED_CANDIDATE_POLICY_PROVENANCE_KEYS):
+        if _saved_candidate_policy_canonical(document[key]) != (
+            _saved_candidate_policy_canonical(expected_provenance[key])
+        ):
+            raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+    for key in sorted(_SAVED_CANDIDATE_POLICY_TARGET_KEYS):
+        if _saved_candidate_policy_canonical(document[key]) != (
+            _saved_candidate_policy_canonical(expected_target[key])
+        ):
+            raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+    if _saved_candidate_policy_canonical(document["request"]) != (
+        _saved_candidate_policy_canonical(expected_request)
+    ):
+        raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+    if not all(callable(callback) for callback in (verify_receipt, bind_refs, admit_refs)):
+        raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+
+    receipt_copy = copy.deepcopy(document["receipt"])
+    request_copy = copy.deepcopy(document["request"])
+    selection_for_verify = copy.deepcopy(document["selection"])
+    selection_for_bind = copy.deepcopy(document["selection"])
+    catalog_for_bind = copy.deepcopy(catalog)
+    catalog_for_admit = copy.deepcopy(catalog)
+    if verify_receipt(
+        receipt_copy,
+        inputs=request_copy,
+        output=selection_for_verify,
+    ) is not None:
+        raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+    bound = bind_refs(selection_for_bind, catalog=catalog_for_bind)
+    return admit_refs(
+        bound,
+        catalog=catalog_for_admit,
+        invalidated_ids=frozenset(invalidated_ids),
+    )
+
+
 def admit_candidate_facts(payload: Any) -> CandidateFactsAdmission:
     """Validate staged candidate facts and derive the effective decision view.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
+import base64
 import hashlib
 import io
 import json
@@ -49,15 +50,22 @@ from market_aligner.profiler.schema import (
     new_profile_id,
 )
 from market_aligner.profiler.store import ProfileStore
+from market_aligner.research.store import choose_processing_promotion_transition
 from market_aligner.service.api import AssessmentRequest, MarketAlignerService
 from market_aligner.service import processing as processing_module
 from market_aligner.service.processing import ProcessingService
-from market_aligner.state.vacancies import JobDatabase
+from market_aligner.state.vacancies import JobDatabase, raw_posting_content_sha256
 
 
 class FixtureSemanticWorker:
-    def __init__(self, *, drift_extraction_input: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        drift_extraction_input: bool = False,
+        eligibility_prompt_version: str | None = "eligibility-v1",
+    ) -> None:
         self.drift_extraction_input = drift_extraction_input
+        self.vacancy_eligibility_prompt_version = eligibility_prompt_version
         self.extractions = 0
         self.alignments = 0
         self.eligibility_extractions = 0
@@ -115,7 +123,7 @@ class FixtureSemanticWorker:
             receipt_id=f"eligibility-{self.eligibility_extractions}",
             task=VACANCY_ELIGIBILITY_FACTS_TASK,
             model="fixture-semantic-v1",
-            prompt_version="eligibility-v1",
+            prompt_version=str(self.vacancy_eligibility_prompt_version),
             inputs=raw_context,
             output=facts,
             created_at="2026-08-20T00:00:00Z",
@@ -161,6 +169,7 @@ class FixtureSemanticWorker:
 class LegacyFixtureSemanticWorker(FixtureSemanticWorker):
     def __init__(self) -> None:
         super().__init__()
+        self.vacancy_eligibility_prompt_version = None
         self.extract_vacancy_eligibility = None
 
 
@@ -255,6 +264,133 @@ def _processing_fixture(root: Path, *, jobs: int = 1) -> tuple[str, Path]:
 
 
 class ServiceTests(unittest.TestCase):
+    def test_processing_promotion_transition_requires_changed_source_and_receipt(self) -> None:
+        existing = {
+            "profile_id": "profile-fixture",
+            "job_key": "board:1",
+            "track": "automation",
+            "source_sha256": "a" * 64,
+            "receipt_sha256": "b" * 64,
+            "receipt_bytes": b"prior receipt",
+        }
+        proposed = {
+            **existing,
+            "source_sha256": "c" * 64,
+            "receipt_sha256": "d" * 64,
+            "receipt_bytes": b"replacement receipt",
+        }
+        self.assertEqual(
+            "replay",
+            choose_processing_promotion_transition(
+                existing,
+                existing,
+                publication_exists=False,
+                research_lease_active=False,
+            ),
+        )
+        self.assertEqual(
+            "supersede",
+            choose_processing_promotion_transition(
+                existing,
+                proposed,
+                publication_exists=False,
+                research_lease_active=False,
+            ),
+        )
+        for blocked_publication, blocked_lease in ((True, False), (False, True)):
+            with self.subTest(
+                publication_exists=blocked_publication,
+                research_lease_active=blocked_lease,
+            ):
+                with self.assertRaisesRegex(ValueError, "promotion transition refused"):
+                    choose_processing_promotion_transition(
+                        existing,
+                        proposed,
+                        publication_exists=blocked_publication,
+                        research_lease_active=blocked_lease,
+                    )
+        for unchanged in (
+            {**proposed, "receipt_sha256": existing["receipt_sha256"]},
+            {**proposed, "source_sha256": existing["source_sha256"]},
+        ):
+            with self.subTest(unchanged=unchanged):
+                with self.assertRaisesRegex(ValueError, "promotion transition refused"):
+                    choose_processing_promotion_transition(
+                        existing,
+                        unchanged,
+                        publication_exists=False,
+                        research_lease_active=False,
+                    )
+
+        class KeySubclass(str):
+            pass
+
+        malformed = {KeySubclass("profile_id"): "profile-fixture", **existing}
+        with self.assertRaisesRegex(ValueError, "promotion transition refused"):
+            choose_processing_promotion_transition(
+                malformed,
+                proposed,
+                publication_exists=False,
+                research_lease_active=False,
+            )
+
+    def test_processing_prompt_version_change_misses_old_semantic_cache(self) -> None:
+        cached = {
+            "receipt": {
+                "task": VACANCY_ELIGIBILITY_FACTS_TASK,
+                "prompt_version": "eligibility-v2",
+            }
+        }
+        callbacks: list[str] = []
+        self.assertIsNone(
+            processing_module.reuse_current_semantic_cache(
+                cached,
+                expected_task=VACANCY_ELIGIBILITY_FACTS_TASK,
+                expected_prompt_version="eligibility-v3",
+                validate_current=lambda _record: callbacks.append("stale"),
+            )
+        )
+        self.assertEqual([], callbacks)
+        self.assertEqual(
+            "validated",
+            processing_module.reuse_current_semantic_cache(
+                cached,
+                expected_task=VACANCY_ELIGIBILITY_FACTS_TASK,
+                expected_prompt_version="eligibility-v2",
+                validate_current=lambda _record: "validated",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            old_worker = FixtureSemanticWorker(
+                eligibility_prompt_version="eligibility-v2"
+            )
+            old_run = ProcessingService(root, old_worker).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="prompt-v2-worker",
+                job_key="fixture:1",
+            )
+            new_worker = FixtureSemanticWorker(
+                eligibility_prompt_version="eligibility-v3"
+            )
+            new_run = ProcessingService(root, new_worker).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="prompt-v3-worker",
+                job_key="fixture:1",
+            )
+        self.assertNotEqual(old_run["config_sha256"], new_run["config_sha256"])
+        self.assertEqual(1, new_run["shard_claimed"])
+        self.assertEqual((0, 0, 1), (
+            new_worker.extractions,
+            new_worker.alignments,
+            new_worker.eligibility_extractions,
+        ))
+
     def test_fresh_assessment_database_is_owner_private_under_common_umask(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "state" / "assessments.sqlite3"
@@ -748,6 +884,195 @@ class ServiceTests(unittest.TestCase):
                     job_key="fixture:1",
                     processing_receipt_path=Path(run["receipt_path"]),
                 )
+
+    def test_processing_promotion_supersedes_completed_research_and_requeues_current_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            first_run = ProcessingService(root, FixtureSemanticWorker()).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="promotion-first-worker",
+                job_key="fixture:1",
+            )
+            service = MarketAlignerService(root)
+            prior = service.promote_processing(
+                profile_id=profile_id,
+                track="automation",
+                job_key="fixture:1",
+                processing_receipt_path=Path(first_run["receipt_path"]),
+            )
+            prior_promotion = service.assessments.processing_promotion(
+                profile_id, "fixture:1"
+            )
+            prior_receipt_bytes = bytes(prior_promotion["receipt_bytes"])
+            prior_source_sha256 = str(prior_promotion["source_content_sha256"])
+            prior_dossier = json.dumps(
+                {
+                    "promotion_receipt_sha256": prior.receipt_sha256,
+                    "source_content_sha256": prior_source_sha256,
+                    "preserved_archive_marker": "prior-completed-research",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            prior_dossier_sha256 = hashlib.sha256(
+                prior_dossier.encode("utf-8")
+            ).hexdigest()
+            prior_evidence = (
+                prior_dossier_sha256,
+                prior_source_sha256,
+                "e" * 64,
+                prior.receipt_sha256,
+                "f" * 64,
+                "1" * 64,
+                "2" * 64,
+                "fixture-archive",
+                "4" * 64,
+                f"receipts/{'3' * 64}.json",
+                "market-aligner.research-store-binding.v2",
+            )
+            with service.assessments.transaction() as connection:
+                connection.execute(
+                    """UPDATE employer_research_queue SET status='completed',attempts=7
+                       WHERE profile_id=? AND job_key=?""",
+                    (profile_id, "fixture:1"),
+                )
+                connection.execute(
+                    """INSERT INTO employer_dossiers(
+                         profile_id,job_key,dossier_json,dossier_hash,worker_id
+                       ) VALUES(?,?,?,?,?)""",
+                    (
+                        profile_id,
+                        "fixture:1",
+                        prior_dossier,
+                        prior_dossier_sha256,
+                        "prior-research-worker",
+                    ),
+                )
+                connection.execute(
+                    """INSERT INTO employer_research_evidence(
+                         profile_id,job_key,dossier_hash,source_content_sha256,
+                         vacancy_snapshot_sha256,promotion_receipt_sha256,
+                         canonical_vacancy_object_sha256,semantic_receipt_sha256,
+                         receipt_file_sha256,archive_root_identity,
+                         archive_root_policy_sha256,receipt_relative_path,schema_version
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (profile_id, "fixture:1", *prior_evidence),
+                )
+                dossier_before = tuple(
+                    connection.execute(
+                        "SELECT * FROM employer_dossiers WHERE profile_id=? AND job_key=?",
+                        (profile_id, "fixture:1"),
+                    ).fetchone()
+                )
+                evidence_before = tuple(
+                    connection.execute(
+                        "SELECT * FROM employer_research_evidence WHERE profile_id=? AND job_key=?",
+                        (profile_id, "fixture:1"),
+                    ).fetchone()
+                )
+
+            vacancies = JobDatabase(root / "state" / "vacancies.sqlite3")
+            previous_raw = vacancies.load_current_raw_snapshot("fixture:1")
+            revised_raw = replace(
+                previous_raw,
+                fetched_at="2026-10-06T16:00:00Z",
+                raw_json={
+                    **dict(previous_raw.raw_json or {}),
+                    "description": "Build reliable Python automation; maintain tests.",
+                },
+                content_sha256=None,
+            )
+            vacancies.store_raw(revised_raw)
+            current_source_sha256 = raw_posting_content_sha256(
+                vacancies.load_current_raw_snapshot("fixture:1")
+            )
+            self.assertNotEqual(prior_source_sha256, current_source_sha256)
+
+            replacement_run = ProcessingService(
+                root, FixtureSemanticWorker()
+            ).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="promotion-replacement-worker",
+                job_key="fixture:1",
+            )
+            self.assertEqual(1, replacement_run["included"])
+            self.assertEqual(0, replacement_run["errors"])
+            replacement = service.promote_processing(
+                profile_id=profile_id,
+                track="automation",
+                job_key="fixture:1",
+                processing_receipt_path=Path(replacement_run["receipt_path"]),
+            )
+            self.assertTrue(replacement.created)
+            current_promotion = service.assessments.processing_promotion(
+                profile_id, "fixture:1"
+            )
+            self.assertEqual(current_source_sha256, current_promotion["source_content_sha256"])
+            self.assertNotEqual(prior.receipt_sha256, replacement.receipt_sha256)
+            self.assertEqual(
+                replacement.receipt_path.read_bytes(),
+                bytes(current_promotion["receipt_bytes"]),
+            )
+
+            with service.assessments.connection() as connection:
+                supersede_event = connection.execute(
+                    """SELECT payload_json FROM assessment_events
+                       WHERE profile_id=? AND job_key=?
+                         AND event_type='processing_assessment_promotion_superseded'""",
+                    (profile_id, "fixture:1"),
+                ).fetchone()
+                queue = connection.execute(
+                    """SELECT status,attempts,lease_owner,lease_until,last_error,
+                              refresh_event_id,refresh_bridge_sha256
+                       FROM employer_research_queue WHERE profile_id=? AND job_key=?""",
+                    (profile_id, "fixture:1"),
+                ).fetchone()
+                dossier_after = tuple(
+                    connection.execute(
+                        "SELECT * FROM employer_dossiers WHERE profile_id=? AND job_key=?",
+                        (profile_id, "fixture:1"),
+                    ).fetchone()
+                )
+                evidence_after = tuple(
+                    connection.execute(
+                        "SELECT * FROM employer_research_evidence WHERE profile_id=? AND job_key=?",
+                        (profile_id, "fixture:1"),
+                    ).fetchone()
+                )
+            self.assertIsNotNone(supersede_event)
+            audit = json.loads(supersede_event["payload_json"])
+            self.assertEqual(
+                prior_receipt_bytes,
+                base64.b64decode(audit["prior_promotion"]["receipt_bytes_base64"]),
+            )
+            self.assertEqual(
+                "queued",
+                queue["status"],
+            )
+            self.assertEqual(0, queue["attempts"])
+            self.assertIsNone(queue["lease_owner"])
+            self.assertIsNone(queue["lease_until"])
+            self.assertIsNone(queue["last_error"])
+            self.assertIsNone(queue["refresh_event_id"])
+            self.assertIsNone(queue["refresh_bridge_sha256"])
+            self.assertEqual(dossier_before, dossier_after)
+            self.assertEqual(evidence_before, evidence_after)
+
+            new_task = service.assessments.claim_research(
+                "replacement-research-worker",
+                profile_id=profile_id,
+                job_key="fixture:1",
+            )
+            self.assertIsNotNone(new_task)
+            self.assertEqual(current_source_sha256, new_task.source_content_sha256)
+            self.assertEqual(replacement.receipt_sha256, new_task.promotion_receipt_sha256)
 
     def test_processing_schema_migrates_legacy_rows_as_non_current_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

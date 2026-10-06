@@ -16,7 +16,7 @@ from typing import Any, Mapping
 from market_aligner.applications.handoff import (
     HandoffEnvelope,
     canonical_json_bytes,
-    encode_handoff_v1,
+    encode_handoff_for_runtime,
 )
 from market_aligner.research.store import AssessmentStore
 
@@ -31,6 +31,7 @@ _MANIFEST_KEYS = {
     "selection",
     "vacancy",
 }
+_CURRENT_RUNTIME_MANIFEST_KEYS = _MANIFEST_KEYS | {"preparation_geography"}
 
 
 class HandoffProducerError(ValueError):
@@ -387,12 +388,21 @@ def write_protected_handoff_bundle(
     )
 
 
-def _exact_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise HandoffProducerError("handoff manifest must be an object")
-    if set(value) != _MANIFEST_KEYS:
-        missing = sorted(_MANIFEST_KEYS - set(value))
-        extra = sorted(set(value) - _MANIFEST_KEYS)
+def _exact_manifest(
+    value: Mapping[str, Any], *, current_runtime: bool = False
+) -> dict[str, Any]:
+    if (
+        type(current_runtime) is not bool
+        or not isinstance(value, Mapping)
+        or any(type(key) is not str for key in value)
+    ):
+        raise HandoffProducerError("handoff manifest is invalid")
+    expected = (
+        _CURRENT_RUNTIME_MANIFEST_KEYS if current_runtime else _MANIFEST_KEYS
+    )
+    if set(value) != expected:
+        missing = sorted(expected - set(value))
+        extra = sorted(set(value) - expected)
         raise HandoffProducerError(
             f"handoff manifest keys differ; missing={missing}, extra={extra}"
         )
@@ -407,6 +417,7 @@ def produce_handoff(
     job_key: str,
     manifest: Mapping[str, Any],
     handoff_job_key: str | None = None,
+    current_runtime: bool = False,
 ) -> HandoffEnvelope:
     """Read one admitted score and compose its exact, hash-bound v1 wire document.
 
@@ -415,7 +426,7 @@ def produce_handoff(
     back from durable Market Aligner state.
     """
 
-    inputs = _exact_manifest(manifest)
+    inputs = _exact_manifest(manifest, current_runtime=current_runtime)
     row = store.assessment(profile_id, job_key)
     if row["opportunity_decision"] != "pass":
         raise HandoffProducerError("handoff requires a persisted opportunity-gate pass")
@@ -521,7 +532,11 @@ def produce_handoff(
         "selection": selection,
         "vacancy": vacancy,
     }
-    return encode_handoff_v1(payload)
+    return encode_handoff_for_runtime(
+        payload,
+        current_runtime=current_runtime,
+        preparation_geography=inputs.get("preparation_geography"),
+    )
 
 
 def write_handoff(path: str | Path, handoff: HandoffEnvelope) -> None:

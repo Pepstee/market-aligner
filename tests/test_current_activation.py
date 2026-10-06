@@ -19,9 +19,13 @@ from market_aligner.applications.production_handoff import (
 )
 from market_aligner.profiler.current_activation import (
     PinnedRecoveryInputs,
+    build_current_candidate_policy_catalog,
     compile_current_profile_activation,
     read_current_profile_projection_bundle,
+    read_current_candidate_policy_canary,
+    read_current_candidate_policy_canary_for_activation,
     write_current_activation_artifact,
+    write_current_candidate_policy_canary,
 )
 from market_aligner.profiler.schema import CandidateProfile, EvidenceItem, TrackProfile
 from market_aligner.profiler.store import ProfileStore
@@ -205,6 +209,145 @@ def _fixture(
     manifest_path.write_bytes(manifest_bytes)
     manifest_path.chmod(0o600)
     return store, manifest_bytes, profile_bytes, evidence_bytes, str(manifest_path.relative_to(data_home))
+
+
+def test_candidate_policy_catalog_binds_selected_profile_fields_and_exact_ledger_rows(
+    tmp_path: Path,
+) -> None:
+    store, _, _, _, _ = _fixture(
+        tmp_path,
+        constraints={
+            "work_authorisation_uk": "United Kingdom",
+            "work_authorisation_uk_requires_sponsorship": False,
+            "residence": "Synthetic current residence",
+            "employment_location_on_hire": "Synthetic relocation preference",
+            "employment_type_policy": "No hard exclusions",
+            "employment_type_preference": "Permanent preferred",
+            "uk_remote_preference": "remote",
+        },
+    )
+    snapshot = store.coherent_snapshot(
+        _PROFILE_ID, require_committed_generation=True
+    )
+    try:
+        catalog = build_current_candidate_policy_catalog(snapshot)
+        profile_field = catalog[
+            "profile-field:constraints.work_authorisation_uk_requires_sponsorship"
+        ]
+        assert profile_field["claim"] == "false"
+        assert profile_field["status"] == "explicit"
+        assert profile_field["content_sha256"] == snapshot.hashes["profile_file_sha256"]
+        assert profile_field["source_ref"] == (
+            "profile.yaml#/constraints/work_authorisation_uk_requires_sponsorship"
+        )
+        assert "profile-field:constraints.uk_remote_preference" not in catalog
+
+        evidence = catalog["ev-correction"]
+        evidence_row = next(
+            row
+            for row in snapshot._bytes["evidence.jsonl"].splitlines()
+            if json.loads(row)["evidence_id"] == "ev-correction"
+        )
+        assert evidence["source_ref"] == "synthetic://correction"
+        assert evidence["content_sha256"] == hashlib.sha256(evidence_row).hexdigest()
+        assert evidence["claim"] == (
+            "Synthetic correction for ev-old: use the bounded project scope."
+        )
+        snapshot.revalidate()
+    finally:
+        snapshot.close()
+
+
+def test_current_policy_canary_is_private_create_only_and_binding_selected(
+    tmp_path: Path,
+) -> None:
+    store, _, _, _, _ = _fixture(tmp_path, constraints={})
+    data_home = store.paths.root
+    profile_output = (
+        store.paths.outputs / "current-profile-facts" / _PROFILE_ID
+    )
+    profile_output.mkdir(parents=True, mode=0o700, exist_ok=True)
+    for directory in (
+        store.paths.outputs,
+        store.paths.outputs / "current-profile-facts",
+        profile_output,
+    ):
+        directory.chmod(0o700)
+    snapshot_hashes = {
+        f"snapshot_{index}": f"{index:064x}" for index in range(1, 4)
+    }
+    activation_sha256 = "a" * 64
+    activation_file_sha256 = "b" * 64
+    recovery_manifest_sha256 = "c" * 64
+    activation_name = "activation-" + "1" * 32 + ".json"
+    source_job_key = "greenhouse:synthetic:1"
+    document = {
+        "schema": "market-aligner.current-candidate-policy-canary.v1",
+        "profile_id": _PROFILE_ID,
+        "activation_name": activation_name,
+        "activation_sha256": activation_sha256,
+        "activation_file_sha256": activation_file_sha256,
+        "recovery_manifest_sha256": recovery_manifest_sha256,
+        "active_snapshot_hashes": snapshot_hashes,
+        "target_job_key": source_job_key,
+        "target_job_jurisdiction": "GB",
+        "request_matches_receipt": True,
+        "request": {
+            "schema": "market-aligner.candidate-policy-input.v1",
+            "target_job_jurisdiction": "GB",
+        },
+        "selection": {},
+        "receipt": {"transport": {"invocation_count": 1}},
+    }
+    canary_bytes = json.dumps(
+        document, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    canary_sha256 = hashlib.sha256(canary_bytes).hexdigest()
+    arguments = {
+        "data_home": data_home,
+        "profile_id": _PROFILE_ID,
+        "track": "synthetic-track",
+        "source_job_key": source_job_key,
+        "target_job_jurisdiction": "GB",
+        "activation_name": activation_name,
+        "activation_sha256": activation_sha256,
+        "activation_file_sha256": activation_file_sha256,
+        "recovery_manifest_sha256": recovery_manifest_sha256,
+        "active_snapshot_hashes": snapshot_hashes,
+    }
+
+    path, observed_sha256 = write_current_candidate_policy_canary(
+        **arguments,
+        canary_bytes=canary_bytes,
+        expected_sha256=canary_sha256,
+    )
+    assert observed_sha256 == canary_sha256
+    assert path.read_bytes() == canary_bytes
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert write_current_candidate_policy_canary(
+        **arguments,
+        canary_bytes=canary_bytes,
+        expected_sha256=canary_sha256,
+    ) == (path, canary_sha256)
+    assert read_current_candidate_policy_canary(**arguments) == (
+        canary_bytes,
+        canary_sha256,
+    )
+    assert read_current_candidate_policy_canary_for_activation(
+        data_home=data_home,
+        profile_id=_PROFILE_ID,
+        track="synthetic-track",
+        source_job_key=source_job_key,
+        activation_sha256=activation_sha256,
+    ) == (canary_bytes, canary_sha256)
+
+    altered_bytes = canary_bytes.replace(b'"selection":{}', b'"selection":{"x":1}')
+    with pytest.raises(ValueError, match="^current_profile_projection_invalid$"):
+        write_current_candidate_policy_canary(
+            **arguments,
+            canary_bytes=altered_bytes,
+            expected_sha256=hashlib.sha256(altered_bytes).hexdigest(),
+        )
 
 
 def _response() -> dict[str, Any]:

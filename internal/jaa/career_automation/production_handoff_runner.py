@@ -701,6 +701,7 @@ def run_production_handoff(
     current_runtime_config_path: str | Path | None = None,
     current_runtime_config_sha256: str | None = None,
     current_runtime_private_root: str | Path | None = None,
+    current_recovery_manifest_relative_path: str | None = None,
 ) -> ProductionHandoffReceipt:
     """Build the default production handoff or explicit non-release preparation."""
     current_runtime_values = (
@@ -715,6 +716,10 @@ def run_production_handoff(
             "current runtime opt-in requires config path, raw hash and private root"
         )
     current_runtime = all(value is not None for value in current_runtime_values)
+    if current_recovery_manifest_relative_path is not None and not current_runtime:
+        raise ProductionHandoffDeploymentError(
+            "current recovery manifest locator requires current runtime opt-in"
+        )
     if current_runtime:
         deployment = installed_current_runtime_handoff_deployment(
             configuration_path=current_runtime_config_path,
@@ -761,6 +766,9 @@ def run_production_handoff(
         track=track,
         source_job_key=source_job_key,
         freshness_time=evaluated_at,
+        current_recovery_manifest_relative_path=(
+            current_recovery_manifest_relative_path
+        ),
     )
 
 

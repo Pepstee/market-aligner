@@ -536,13 +536,17 @@ class LLMPipelineTests(unittest.TestCase):
         self.assertEqual("minimum_years_experience", facts.source_evidence[0].field)
         self.assertEqual(1, len(runner.calls))
         self.assertEqual(VACANCY_ELIGIBILITY_PROMPT_VERSION, receipt.prompt_version)
-        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v2"))
+        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v3"))
         self.assertIn(
             "distributed working within the UK",
             _PROMPTS["vacancy_eligibility_facts"],
         )
         self.assertIn(
             "Leave required_residence null",
+            _PROMPTS["vacancy_eligibility_facts"],
+        )
+        self.assertIn(
+            "location.name ‘London, United Kingdom’ supports GB",
             _PROMPTS["vacancy_eligibility_facts"],
         )
         self.assertEqual("vacancy_eligibility_facts", receipt.task)
@@ -1455,6 +1459,16 @@ class VacancyEligibilityContractTests(unittest.TestCase):
                     ),
                 )
 
+        raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+            code="GB",
+            quote="London, United Kingdom",
+            offices=None,
+        )
+        self.assertEqual(
+            facts,
+            accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs),
+        )
+
     def test_work_jurisdiction_rejects_negated_and_multicountry_quotes(self) -> None:
         for quote in (
             "outside, United Kingdom",
@@ -1481,6 +1495,8 @@ class VacancyEligibilityContractTests(unittest.TestCase):
         raw, facts, receipt, inputs = self._bound_jurisdiction_case(
             code="GB",
             quote="London, United Kingdom",
+            description="London, United Kingdom",
+            location_name="London",
             office_location="Paris, France",
         )
         with self.assertRaisesRegex(
@@ -1494,6 +1510,8 @@ class VacancyEligibilityContractTests(unittest.TestCase):
                 raw, facts, receipt, inputs = self._bound_jurisdiction_case(
                     code="GB",
                     quote="London, United Kingdom",
+                    description="London, United Kingdom",
+                    location_name="London",
                     offices=offices,
                 )
                 with self.assertRaisesRegex(

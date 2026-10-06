@@ -26,6 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-runtime-config-path")
     parser.add_argument("--current-runtime-config-sha256")
     parser.add_argument("--current-runtime-private-root")
+    parser.add_argument("--current-recovery-manifest-relative-path")
     args = parser.parse_args(argv)
     receipt = run_production_handoff(
         profile_id=args.profile_id,
@@ -34,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
         current_runtime_config_path=args.current_runtime_config_path,
         current_runtime_config_sha256=args.current_runtime_config_sha256,
         current_runtime_private_root=args.current_runtime_private_root,
+        current_recovery_manifest_relative_path=(
+            args.current_recovery_manifest_relative_path
+        ),
     )
     sys.stdout.buffer.write(canonical_json_bytes(receipt.document()) + b"\n")
     return 0
