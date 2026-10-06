@@ -16,6 +16,9 @@ from market_aligner.llm.codex_gateway import (
     CodexGatewayError,
     CodexSemanticGateway,
     SYNTHETIC_CANARY_MARKER,
+    _DISABLED_CODE_MODE_HOST_NOTICE,
+    _event_validation_policy_fields,
+    _validate_events,
     synthetic_extraction_canary,
 )
 from market_aligner.llm.contracts import (
@@ -101,6 +104,20 @@ def _alignment_payload() -> dict[str, Any]:
         "evidence_match": 0.9,
         "confidence": 0.9,
         "unknowns": [],
+    }
+
+
+def _jsonl_events(*events: dict[str, Any]) -> str:
+    return "\n".join(json.dumps(event) for event in events)
+
+
+def _disabled_host_notice_event(event_type: str = "item.completed") -> dict[str, Any]:
+    return {
+        "type": event_type,
+        "item": {
+            "type": "error",
+            "message": _DISABLED_CODE_MODE_HOST_NOTICE,
+        },
     }
 
 
@@ -458,10 +475,109 @@ class LLMPipelineTests(unittest.TestCase):
                 environment={"HOME": temporary, "PATH": "/usr/bin"},
                 runner=runner,
             )
-            with self.assertRaisesRegex(CodexGatewayError, "forbidden tool item"):
+            with self.assertRaisesRegex(CodexGatewayError, "forbidden tool item") as error:
                 gateway.extract_vacancy(
                     {"content_sha256": digest, "raw_text": "synthetic vacancy"}
                 )
+            self.assertEqual("codex attempted forbidden tool item", str(error.exception))
+
+    def test_disabled_code_mode_notice_is_exact_opt_in_and_pre_turn_only(self) -> None:
+        notice = _disabled_host_notice_event()
+        valid = _jsonl_events(
+            {"type": "thread.started"},
+            notice,
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "agent_message"}},
+            {"type": "turn.completed"},
+        )
+        with self.assertRaisesRegex(CodexGatewayError, "rejected an error item"):
+            _validate_events(valid)
+        _validate_events(valid, allow_disabled_host_notice=True)
+
+        policy = _event_validation_policy_fields(True)
+        self.assertEqual(
+            "codex-disabled-code-mode-host-preturn-notice-v1",
+            policy["event_validation_policy"],
+        )
+        self.assertIs(policy["allow_disabled_host_notice"], True)
+        self.assertIs(
+            _event_validation_policy_fields(False)["allow_disabled_host_notice"],
+            False,
+        )
+        self.assertNotEqual(
+            canonical_hash({"transport": {}, **_event_validation_policy_fields(True)}),
+            canonical_hash({"transport": {}, **_event_validation_policy_fields(False)}),
+        )
+
+    def test_disabled_code_mode_notice_rejects_late_changed_repeated_and_misplaced_events(
+        self,
+    ) -> None:
+        notice = _disabled_host_notice_event()
+        invalid_streams = (
+            _jsonl_events(
+                {"type": "thread.started"},
+                {"type": "turn.started"},
+                notice,
+                {"type": "turn.completed"},
+            ),
+            _jsonl_events(
+                {"type": "thread.started"},
+                {"type": "unknown.metadata"},
+                notice,
+                {"type": "turn.completed"},
+            ),
+            _jsonl_events(
+                {"type": "thread.started"},
+                {"type": "turn.started"},
+                {"type": "turn.completed"},
+                notice,
+            ),
+            _jsonl_events(
+                {"type": "thread.started"},
+                {"type": "item.completed", "item": {"type": "error", "message": "changed"}},
+                {"type": "turn.completed"},
+            ),
+            _jsonl_events(
+                {"type": "thread.started"},
+                notice,
+                notice,
+                {"type": "turn.completed"},
+            ),
+            _jsonl_events(
+                {"type": "thread.started"},
+                _disabled_host_notice_event("item.started"),
+                {"type": "turn.completed"},
+            ),
+        )
+        for stream in invalid_streams:
+            with self.subTest(stream=stream), self.assertRaises(CodexGatewayError):
+                _validate_events(stream, allow_disabled_host_notice=True)
+
+    def test_disabled_code_mode_notice_never_allows_tool_items(self) -> None:
+        for event_type in (
+            "item.started",
+            "item.updated",
+            "item.completed",
+            "unknown.metadata",
+            "thread.started",
+        ):
+            with self.subTest(event_type=event_type):
+                stream = _jsonl_events(
+                    {
+                        "type": event_type,
+                        "item": {"type": "command_execution", "command": "blocked"},
+                    },
+                    {"type": "turn.completed"},
+                )
+                with self.assertRaisesRegex(CodexGatewayError, "forbidden tool item"):
+                    _validate_events(stream, allow_disabled_host_notice=True)
+
+        malformed_item = _jsonl_events(
+            {"type": "item.started", "item": []},
+            {"type": "turn.completed"},
+        )
+        with self.assertRaisesRegex(CodexGatewayError, "invalid item"):
+            _validate_events(malformed_item, allow_disabled_host_notice=True)
 
     def test_synthetic_canary_is_explicitly_marked_and_offline_in_test(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

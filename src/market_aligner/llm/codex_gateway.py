@@ -81,6 +81,12 @@ _DISABLED_FEATURES = (
     "workspace_dependencies",
 )
 _ALLOWED_ITEM_TYPES = frozenset({"agent_message", "reasoning"})
+_EVENT_VALIDATION_POLICY_ID = "codex-disabled-code-mode-host-preturn-notice-v1"
+_DISABLED_CODE_MODE_HOST_NOTICE = (
+    "Code Mode is unavailable because code-mode host is disabled. "
+    "Code mode will fail closed; enable `features.code_mode_host` and install "
+    "`codex-code-mode-host`."
+)
 
 
 EXTRACTION_SCHEMA: dict[str, Any] = {
@@ -195,8 +201,21 @@ def _scrubbed_environment(source: Mapping[str, str]) -> dict[str, str]:
     return environment
 
 
-def _validate_events(stdout: str) -> None:
+def _event_validation_policy_fields(
+    allow_disabled_host_notice: bool,
+) -> dict[str, str | bool]:
+    return {
+        "event_validation_policy": _EVENT_VALIDATION_POLICY_ID,
+        "allow_disabled_host_notice": bool(allow_disabled_host_notice),
+    }
+
+
+def _validate_events(
+    stdout: str, *, allow_disabled_host_notice: bool = False
+) -> None:
     turn_completed = 0
+    notice_seen = False
+    model_activity = False
     if not stdout.strip():
         raise CodexGatewayError("codex JSONL transport emitted no events")
     for raw in stdout.splitlines():
@@ -208,14 +227,32 @@ def _validate_events(stdout: str) -> None:
             raise CodexGatewayError("codex JSONL transport emitted an invalid event")
         event_type = str(event["type"])
         if event_type in {"error", "turn.failed"}:
-            raise CodexGatewayError(f"codex transport failed closed on {event_type}")
+            raise CodexGatewayError("codex JSONL transport failed on a stream error event")
+        if "item" in event:
+            item = event["item"]
+            if not isinstance(item, dict):
+                raise CodexGatewayError("codex JSONL transport emitted an invalid item")
+            item_type = item.get("type")
+            if item_type == "error":
+                if not (
+                    allow_disabled_host_notice
+                    and not notice_seen
+                    and not model_activity
+                    and event_type == "item.completed"
+                    and item.get("message") == _DISABLED_CODE_MODE_HOST_NOTICE
+                ):
+                    raise CodexGatewayError(
+                        "codex JSONL transport rejected an error item"
+                    )
+                notice_seen = True
+                continue
+            if item_type not in _ALLOWED_ITEM_TYPES:
+                raise CodexGatewayError("codex attempted forbidden tool item")
+            model_activity = True
         if event_type == "turn.completed":
             turn_completed += 1
-        item = event.get("item")
-        if isinstance(item, dict):
-            item_type = item.get("type")
-            if item_type not in _ALLOWED_ITEM_TYPES:
-                raise CodexGatewayError(f"codex attempted forbidden tool item: {item_type}")
+        if event_type != "thread.started":
+            model_activity = True
     if turn_completed != 1:
         raise CodexGatewayError("codex transport requires exactly one completed turn")
 
@@ -295,6 +332,7 @@ class CodexSemanticGateway:
             for feature in _DISABLED_FEATURES:
                 command.extend(("--disable", feature))
             command.extend(("--model", self.model, "-"))
+            allow_disabled_host_notice = "code_mode_host" in _DISABLED_FEATURES
             transport_document = {
                 "argv_policy": [
                     "exec",
@@ -323,6 +361,7 @@ class CodexSemanticGateway:
                 "schema_sha256": canonical_hash(dict(schema)),
                 "single_attempt": True,
                 "stdin_policy": "exact-request",
+                **_event_validation_policy_fields(allow_disabled_host_notice),
             }
             try:
                 completed = self.runner(
@@ -347,7 +386,10 @@ class CodexSemanticGateway:
                 raise CodexGatewayError(
                     f"detached Codex CLI exited {completed.returncode}: {diagnostic[:4000]}"
                 )
-            _validate_events(completed.stdout or "")
+            _validate_events(
+                completed.stdout or "",
+                allow_disabled_host_notice=allow_disabled_host_notice,
+            )
             if not output_path.is_file():
                 raise CodexGatewayError("detached Codex CLI returned no final message")
             response = output_path.read_text(encoding="utf-8").strip()

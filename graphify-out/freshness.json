@@ -1,11 +1,11 @@
 {
-  "community_count": 30055,
-  "edge_count": 73861,
-  "node_count": 56674,
+  "community_count": 30050,
+  "edge_count": 73919,
+  "node_count": 56692,
   "outputs": {
-    ".graphify_labels.json": "20575e7d1541c9f9b4e9529f58fb6d1f7667f8a6b203c97321be758ece96a337",
-    "GRAPH_REPORT.md": "1d74cbbb04ab18bd17dcd71d85ac838719215eb8facf1c1214d3e68897e5e7fe",
-    "graph.json": "7bae281c80cd61e5f921bacd908db4547f2ea5ae6ba47e61451c285f01fd720e"
+    ".graphify_labels.json": "345ae6f53eb268597aa1409ce08e4cee2fe4071e467e63a7d58f29b37c559d2c",
+    "GRAPH_REPORT.md": "90b8d882c9aff37dbb69294e3da70e4a676ae98f64584ee064715764a50abefc",
+    "graph.json": "ead75ead35845b28e1f99c3f0f40f149d45368910f2be38cb176b69dc7bf5197"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "3f050b82b98d9c81c30f2863046458af658c90dd",
+  "source_base_commit": "39bfb4feb2d6e08b3a2790f5f9eb788684216c9c",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -82,7 +82,7 @@
     "internal/jaa/career_automation/browser_executor.py": "9205268e371a4bff9618c023c88b86a226eaa8c7fecaf9aef8b8c9427d9e52e2",
     "internal/jaa/career_automation/browser_workflows.py": "d76a20c4c8b6cc5465f4cdc9b39c535ab367f4f587fa854579e46865401ba122",
     "internal/jaa/career_automation/canary_forensic_evidence.py": "368050e5f6971525fc5adfaa6ca7309287dc68b6cdb33091230d3e9b3ed2cfb4",
-    "internal/jaa/career_automation/candidate_application_factory.py": "a85b2d8e8968f92d3933cc560cd1211e5a3dc3ec060b3cd2682628a2c35f666a",
+    "internal/jaa/career_automation/candidate_application_factory.py": "d17e5439e7e6266866d3afe2aa3e461bf789109e7ef66397b045ca0f13ab8f3c",
     "internal/jaa/career_automation/candidate_authority.py": "3e392bf91817e1be696cec7e5434c24cd277c92501504898da7beab3c5e4dd35",
     "internal/jaa/career_automation/candidate_contact_authority.py": "25cb102d1124ad286cf298c1bc9b8fe401b2f1173a44a855c4edb26633381b0f",
     "internal/jaa/career_automation/candidate_generation_worker.py": "82fe4385d9b14390e20ec7ae066cd6951af4cb99dcad30f6ffd06ecce3b510ed",
@@ -504,7 +504,7 @@
     "internal/jaa/test_assurance_manifest_truth.py": "7c332645e440d38b38b42e0ad9b914a8bc737db7b72473d09b146ad818cdc969",
     "internal/jaa/test_ats_application_authority.py": "21250db060b917e5d57247ed27d64abc0dd6baab1bfda0009edaf32e8c67cdf9",
     "internal/jaa/test_authority_provisioning.py": "2bc92afd73dc8eaf92d02507d2ddca29a1370f9a0e4745f1003b2c1087d52f47",
-    "internal/jaa/test_candidate_application_factory.py": "95d55fe6043575f9ae6539c5c0c19430bf36d8303759b3548b1e489feab43eaa",
+    "internal/jaa/test_candidate_application_factory.py": "9ab803885874ccf8e3175f076b4ba60cc133fbc514899172fb09333adaaccdc3",
     "internal/jaa/test_candidate_authority.py": "ca4a1791b5e918ba04c765e3ac533a2c8f1364d3df29ffd3b708c02c45b6fb4d",
     "internal/jaa/test_candidate_contact_authority.py": "cdb84f6b6c7af8ccff2b7443d91684cc0071fb6e973cb99dbe761454a6318cc8",
     "internal/jaa/test_candidate_contact_enrollment.py": "86d7afacc8f6fcec19c539840cb3c2740d5bbb6e279320407714d411bf3a2e2e",
@@ -766,7 +766,7 @@
     "src/market_aligner/integrations/__init__.py": "c90774f2e629925d5887af80d407b002b29ac8717736f55cee9a3f02f73d16d8",
     "src/market_aligner/integrations/orchestrator.py": "19f51098196b2cb24aec4a4d3c013835b873b58b300fcf63a0a283d43ce95cfd",
     "src/market_aligner/llm/__init__.py": "2ea86f8e0e07b357c5df697ce1a76ced7825431ea98f783f97ca066be837fff6",
-    "src/market_aligner/llm/codex_gateway.py": "eed478ecb09a8a64dac49c0de8db8ddb602eafde2d49d3a62a38ef2f2f021b4f",
+    "src/market_aligner/llm/codex_gateway.py": "4a55925eaa96d1419b4354acfab730d36fa42bbf42948923c1fda49b3aad495c",
     "src/market_aligner/llm/contracts.py": "022ca4669a9440d4289ae8736abc31b96832d92d08cc11d71413a186ee8d37e9",
     "src/market_aligner/llm/pipeline.py": "eb89428d9054e61eaa81cab1f4f63cf7ff2af42ab4193b0e24ae73c299158c7d",
     "src/market_aligner/llm/structured.py": "9182fdfe0541ba70e7f96502cf271406d9e10978a84700e81b8119f4815f9a47",
@@ -825,7 +825,7 @@
     "tests/test_jaa_events_v1.py": "98edfd1fb21ffd9f1bacde30b027d70a360cba2d177e4197708660042f2dc2b0",
     "tests/test_legacy_import.py": "00ce475704bf5ba829683365437c43c9804cd32b1d1e812832fcc71741ba1915",
     "tests/test_lineage.py": "322e19db7cf892a373fede67fa36eb1f2c3771aacd9d7cf057c9f6de4f1ada23",
-    "tests/test_llm_pipeline.py": "06d342e84ba88683ac2701270ba53a67328d467b36746ea51a1fb041c137d48e",
+    "tests/test_llm_pipeline.py": "b3783615cc3e7950891628333311504c644a88117eea928eb000a8218f5603a4",
     "tests/test_market_aligner_jaa_handoff.py": "f7a30b781118034766d4aae3cee6180d81ec0713765ca70e15ace8e4a4cc30b4",
     "tests/test_migration_ledger.py": "c68796958547de9caeff93c0f7ba9c169d723eb8b9826b2b96602171bb13baa2",
     "tests/test_migrations.py": "e968fa4158bd4fc6521512007f5ae2659c3b094fdefeba95fa60b0be45de900f",

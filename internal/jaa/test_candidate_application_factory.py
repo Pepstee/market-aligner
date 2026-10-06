@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import pickle
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,8 +26,10 @@ from career_automation.candidate_application_factory import (
     _build_candidate_application_source,
     _load_approved_statements,
     _projection_evidence_sha256,
+    _populate_fallback_profile_summary,
     _profile_cv_section_for_evidence,
     _select_profile_capability_fact,
+    _assert_package_quality,
     build_market_application_decision_authority,
     build_candidate_application_deployment_binding,
     build_candidate_application_package,
@@ -65,6 +67,220 @@ PRIVATE_FIXTURE_REASON = (
     "requires the exact private Gigabyte candidate-authority and discovery "
     "artifacts; synthetic substitution would not test the certified binding"
 )
+
+_SUMMARY_HEADING_ORDER = (
+    "Professional Summary",
+    "Core Capabilities",
+    "Projects",
+    "Education",
+    "Experience",
+    "Skills",
+    "Highlights",
+    "Results",
+    "Outcomes",
+)
+
+
+@dataclass(frozen=True)
+class _SummaryAuthority:
+    candidate_evidence_id: str
+
+
+@dataclass(frozen=True)
+class _SummaryFact:
+    sentence_id: str
+    text: str
+    evidence_id: str
+    authority: _SummaryAuthority
+    fact_kind: str = "candidate"
+
+
+def _summary_fact(sentence_id: str, evidence_id: str, text: str) -> _SummaryFact:
+    return _SummaryFact(
+        sentence_id=sentence_id,
+        text=text,
+        evidence_id=evidence_id,
+        authority=_SummaryAuthority(evidence_id),
+    )
+
+
+def test_fallback_summary_keeps_explicit_summary_arrangement_unchanged() -> None:
+    explicit = [_summary_fact("summary-1", "evidence-1", "Approved summary.")]
+    project = _summary_fact("project-1", "evidence-2", "Approved project fact.")
+    sections = {"Professional Summary": explicit, "Projects": [project]}
+
+    result = _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=False,
+    )
+
+    assert result is sections
+    assert result["Professional Summary"] is explicit
+    assert result["Projects"] == [project]
+
+
+def test_legacy_fallback_summary_keeps_first_fact_ordering() -> None:
+    capability = _summary_fact("capability-1", "evidence-1", "Approved capability.")
+    project = _summary_fact("project-1", "evidence-2", "Approved project fact.")
+    sections = {"Core Capabilities": [capability], "Projects": [project]}
+
+    _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=True,
+    )
+
+    assert sections["Professional Summary"] == [capability]
+    assert sections["Professional Summary"][0] is capability
+    assert "Core Capabilities" not in sections
+    assert sections["Projects"] == [project]
+
+
+def test_generic_fallback_moves_complementary_facts_without_rewriting_or_duplication() -> None:
+    first = _summary_fact("project-1", "evidence-1", "Built an approved project.")
+    second = _summary_fact("experience-1", "evidence-2", "Delivered approved work.")
+    remaining = _summary_fact("project-2", "evidence-3", "Recorded another result.")
+    sections = {"Projects": [first, remaining], "Experience": [second]}
+
+    _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=False,
+    )
+
+    summary = sections["Professional Summary"]
+    assert summary == [first, second]
+    assert summary[0] is first and summary[1] is second
+    assert summary[0].text == "Built an approved project."
+    assert summary[1].text == "Delivered approved work."
+    assert summary[0].authority is first.authority
+    assert summary[1].authority is second.authority
+    assert sections["Projects"] == [remaining]
+    assert "Experience" not in sections
+    all_rows = [fact for rows in sections.values() for fact in rows]
+    assert sorted(fact.sentence_id for fact in all_rows) == [
+        "experience-1",
+        "project-1",
+        "project-2",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("count", "summary_count"),
+    ((3, 2), (1, 1)),
+)
+def test_generic_fallback_uses_same_heading_facts_or_one_available_fact(
+    count: int, summary_count: int
+) -> None:
+    facts = [
+        _summary_fact(f"project-{index}", f"evidence-{index}", f"Fact {index}.")
+        for index in range(1, count + 1)
+    ]
+    sections = {"Projects": facts.copy()}
+
+    _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=False,
+    )
+
+    assert len(sections["Professional Summary"]) == summary_count
+    assert all(fact in sections["Professional Summary"] for fact in facts[:summary_count])
+    assert all(rows for rows in sections.values())
+    remaining_ids = [
+        fact.sentence_id
+        for heading, rows in sections.items()
+        if heading != "Professional Summary"
+        for fact in rows
+    ]
+    assert remaining_ids == [fact.sentence_id for fact in facts[summary_count:]]
+
+
+def test_generic_fallback_preserves_existing_capabilities() -> None:
+    capability = _summary_fact(
+        "existing-capability", "evidence-capability", "Existing approved capability."
+    )
+    project = _summary_fact(
+        "project-1",
+        "evidence-project",
+        "Implemented testing and automation for service reliability.",
+    )
+    sections = {
+        "Core Capabilities": [capability],
+        "Projects": [project],
+    }
+    evidence_kinds = {
+        "evidence-capability": "work_artifact",
+        "evidence-project": "work_artifact",
+    }
+
+    _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=False,
+        evidence_kinds=evidence_kinds,
+    )
+
+    assert sections["Professional Summary"] == [project]
+    assert sections["Core Capabilities"] == [capability]
+    assert sections["Core Capabilities"][0] is capability
+    assert "Projects" not in sections
+
+
+def test_generic_fallback_leaves_capability_candidate_and_body_row_for_existing_pass() -> None:
+    first = _summary_fact("project-1", "evidence-1", "Created a project record.")
+    second = _summary_fact("experience-1", "evidence-2", "Recorded a meeting note.")
+    eligible = _summary_fact(
+        "skill-1",
+        "evidence-eligible",
+        "Implemented testing and automation for service reliability.",
+    )
+    spare = _summary_fact("skill-2", "evidence-spare", "Documented another result.")
+    sections = {
+        "Projects": [first],
+        "Experience": [second],
+        "Skills": [eligible, spare],
+    }
+    evidence_kinds = {
+        fact.evidence_id: "work_artifact"
+        for rows in sections.values()
+        for fact in rows
+    }
+
+    _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=False,
+        evidence_kinds=evidence_kinds,
+    )
+
+    capability_candidate = _select_profile_capability_fact(
+        sections, evidence_kinds
+    )
+    assert capability_candidate is eligible
+    substantive_after_capability_move = [
+        fact
+        for heading, rows in sections.items()
+        if heading not in {"Professional Summary", "Core Capabilities"}
+        for fact in rows
+        if fact.sentence_id != capability_candidate.sentence_id
+    ]
+    assert substantive_after_capability_move == [spare]
+    assert sections["Skills"] == [eligible, spare]
+
+
+def test_generic_fallback_refuses_duplicate_selected_sentence_identity() -> None:
+    first = _summary_fact("same-sentence", "evidence-1", "First spelling.")
+    duplicate = _summary_fact("same-sentence", "evidence-2", "Different spelling.")
+    sections = {"Projects": [first], "Experience": [duplicate]}
+
+    with pytest.raises(ValueError, match="summary fact identity is ambiguous"):
+        _populate_fallback_profile_summary(
+            sections,
+            heading_order=_SUMMARY_HEADING_ORDER,
+            legacy_profile=False,
+        )
 
 
 def require_private_candidate_fixture() -> None:
@@ -775,7 +991,7 @@ def test_generation_composes_verified_nonlegacy_profile_by_evidence_kind(
     )
 
 
-def test_rendered_summary_positions_candidate_with_bound_profile_fact(
+def test_rendered_summary_uses_bound_profile_facts_without_filler(
     tmp_path: Path,
 ) -> None:
     package = build_candidate_application_package(
@@ -787,29 +1003,70 @@ def test_rendered_summary_positions_candidate_with_bound_profile_fact(
         for section in source.cv_sections
         if section.heading == "Professional Summary"
     )
-    summary_fact = next(
-        fact for fact in source.facts if fact.sentence_id == summary.sentence_ids[0]
-    )
-    summary_slot = next(
-        slot for slot in source.style_slots if slot.slot_id == summary.style_slot_ids[0]
-    )
+    summary_facts = [
+        fact for fact in source.facts if fact.sentence_id in summary.sentence_ids
+    ]
 
-    assert summary_slot.text == (
-        "As a candidate for this role, I bring relevant work in:"
-    )
-    assert summary_fact.text == summary_fact.approved_source_text
-    assert summary_fact.authority.candidate_evidence_id.startswith(
-        "SYNTHETIC-PORTFOLIO-"
+    assert len(summary.sentence_ids) == 2
+    assert summary.style_slot_ids == ()
+    assert len(summary_facts) == 2
+    assert all(fact.text == fact.approved_source_text for fact in summary_facts)
+    assert all(
+        fact.authority.candidate_evidence_id.startswith("SYNTHETIC-PORTFOLIO-")
+        for fact in summary_facts
     )
     for rendered in (
         package.artifacts.editable.cv_text,
         package.artifacts.cv_pdf.extracted_text,
     ):
         flattened = " ".join(rendered.split())
-        assert flattened.count(summary_slot.text) == 1
-        assert flattened.count(summary_fact.text) == 1
-        assert flattened.index(summary_slot.text) < flattened.index(summary_fact.text)
+        assert "As a candidate for this role" not in flattened
+        for summary_fact in summary_facts:
+            assert flattened.count(summary_fact.text) == 1
         assert "Software Engineer" not in flattened
+
+    evidence_document = json.loads(
+        (tmp_path / "synthetic-composition-evidence.json").read_text()
+    )
+    evidence_kinds = {
+        row["id"]: row["proof_class"]
+        for row in evidence_document["statements"]
+    }
+    projects = next(section for section in source.cv_sections if section.heading == "Projects")
+    single_summary_sections = tuple(
+        replace(section, sentence_ids=(summary.sentence_ids[0],))
+        if section.heading == "Professional Summary"
+        else replace(
+            section,
+            sentence_ids=(summary.sentence_ids[1], *section.sentence_ids),
+        )
+        if section.heading == "Projects"
+        else section
+        for section in source.cv_sections
+    )
+    _assert_package_quality(
+        replace(source, cv_sections=single_summary_sections),
+        evidence_kinds=evidence_kinds,
+        legacy_profile=False,
+    )
+
+    three_summary_sections = tuple(
+        replace(
+            section,
+            sentence_ids=(*summary.sentence_ids, projects.sentence_ids[0]),
+        )
+        if section.heading == "Professional Summary"
+        else replace(section, sentence_ids=section.sentence_ids[1:])
+        if section.heading == "Projects"
+        else section
+        for section in source.cv_sections
+    )
+    with pytest.raises(ValueError, match="sections differ from bound evidence kinds"):
+        _assert_package_quality(
+            replace(source, cv_sections=three_summary_sections),
+            evidence_kinds=evidence_kinds,
+            legacy_profile=False,
+        )
 
 
 def test_generic_package_relocates_verified_capability_fact_verbatim(

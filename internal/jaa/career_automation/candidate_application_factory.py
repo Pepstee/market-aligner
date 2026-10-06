@@ -1099,6 +1099,109 @@ def _select_profile_capability_fact(
     return None
 
 
+def _fact_candidate_evidence_id(fact: object) -> str | None:
+    evidence_id = getattr(fact, "evidence_id", None)
+    if not isinstance(evidence_id, str):
+        evidence_id = getattr(
+            getattr(fact, "authority", None), "candidate_evidence_id", None
+        )
+    return evidence_id if isinstance(evidence_id, str) else None
+
+
+def _populate_fallback_profile_summary(
+    sections: dict[str, list[FactualSentence]],
+    *,
+    heading_order: Sequence[str],
+    legacy_profile: bool,
+    evidence_kinds: Mapping[str, str] | None = None,
+) -> dict[str, list[FactualSentence]]:
+    summary_heading = "Professional Summary"
+    capability_heading = "Core Capabilities"
+    if sections.get(summary_heading):
+        return sections
+
+    locations = [
+        (heading, fact)
+        for heading in heading_order
+        if heading != summary_heading
+        and (legacy_profile or heading != capability_heading)
+        for fact in sections.get(heading, ())
+    ]
+    if not locations:
+        return sections
+
+    capability_fact = (
+        _select_profile_capability_fact(sections, evidence_kinds or {})
+        if not legacy_profile and not sections.get(capability_heading)
+        else None
+    )
+    capability_sentence_id = (
+        capability_fact.sentence_id if capability_fact is not None else None
+    )
+    fallback_locations = [
+        location
+        for location in locations
+        if location[1].sentence_id != capability_sentence_id
+    ]
+    if not fallback_locations:
+        return sections
+
+    selected_locations = [fallback_locations[0]]
+    if not legacy_profile:
+        first_heading, first_fact = selected_locations[0]
+        first_evidence_id = _fact_candidate_evidence_id(first_fact)
+        distinct_facts = [
+            location
+            for location in fallback_locations[1:]
+            if first_evidence_id is not None
+            and _fact_candidate_evidence_id(location[1]) is not None
+            and _fact_candidate_evidence_id(location[1]) != first_evidence_id
+        ]
+        complementary_fact = next(
+            (
+                location
+                for location in distinct_facts
+                if location[0] != first_heading
+            ),
+            None,
+        )
+        if complementary_fact is None:
+            complementary_fact = next(
+                (
+                    location
+                    for location in distinct_facts
+                    if location[0] == first_heading
+                ),
+                None,
+            )
+        selection_limit = min(2, max(1, len(locations) - 2)) if capability_fact else 2
+        if complementary_fact is not None and selection_limit > 1:
+            selected_locations.append(complementary_fact)
+
+    selected_facts = [fact for _, fact in selected_locations]
+    selected_sentence_ids = [fact.sentence_id for fact in selected_facts]
+    if len(selected_sentence_ids) != len(set(selected_sentence_ids)) or any(
+        sum(
+            fact.sentence_id == sentence_id
+            for rows in sections.values()
+            for fact in rows
+        )
+        != 1
+        for sentence_id in selected_sentence_ids
+    ):
+        raise ValueError("candidate summary fact identity is ambiguous")
+
+    selected_ids = set(selected_sentence_ids)
+    for heading, rows in tuple(sections.items()):
+        remaining = [fact for fact in rows if fact.sentence_id not in selected_ids]
+        if remaining:
+            sections[heading] = remaining
+        else:
+            sections.pop(heading)
+    sections[summary_heading] = selected_facts
+    return sections
+
+
 def _assert_package_quality(
     source: ApplicationSource,
     *,
@@ -1213,7 +1316,7 @@ def _assert_package_quality(
         or (
             summary_section is not None
             and not legacy_profile
-            and len(summary_section.sentence_ids) != 1
+            and len(summary_section.sentence_ids) not in {1, 2}
         )
     ):
         raise ValueError("candidate CV sections differ from bound evidence kinds")
@@ -1702,36 +1805,11 @@ def _build_candidate_application_source(
         cv_sections_by_heading.setdefault(heading, []).append(projected_fact)
         placed_cv_evidence_ids.add(evidence_id)
 
-    if not cv_sections_by_heading.get("Professional Summary"):
-        summary_fact = next(
-            (
-                fact
-                for heading in PROFILE_CV_SECTION_ORDER
-                if heading != "Professional Summary"
-                for fact in cv_sections_by_heading.get(heading, ())
-            ),
-            None,
-        )
-        if summary_fact is not None:
-            for heading, rows in cv_sections_by_heading.items():
-                if heading != "Professional Summary":
-                    cv_sections_by_heading[heading] = [
-                        row
-                        for row in rows
-                        if row.sentence_id != summary_fact.sentence_id
-                    ]
-            cv_sections_by_heading.setdefault("Professional Summary", []).append(
-                summary_fact
-            )
-
-    summary_positioning = (
-        _slot(
-            "cv",
-            "candidate_summary_positioning",
-            "As a candidate for this role, I bring relevant work in:",
-        )
-        if cv_sections_by_heading.get("Professional Summary")
-        else None
+    _populate_fallback_profile_summary(
+        cv_sections_by_heading,
+        heading_order=PROFILE_CV_SECTION_ORDER,
+        legacy_profile=legacy_profile,
+        evidence_kinds=verified_evidence_kinds,
     )
 
     if not legacy_profile and not cv_sections_by_heading.get("Core Capabilities"):
@@ -1928,9 +2006,6 @@ def _build_candidate_application_source(
         DocumentSection(
             heading,
             tuple(row.sentence_id for row in cv_sections_by_heading[heading]),
-            (summary_positioning.slot_id,)
-            if heading == "Professional Summary" and summary_positioning is not None
-            else (),
         )
         for heading in PROFILE_CV_SECTION_ORDER
         if cv_sections_by_heading.get(heading)
@@ -1953,11 +2028,7 @@ def _build_candidate_application_source(
         vacancy_sha256=vacancy_sha256,
         contact=contact,
         facts=facts,
-        style_slots=(
-            *((summary_positioning,) if summary_positioning is not None else ()),
-            letter_open,
-            letter_close,
-        ),
+        style_slots=(letter_open, letter_close),
         cv_sections=cv_sections,
         letter_sections=(
             DocumentSection(
