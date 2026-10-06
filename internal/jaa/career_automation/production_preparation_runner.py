@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess

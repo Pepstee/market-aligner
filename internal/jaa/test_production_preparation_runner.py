@@ -33,6 +33,30 @@ def test_current_contact_json_codecs_keep_artifact_and_wire_formats_separate() -
         runner.decode_canonical_json(wire_bytes)
 
 
+def test_current_runtime_tool_paths_resolve_available_tools(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tool_directory = tmp_path / "tools"
+    tool_directory.mkdir(mode=0o700)
+    names = ("codex", *runner.PRODUCTION_POPPLER_SHA256)
+    tool_paths = {}
+    for name in names:
+        tool_path = tool_directory / name
+        tool_path.write_bytes(b"tool")
+        tool_path.chmod(0o700)
+        tool_paths[name] = tool_path
+    monkeypatch.setattr(
+        runner.shutil,
+        "which",
+        lambda name: str(tool_paths[name]) if name in tool_paths else None,
+    )
+
+    codex_path, poppler_directory = runner._current_runtime_tool_paths()
+
+    assert codex_path == tool_paths["codex"]
+    assert poppler_directory == tool_directory
+
+
 def test_current_evidence_archive_is_exact_and_content_addressed() -> None:
     document = {"schema_version": "fixture.v1", "rows": [{"id": "row-1"}]}
     references, objects = preparation._current_evidence_archive(
