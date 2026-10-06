@@ -17,6 +17,136 @@ from career_automation import production_preparation_runner as runner
 from career_automation.market_aligner_preparation import MarketApplicationPreparation
 
 
+def test_current_contact_json_codecs_keep_artifact_and_wire_formats_separate() -> None:
+    artifact_bytes = b'{"value":1}\n'
+    wire_bytes = b'{"value":1}'
+
+    assert runner._decode_current_artifact_document(artifact_bytes) == {"value": 1}
+    with pytest.raises(ValueError):
+        runner._decode_current_artifact_document(wire_bytes)
+    assert runner.decode_canonical_json(wire_bytes, label="selection receipt") == {
+        "value": 1
+    }
+    with pytest.raises(runner.HandoffContractError):
+        runner.decode_canonical_json(artifact_bytes, label="selection receipt")
+    with pytest.raises(TypeError, match="label"):
+        runner.decode_canonical_json(wire_bytes)
+
+
+def test_current_contact_projection_bundle_keeps_receipt_separate() -> None:
+    activation_sha256 = "a" * 64
+    documents = {"candidate_projection_bytes": b'{"projection":"current"}\n'}
+    receipt = {"activation_sha256": activation_sha256}
+
+    assert runner._projection_from_current_bundle(
+        documents,
+        receipt,
+        expected_activation_sha256=activation_sha256,
+    ) == {"projection": "current"}
+    with pytest.raises(ValueError):
+        runner._projection_from_current_bundle(
+            receipt,
+            documents,
+            expected_activation_sha256=activation_sha256,
+        )
+    with pytest.raises(ValueError):
+        runner._projection_from_current_bundle(
+            documents,
+            receipt,
+            expected_activation_sha256="b" * 64,
+        )
+
+
+def _current_selection_and_promotion() -> tuple[dict[str, object], dict[str, object]]:
+    profile_id = "profile-current"
+    source_job_key = "greenhouse:example:123"
+    promotion_sha256 = "1" * 64
+    selection = {
+        "decision": "selected_for_application",
+        "geography_bucket": "uk_remote",
+        "geography_priority_rank": 0,
+        "hard_gate_passed": True,
+        "promotion_receipt_sha256": promotion_sha256,
+        "rationale_codes": [],
+        "source_job_key": source_job_key,
+    }
+    promotion = {
+        "binding": {
+            "schema_version": "market-aligner.assessment-promotion-binding.v1",
+            "profile_id": profile_id,
+            "job_key": source_job_key,
+            "track": "Applied_AI_Engineer",
+        },
+        "decision": "pass",
+        "job_key": source_job_key,
+        "profile_id": profile_id,
+        "receipt_sha256": promotion_sha256,
+        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+    }
+    return selection, promotion
+
+
+def test_current_selected_track_comes_from_linked_promotion() -> None:
+    selection, promotion = _current_selection_and_promotion()
+    selection.update(
+        {
+            "job_key": "internal-not-source-key",
+            "profile_id": "untrusted-profile",
+            "profile_version": "untrusted-version",
+            "schema_version": "untrusted-selection-schema",
+            "track": "untrusted-track",
+        }
+    )
+
+    assert runner._resolve_current_selected_track(
+        selection,
+        promotion,
+        expected_profile_id="profile-current",
+        expected_source_job_key="greenhouse:example:123",
+    ) == "Applied_AI_Engineer"
+
+
+def test_current_selected_track_rejects_unbound_promotion_and_gate() -> None:
+    selection, promotion = _current_selection_and_promotion()
+    unlinked_promotion = dict(promotion, receipt_sha256="2" * 64)
+    with pytest.raises(ValueError, match="selected track binding invalid"):
+        runner._resolve_current_selected_track(
+            selection,
+            unlinked_promotion,
+            expected_profile_id="profile-current",
+            expected_source_job_key="greenhouse:example:123",
+        )
+
+    failed_gate = dict(selection, hard_gate_passed=1)
+    with pytest.raises(ValueError, match="selected track binding invalid"):
+        runner._resolve_current_selected_track(
+            failed_gate,
+            promotion,
+            expected_profile_id="profile-current",
+            expected_source_job_key="greenhouse:example:123",
+        )
+
+
+def test_current_selected_track_rejects_profile_or_source_mismatch() -> None:
+    selection, promotion = _current_selection_and_promotion()
+    wrong_profile = dict(promotion, profile_id="other-profile")
+    with pytest.raises(ValueError, match="selected track binding invalid"):
+        runner._resolve_current_selected_track(
+            selection,
+            wrong_profile,
+            expected_profile_id="profile-current",
+            expected_source_job_key="greenhouse:example:123",
+        )
+
+    with pytest.raises(ValueError, match="selected track binding invalid"):
+        runner._resolve_current_selected_track(
+            selection,
+            promotion,
+            expected_profile_id="profile-current",
+            expected_source_job_key="greenhouse:other:456",
+        )
+
+
 def test_candidate_editorial_authority_uses_exact_candidate_policy() -> None:
     authority = preparation._candidate_editorial_authority(
         candidate_name="Artiom Gutu",

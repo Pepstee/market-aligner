@@ -191,6 +191,110 @@ class _ProductionPreparationDeployment:
         return self.poppler_bin.parent / "lib/x86_64-linux-gnu"
 
 
+def _decode_current_artifact_document(raw: object) -> dict[str, object]:
+    from market_aligner.profiler.current_activation import (
+        _canonical_document_bytes,
+        _strict_json_loads,
+    )
+
+    try:
+        if type(raw) is not bytes:
+            raise ValueError
+        document = _strict_json_loads(raw)
+        if (
+            type(document) is not dict
+            or _canonical_document_bytes(document) != raw
+        ):
+            raise ValueError
+    except (TypeError, ValueError, UnicodeDecodeError, RecursionError):
+        raise ValueError("current artifact document is invalid") from None
+    return document
+
+
+def _resolve_current_selected_track(
+    selection: object,
+    promotion: object,
+    *,
+    expected_profile_id: str,
+    expected_source_job_key: str,
+) -> str:
+    invalid = "selected track binding invalid"
+    if (
+        type(selection) is not dict
+        or type(promotion) is not dict
+        or type(expected_profile_id) is not str
+        or not expected_profile_id.strip()
+        or expected_profile_id != expected_profile_id.strip()
+        or type(expected_source_job_key) is not str
+        or not expected_source_job_key.strip()
+        or expected_source_job_key != expected_source_job_key.strip()
+    ):
+        raise ValueError(invalid)
+    if (
+        type(selection.get("decision")) is not str
+        or selection["decision"] != "selected_for_application"
+        or selection.get("hard_gate_passed") is not True
+        or type(selection.get("source_job_key")) is not str
+        or selection["source_job_key"] != expected_source_job_key
+    ):
+        raise ValueError(invalid)
+    selection_promotion_sha256 = selection.get("promotion_receipt_sha256")
+    promotion_sha256 = promotion.get("receipt_sha256")
+    if (
+        type(selection_promotion_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", selection_promotion_sha256) is None
+        or type(promotion_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", promotion_sha256) is None
+        or selection_promotion_sha256 != promotion_sha256
+        or type(promotion.get("schema_version")) is not str
+        or promotion["schema_version"]
+        != "market-aligner.assessment-promotion-receipt.v1"
+        or type(promotion.get("decision")) is not str
+        or promotion["decision"] != "pass"
+        or type(promotion.get("profile_id")) is not str
+        or promotion["profile_id"] != expected_profile_id
+        or type(promotion.get("job_key")) is not str
+        or promotion["job_key"] != expected_source_job_key
+    ):
+        raise ValueError(invalid)
+    binding = promotion.get("binding")
+    if (
+        type(binding) is not dict
+        or type(binding.get("schema_version")) is not str
+        or binding["schema_version"]
+        != "market-aligner.assessment-promotion-binding.v1"
+        or type(binding.get("profile_id")) is not str
+        or binding["profile_id"] != expected_profile_id
+        or type(binding.get("job_key")) is not str
+        or binding["job_key"] != expected_source_job_key
+    ):
+        raise ValueError(invalid)
+    track = binding.get("track")
+    if (
+        type(track) is not str
+        or not track.strip()
+        or track != track.strip()
+    ):
+        raise ValueError(invalid)
+    return track
+
+
+def _projection_from_current_bundle(
+    documents: object,
+    receipt: object,
+    *,
+    expected_activation_sha256: str,
+) -> dict[str, object]:
+    if type(documents) is not dict or type(receipt) is not dict:
+        raise ValueError("current projection bundle is invalid")
+    projection = _decode_current_artifact_document(
+        documents.get("candidate_projection_bytes")
+    )
+    if receipt.get("activation_sha256") != expected_activation_sha256:
+        raise ValueError("current projection bundle is invalid")
+    return projection
+
+
 def _load_pinned_current_contact_provenance(
     *,
     deployment: _ProductionPreparationDeployment,
@@ -203,13 +307,21 @@ def _load_pinned_current_contact_provenance(
         compile_current_profile_projection,
         read_current_candidate_policy_canary_for_activation,
         read_current_profile_projection_bundle,
+        _strict_json_loads,
     )
     from market_aligner.service.api import MarketAlignerService
 
     invalid = "current contact inputs differ from the admitted profile"
     try:
-        authority = decode_canonical_json(candidate_authority_bytes)
-        selection = decode_canonical_json(verified.selection_receipt_bytes)
+        authority = _decode_current_artifact_document(candidate_authority_bytes)
+        selection = decode_canonical_json(
+            verified.selection_receipt_bytes,
+            label="current contact selection receipt",
+        )
+        promotion = decode_canonical_json(
+            verified.assessment_receipt_bytes,
+            label="current assessment promotion receipt",
+        )
         if (
             type(authority) is not dict
             or type(selection) is not dict
@@ -218,15 +330,16 @@ def _load_pinned_current_contact_provenance(
             or candidate_authority_bytes != verified.candidate_authority_bytes
             or hashlib.sha256(verified.selection_receipt_bytes).hexdigest()
             != verified.selection_receipt_sha256
-            or selection.get("schema_version")
-            != "market-aligner.selection-receipt.v1"
-            or selection.get("profile_id") != verified.profile_id
-            or selection.get("profile_version") != verified.profile_version
-            or selection.get("job_key") != verified.job_key
-            or type(selection.get("track")) is not str
-            or not selection["track"]
+            or hashlib.sha256(verified.assessment_receipt_bytes).hexdigest()
+            != verified.assessment_receipt_sha256
         ):
             raise ValueError(invalid)
+        track = _resolve_current_selected_track(
+            selection,
+            promotion,
+            expected_profile_id=verified.profile_id,
+            expected_source_job_key=verified.source_job_key,
+        )
         projection = authority.get("candidate_projection")
         profile_binding = authority.get("profile_binding")
         activation_sha256 = authority.get("activation_sha256")
@@ -263,7 +376,7 @@ def _load_pinned_current_contact_provenance(
                 != snapshot.hashes.get("evidence_ledger_sha256")
             ):
                 raise ValueError(invalid)
-            current_documents, current_projection = read_current_profile_projection_bundle(
+            current_documents, current_projection_receipt = read_current_profile_projection_bundle(
                 data_home=deployment.data_home,
                 profile_id=verified.profile_id,
                 candidate_authority_path=deployment.candidate_authority_path,
@@ -275,8 +388,13 @@ def _load_pinned_current_contact_provenance(
                     "evidence_ledger_sha256"
                 ],
             )
+            current_projection = _projection_from_current_bundle(
+                current_documents,
+                current_projection_receipt,
+                expected_activation_sha256=activation_sha256,
+            )
             if (
-                current_documents["candidate_authority_bytes"]
+                current_documents.get("candidate_authority_bytes")
                 != candidate_authority_bytes
                 or current_projection != projection
             ):
@@ -284,16 +402,18 @@ def _load_pinned_current_contact_provenance(
             recovery_manifest_sha256 = projection["source_hashes"][
                 "recovery_manifest"
             ]
-            canary_bytes, _canary_sha256 = (
+            canary_bytes, canary_sha256 = (
                 read_current_candidate_policy_canary_for_activation(
                     data_home=deployment.data_home,
                     profile_id=verified.profile_id,
-                    track=selection["track"],
+                    track=track,
                     source_job_key=verified.source_job_key,
                     activation_sha256=activation_sha256,
                 )
             )
-            canary = decode_canonical_json(canary_bytes)
+            if hashlib.sha256(canary_bytes).hexdigest() != canary_sha256:
+                raise ValueError(invalid)
+            canary = _strict_json_loads(canary_bytes)
             if (
                 type(canary) is not dict
                 or canary.get("recovery_manifest_sha256")

@@ -1,11 +1,11 @@
 {
   "community_count": 29688,
-  "edge_count": 75910,
-  "node_count": 57206,
+  "edge_count": 75931,
+  "node_count": 57215,
   "outputs": {
     ".graphify_labels.json": "958acceca6590be59b5abe496d1da2b771cde8a75bf348c766f377db451ecf62",
     "GRAPH_REPORT.md": "ce27e7ebb64972e1172f0ab3a8534c993e4bc4efc932459e785b9017967fc201",
-    "graph.json": "fed3988bba191d4964954deab4a0e5c121fe9bc7502533f860881605520d78fc"
+    "graph.json": "2081e01e4cc08f9dd389a0fd4cb6ded7cd3ec7cf70b3ffd5e6a13458632a1ccd"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "d8cca8baf9be79f564a7bd53ab0621b0f3416fd2",
+  "source_base_commit": "bacfafe8e53b6d9a8a54b29ab347a16efea8c8f0",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -174,7 +174,7 @@
     "internal/jaa/career_automation/production_form_binding.py": "be3f0f2e64868d86b153e9cd9c30310024d9f98dd685f5cb86f8be7e251f2be0",
     "internal/jaa/career_automation/production_handoff_admission_runner.py": "205ad10c3806f43ca7264a8647169b212004f2ac0ad791a23cb0aa6fbac721ca",
     "internal/jaa/career_automation/production_handoff_runner.py": "70e0bd0d8c2b0642c68eacfef49d6b6ed674110485fb9a475174ffcdeb58fd02",
-    "internal/jaa/career_automation/production_preparation_runner.py": "9cfae7f327bb3e60640358f0ea58d788a0938a48a380e21197b733577ce453a1",
+    "internal/jaa/career_automation/production_preparation_runner.py": "d9ffef04c9873ba22004ebfacc9584f6d48de9bb231cc1b7c5d7f4e5dcc74712",
     "internal/jaa/career_automation/production_queue.py": "5035176bdf6d8891ce7483a69c3c06c3cef26bc3fd1dc355e98e52ffaf8cdd45",
     "internal/jaa/career_automation/production_recruiter_assessor.py": "1855a2c93068aec02fdba78ce19cdf317ed18787a3c1e4b927d4f2506567897d",
     "internal/jaa/career_automation/production_runner.py": "e16a311da92eedb2af9bd75823c2af4386ec23e817ef7565fc5efa737cf5a2d1",
@@ -678,7 +678,7 @@
     "internal/jaa/test_production_ats_executor.py": "036ea894615c98bd7928cf34f0a6b8961841ea8225108817d27fd718fe43105a",
     "internal/jaa/test_production_handoff_runner.py": "59105f5c6c7c11a1e6fe8e8a031bb5dd91a75c59c099a6fba91800879e27f3e3",
     "internal/jaa/test_production_operational_surfaces.py": "297fa7889824bcd99db5582096f48c585df9a166dc977454322b810d14d14e6e",
-    "internal/jaa/test_production_preparation_runner.py": "93b3d4748c6b3a0908aa44fb4f2312f2e5aa1a6e48d7cf7c563f8e3ee03d36ac",
+    "internal/jaa/test_production_preparation_runner.py": "df3f97bdcb1bd06b454f3583eb0e18c20cd42cb3d3e6369c0ec9eaba10f5d9c0",
     "internal/jaa/test_production_queue.py": "4938e6ccb2201304b3fec2437af3ee9015ca94691b5f5c1e104e8b6069707718",
     "internal/jaa/test_production_runner.py": "da342c49aa888b83b88a520075646333932c1f1bba3080262c98eeecb1166bf8",
     "internal/jaa/test_protected_corpus_binding.py": "f89867e487a336cd2cbba2af498d32677b2772bd6509ebcd52c7bb94b6af2b65",
