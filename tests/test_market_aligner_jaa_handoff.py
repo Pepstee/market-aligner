@@ -38,7 +38,12 @@ from career_automation.production_handoff_admission_runner import (
     _promotion_receipt_semantic_identity,
 )
 
-from market_aligner.applications.handoff import encode_handoff_v1
+from market_aligner.applications.handoff import (
+    encode_current_runtime_handoff_v1,
+    encode_handoff_v1,
+    preparation_geography_document,
+    resolve_preparation_geography,
+)
 from market_aligner.applications.producer import (
     HandoffProducerError,
     HandoffReference,
@@ -253,6 +258,133 @@ def test_recovered_market_vector_is_parsed_and_atomically_admitted(tmp_path) -> 
     assert verified.candidate_authority_sha256 == expected_candidate_sha256
     with pytest.raises(HandoffAdmissionError, match="unsupported"):
         store.reference_sha256(admission.application_id, "candidate.claims")
+
+
+def test_current_runtime_admission_is_persistent_nonrelease_and_revalidated(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
+    document = json.loads(fixture_bytes)
+    legacy_bytes = base64.b64decode(
+        document["handoff"]["canonical_base64"], validate=True
+    )
+    legacy = parse_handoff(legacy_bytes)
+    payload = json.loads(json.dumps(legacy.payload))
+    location = payload["vacancy"]["location"]
+    preparation_geography = resolve_preparation_geography(
+        country_code=location["country_code"],
+        work_mode=location["work_mode"],
+        current_runtime=True,
+        unknown_uk_mode_allowed=False,
+    )
+    payload["selection"]["geographic_preference_policy_sha256"] = "a" * 64
+    payload["preparation_geography"] = preparation_geography_document(
+        preparation_geography,
+        current_runtime=True,
+        unknown_uk_mode_allowed=False,
+    )
+    current = encode_current_runtime_handoff_v1(payload)
+    current_root = "market-aligner-current-runtime-non-release-v1"
+
+    class ContextAuthenticator:
+        authenticator_identity_sha256 = hashlib.sha256(
+            b"current-runtime-context-authenticator"
+        ).hexdigest()
+
+        def authenticate(self, *, context_bytes, handoff_bytes, evaluated_at):
+            context = json.loads(context_bytes)
+            assert canonical_json_bytes(context) == context_bytes
+            assert context["environment"] == "current_runtime"
+            assert context["trust_root_id"] == current_root
+            assert context["handoff_root_sha256"] == hashlib.sha256(
+                handoff_bytes
+            ).hexdigest()
+
+    class CurrentResolver:
+        resolver_identity_sha256 = hashlib.sha256(
+            b"current-runtime-reference-resolver"
+        ).hexdigest()
+
+        def __init__(self):
+            self._entries = {}
+            for row in document["reference_bundle"]["value"]["entries"]:
+                metadata = dict(row["metadata"])
+                metadata["trust_root_id"] = current_root
+                if metadata["valid_until"] is not None:
+                    metadata["valid_until"] = "2099-01-01T00:00:00Z"
+                self._entries[metadata["reference_key"]] = (
+                    base64.b64decode(row["object_base64"], validate=True),
+                    canonical_json_bytes(metadata),
+                )
+
+        def resolve(self, request):
+            exact, metadata = self._entries[request.spec.reference_key]
+            assert hashlib.sha256(exact).hexdigest() == request.sha256
+            return ResolvedReference(exact, metadata)
+
+        def authenticate(
+            self, *, metadata_bytes, exact_bytes, admission_context_bytes, evaluated_at
+        ):
+            metadata = json.loads(metadata_bytes)
+            expected_exact, expected_metadata = self._entries[
+                metadata["reference_key"]
+            ]
+            assert exact_bytes == expected_exact
+            assert metadata_bytes == expected_metadata
+            assert metadata["trust_root_id"] == current_root
+            context = json.loads(admission_context_bytes)
+            assert context["trust_root_id"] == current_root
+
+    context = canonical_json_bytes(
+        {
+            "environment": "current_runtime",
+            "handoff_root_sha256": current.root_sha256,
+                "issued_at": current.payload["created_at"],
+            "producer_commit_sha": current.payload["producer"]["commit_sha"],
+            "producer_product": "market-aligner",
+            "source_record_sha256": hashlib.sha256(fixture_bytes).hexdigest(),
+            "trust_mode": "current_runtime_non_release",
+            "trust_proof_sha256": hashlib.sha256(
+                b"current-runtime-context-proof"
+            ).hexdigest(),
+            "trust_root_id": current_root,
+        }
+    )
+    store = HandoffAdmissionStore(
+        tmp_path / "current-runtime-admission.sqlite3",
+        context_authenticator=ContextAuthenticator(),
+        resolver=CurrentResolver(),
+    )
+    admission = store.admit_current_runtime_nonrelease(current.exact_bytes, context)
+    assert admission.created is True
+    assert admission.environment == "current_runtime"
+    assert admission.authority_scope == "current_runtime_non_release"
+    assert admission.release_capable is False
+    replay = store.admit_current_runtime_nonrelease(current.exact_bytes, context)
+    assert replay.created is False
+    assert replay.verification_receipt_sha256 == admission.verification_receipt_sha256
+    assert store.verify_stored(admission.application_id).admission_kind == (
+        "current_runtime_non_release"
+    )
+    verified = store.for_boundary(admission.application_id, "strategy")
+    assert verified.environment == "current_runtime"
+    assert verified.authority_scope == "current_runtime_non_release"
+    assert verified.current_boundary == "strategy"
+    with pytest.raises(HandoffAdmissionError, match="cannot enter a release boundary"):
+        store.for_boundary(admission.application_id, "release_readiness")
+    with sqlite3.connect(store.database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM current_runtime_admissions"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM application_admissions"
+        ).fetchone()[0] == 0
 
 
 def test_protected_outbox_bundle_authenticates_and_replays_idempotently(

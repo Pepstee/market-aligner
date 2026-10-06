@@ -13,6 +13,10 @@ import pytest
 from career_automation import production_handoff_admission_runner as admission_runner
 from career_automation import production_handoff_runner
 from career_automation.current_time import AuthenticatedCurrentTimeWitness
+from career_automation.handoff_admission import (
+    HandoffAdmissionError,
+    _context_document,
+)
 from career_automation.market_aligner_handoff import canonical_json_bytes
 
 from market_aligner.service import api as service_api
@@ -103,6 +107,63 @@ def _execution(deployment, **changes) -> Path:
     return path
 
 
+def test_current_runtime_context_requires_exact_nonrelease_bindings() -> None:
+    class Authenticator:
+        authenticator_identity_sha256 = SHA
+
+        def authenticate(self, **_kwargs) -> None:
+            return None
+
+    document = {
+        "environment": "current_runtime",
+        "handoff_root_sha256": SHA,
+        "issued_at": "2026-10-06T00:00:00Z",
+        "producer_commit_sha": COMMIT,
+        "producer_product": "market-aligner",
+        "source_record_sha256": SHA,
+        "trust_mode": "current_runtime_non_release",
+        "trust_proof_sha256": SHA,
+        "trust_root_id": "market-aligner-current-runtime-non-release-v1",
+    }
+    handoff = SimpleNamespace(
+        emission_profile="current_runtime_non_release_v1",
+        strict_profile=False,
+        root_sha256=SHA,
+        original_bytes=b"current-runtime-handoff",
+        payload={"producer": {"commit_sha": COMMIT, "product": "market-aligner"}},
+    )
+    raw = canonical_json_bytes(document)
+    validated, context_sha256, auth_sha256 = _context_document(
+        raw,
+        handoff,
+        Authenticator(),
+        "2026-10-06T00:00:01Z",
+    )
+    assert validated == document
+    assert context_sha256 == hashlib.sha256(raw).hexdigest()
+    assert auth_sha256 == SHA
+
+    for field, value in (
+        ("trust_mode", "protected_local_outbox"),
+        ("trust_root_id", "different-current-runtime-root"),
+    ):
+        changed = dict(document)
+        changed[field] = value
+        with pytest.raises(HandoffAdmissionError) as caught:
+            _context_document(
+                canonical_json_bytes(changed),
+                handoff,
+                Authenticator(),
+                "2026-10-06T00:00:01Z",
+            )
+        assert caught.value.code == "context_environment"
+
+    strict_handoff = SimpleNamespace(**{**vars(handoff), "strict_profile": True})
+    with pytest.raises(HandoffAdmissionError) as caught:
+        _context_document(raw, strict_handoff, Authenticator(), "2026-10-06T00:00:01Z")
+    assert caught.value.code == "context_environment"
+
+
 def _witness():
     witness = object.__new__(AuthenticatedCurrentTimeWitness)
     witness.environment = "production"
@@ -184,6 +245,7 @@ class _Store:
             handoff_root_sha256=SHA,
             environment="production",
             authority_scope="production",
+            admission_kind="market_aligner_handoff_v1",
             verification_receipt_sha256="d" * 64,
             created=type(self).created,
         )
@@ -605,11 +667,24 @@ def test_public_signatures_expose_no_roots_time_commit_database_or_release() -> 
     handoff = inspect.signature(
         production_handoff_runner.run_production_handoff
     ).parameters
-    assert set(handoff) == {"profile_id", "track", "source_job_key"}
+    assert set(handoff) == {
+        "profile_id",
+        "track",
+        "source_job_key",
+        "current_runtime_config_path",
+        "current_runtime_config_sha256",
+        "current_runtime_private_root",
+        "current_recovery_manifest_relative_path",
+    }
     admission = inspect.signature(
         admission_runner.run_production_handoff_admission
     ).parameters
-    assert set(admission) == {"execution_receipt_path"}
+    assert set(admission) == {
+        "execution_receipt_path",
+        "current_runtime_config_path",
+        "current_runtime_config_sha256",
+        "current_runtime_private_root",
+    }
     forbidden = {
         "data_home",
         "outbox_root",
@@ -711,6 +786,7 @@ def test_service_handoff_forwards_distinct_source_and_handoff_job_keys(
         "job_key": "workable:cogna:847CFBC5F4",
         "manifest": {"manifest": "exact"},
         "handoff_job_key": "job_" + "9" * 64,
+        "current_runtime": False,
     }
 
 

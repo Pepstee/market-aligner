@@ -592,7 +592,7 @@ def test_current_runtime_config_path_must_be_strictly_beneath_private_root(
 )
 def test_current_runtime_cli_arguments_are_all_or_none(provided: dict[str, str]) -> None:
     with pytest.raises(
-        runner.ProductionHandoffDeploymentError,
+        ValueError,
         match="requires config path, raw hash and private root",
     ):
         runner.run_production_handoff(
@@ -601,6 +601,103 @@ def test_current_runtime_cli_arguments_are_all_or_none(provided: dict[str, str])
             source_job_key="workable:cogna:847CFBC5F4",
             **provided,
         )
+
+
+def test_runtime_deployment_selector_is_exact_and_never_falls_back() -> None:
+    class StringSubclass(str):
+        pass
+
+    legacy_result = object()
+    current_result = object()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def legacy_loader():
+        calls.append(("legacy", {}))
+        return legacy_result
+
+    def current_loader(**kwargs):
+        calls.append(("current", kwargs))
+        return current_result
+
+    selected, result = runner.select_runtime_deployment(
+        legacy_loader=legacy_loader,
+        current_loader=current_loader,
+    )
+    assert selected is False
+    assert result is legacy_result
+    assert calls == [("legacy", {})]
+
+    calls.clear()
+    selected, result = runner.select_runtime_deployment(
+        config_path="/private/config.json",
+        config_sha256="a" * 64,
+        private_root="/private",
+        legacy_loader=legacy_loader,
+        current_loader=current_loader,
+    )
+    assert selected is True
+    assert result is current_result
+    assert calls == [
+        (
+            "current",
+            {
+                "configuration_path": "/private/config.json",
+                "configuration_sha256": "a" * 64,
+                "private_root": "/private",
+            },
+        )
+    ]
+
+    for bad_path in (StringSubclass("/private/config.json"), "/private/../config.json"):
+        calls.clear()
+        with pytest.raises(ValueError):
+            runner.select_runtime_deployment(
+                config_path=bad_path,
+                config_sha256="a" * 64,
+                private_root="/private",
+                legacy_loader=legacy_loader,
+                current_loader=current_loader,
+            )
+        assert calls == []
+
+    for bad_hash in (StringSubclass("a" * 64), "A" * 64, "g" * 64):
+        calls.clear()
+        with pytest.raises(ValueError):
+            runner.select_runtime_deployment(
+                config_path="/private/config.json",
+                config_sha256=bad_hash,
+                private_root="/private",
+                legacy_loader=legacy_loader,
+                current_loader=current_loader,
+            )
+        assert calls == []
+
+    calls.clear()
+    with pytest.raises(ValueError):
+        runner.select_runtime_deployment(
+            config_path="/private/config.json",
+            config_sha256="a" * 64,
+            legacy_loader=legacy_loader,
+            current_loader=current_loader,
+        )
+    assert calls == []
+
+    failure = RuntimeError("loader failure")
+
+    def failed_loader(**_kwargs):
+        calls.append(("current", {}))
+        raise failure
+
+    with pytest.raises(RuntimeError) as caught:
+        runner.select_runtime_deployment(
+            config_path="/private/config.json",
+            config_sha256="a" * 64,
+            private_root="/private",
+            legacy_loader=legacy_loader,
+            current_loader=failed_loader,
+        )
+    assert caught.value is failure
+    assert calls == [("current", {})]
 
 
 def test_current_recovery_manifest_locator_requires_current_runtime() -> None:

@@ -666,9 +666,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/migrations.py": {
-    "mtime": 1791008752.207456,
-    "seen": 1791010788.4200547,
-    "ast_hash": "46f33fd5c335f6fcc4b78fee844bf4ca",
+    "mtime": 1791308874.5029392,
+    "seen": 1791309470.3483243,
+    "ast_hash": "dced282f9f7634b03cdd2c7fa42de5c0",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/models.py": {
@@ -4002,9 +4002,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/handoff_admission.py": {
-    "mtime": 1790562678.4465065,
-    "seen": 1790775868.5198169,
-    "ast_hash": "ec3c472ffcc4b86c41db561d23590949",
+    "mtime": 1791308625.9949384,
+    "seen": 1791309470.3483007,
+    "ast_hash": "133eb67989e0d43d1a945cd64fc0e03a",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/market_aligner_handoff.py": {
@@ -4020,15 +4020,15 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_handoff_admission_runner.py": {
-    "mtime": 1790669915.31642,
-    "seen": 1790775868.5198526,
-    "ast_hash": "7f0864743070d9ad05be8a0193ec85a3",
+    "mtime": 1791309349.226927,
+    "seen": 1791309470.3483412,
+    "ast_hash": "2c45c849951261dd044ca5498ebf8278",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_handoff_runner.py": {
-    "mtime": 1791299772.1670852,
-    "seen": 1791302696.474066,
-    "ast_hash": "76805c8ab837046d0ccecfabd49a8a62",
+    "mtime": 1791307956.5509484,
+    "seen": 1791309470.3483422,
+    "ast_hash": "b5c597c12b1696792e8c296a90095507",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_preparation_runner.py": {
@@ -4122,15 +4122,15 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/run_production_handoff_admission.py": {
-    "mtime": 1788246507.3064437,
-    "seen": 1790775868.520091,
-    "ast_hash": "842098c24dfed0469929072dfa5d22c8",
+    "mtime": 1791309033.2269373,
+    "seen": 1791309470.3485417,
+    "ast_hash": "9102fbbd4b0e3d77f728e8f6c4b299b4",
     "semantic_hash": ""
   },
   "internal/jaa/scripts/run_production_market_handoff.py": {
-    "mtime": 1791299778.339085,
-    "seen": 1791302696.4743462,
-    "ast_hash": "a6a9a8660a108ec96f014f5a4e76130f",
+    "mtime": 1791309033.1909373,
+    "seen": 1791309470.3485425,
+    "ast_hash": "cd2b8f604289b008c552e57440560be9",
     "semantic_hash": ""
   },
   "internal/jaa/test_authority_provisioning.py": {
@@ -4212,15 +4212,15 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_production_handoff_runner.py": {
-    "mtime": 1791300767.7750602,
-    "seen": 1791302696.4745767,
-    "ast_hash": "8a0b629cad45feb9607e8e237d432bd5",
+    "mtime": 1791307888.7429612,
+    "seen": 1791309470.3487601,
+    "ast_hash": "ebc83d63a41455ec655a20234134a8cd",
     "semantic_hash": ""
   },
   "internal/jaa/test_production_operational_surfaces.py": {
-    "mtime": 1790113918.033165,
-    "seen": 1790775868.5202873,
-    "ast_hash": "b9070a4873fe63542ff428831c0a6391",
+    "mtime": 1791309041.1829371,
+    "seen": 1791309470.348761,
+    "ast_hash": "75304a9ee75a336b0df8966be7e37b3d",
     "semantic_hash": ""
   },
   "internal/jaa/test_production_preparation_runner.py": {
@@ -4296,9 +4296,9 @@
     "semantic_hash": ""
   },
   "tests/test_market_aligner_jaa_handoff.py": {
-    "mtime": 1791241140.2240496,
-    "seen": 1791241456.8547487,
-    "ast_hash": "e4499493282990b93ebb300296c017bb",
+    "mtime": 1791308927.6189387,
+    "seen": 1791309470.3489046,
+    "ast_hash": "e536bba19a85438f73962c8f4cd414b8",
     "semantic_hash": ""
   },
   "tests/test_production_handoff.py": {

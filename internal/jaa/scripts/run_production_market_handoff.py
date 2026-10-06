@@ -28,17 +28,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-runtime-private-root")
     parser.add_argument("--current-recovery-manifest-relative-path")
     args = parser.parse_args(argv)
-    receipt = run_production_handoff(
-        profile_id=args.profile_id,
-        track=args.track,
-        source_job_key=args.source_job_key,
-        current_runtime_config_path=args.current_runtime_config_path,
-        current_runtime_config_sha256=args.current_runtime_config_sha256,
-        current_runtime_private_root=args.current_runtime_private_root,
-        current_recovery_manifest_relative_path=(
+    inputs = {
+        "profile_id": args.profile_id,
+        "track": args.track,
+        "source_job_key": args.source_job_key,
+    }
+    if any(
+        value is not None
+        for value in (
+            args.current_runtime_config_path,
+            args.current_runtime_config_sha256,
+            args.current_runtime_private_root,
+        )
+    ):
+        inputs.update(
+            {
+                "current_runtime_config_path": args.current_runtime_config_path,
+                "current_runtime_config_sha256": args.current_runtime_config_sha256,
+                "current_runtime_private_root": args.current_runtime_private_root,
+            }
+        )
+    if args.current_recovery_manifest_relative_path is not None:
+        inputs["current_recovery_manifest_relative_path"] = (
             args.current_recovery_manifest_relative_path
-        ),
-    )
+        )
+    receipt = run_production_handoff(**inputs)
     sys.stdout.buffer.write(canonical_json_bytes(receipt.document()) + b"\n")
     return 0
 

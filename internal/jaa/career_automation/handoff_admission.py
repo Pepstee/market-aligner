@@ -38,6 +38,7 @@ from .market_aligner_handoff import (
     canonical_json_bytes,
     decode_canonical_json,
     parse_handoff,
+    parse_handoff_for_runtime,
 )
 from .migrations import apply_jaa_operational_migrations
 
@@ -47,6 +48,13 @@ LEGACY_VERIFICATION_SCHEMA = "jaa.legacy-scored-jsonl-admission.v1"
 ADMISSION_KIND_V1 = "market_aligner_handoff_v1"
 ADMISSION_KIND_COMPATIBILITY = "base_v1_compatibility"
 ADMISSION_KIND_LEGACY = "legacy_scored_jsonl"
+ADMISSION_KIND_CURRENT_RUNTIME = "current_runtime_non_release"
+CURRENT_RUNTIME_ENVIRONMENT = "current_runtime"
+CURRENT_RUNTIME_AUTHORITY_SCOPE = "current_runtime_non_release"
+CURRENT_RUNTIME_EMISSION_PROFILE = "current_runtime_non_release_v1"
+CURRENT_RUNTIME_TRUST_MODE = "current_runtime_non_release"
+CURRENT_RUNTIME_TRUST_ROOT_ID = "market-aligner-current-runtime-non-release-v1"
+CURRENT_RUNTIME_FRESHNESS_PROVENANCE = "local_system_utc"
 AUTHENTICATED_TRUST_MODES = frozenset(
     {"protected_local_outbox", "authenticated_attestation"}
 )
@@ -849,7 +857,7 @@ class VerifiedApplicationInput:
     candidate_intent_sha256: str = ""
     final_score: float = 0.0
     opportunity_score: float = 0.0
-    geography_priority_rank: int = 5
+    geography_priority_rank: int | None = 5
 
 
 def _verified_market_decision_references(
@@ -907,7 +915,11 @@ def _verified_market_decision_references(
         if isinstance(selection, dict)
         else None
     )
+    current_runtime = handoff.emission_profile == CURRENT_RUNTIME_EMISSION_PROFILE
     if integrated_shape:
+        valid_geography_rank = (
+            type(geography_rank) is int and geography_rank in {1, 2, 3, 4, 5}
+        ) or (current_runtime and geography_rank is None)
         if (
             not isinstance(candidate_intent_sha256, str)
             or len(candidate_intent_sha256) != 64
@@ -918,9 +930,7 @@ def _verified_market_decision_references(
             or isinstance(opportunity, bool)
             or not isinstance(opportunity, (int, float))
             or not 0.0 <= float(opportunity) <= 1.0
-            or isinstance(geography_rank, bool)
-            or not isinstance(geography_rank, int)
-            or geography_rank not in {1, 2, 3, 4, 5}
+            or not valid_geography_rank
         ):
             raise HandoffAdmissionError(
                 "market_decision_ranking",
@@ -1066,11 +1076,23 @@ def _context_document(
         },
         "admission context",
     )
-    if document["environment"] not in {"production", "synthetic"}:
+    current_runtime_context = document["environment"] == "current_runtime"
+    if document["environment"] not in {"production", "synthetic", "current_runtime"}:
         raise HandoffAdmissionError(
             "context_environment", "context environment is unsupported"
         )
-    if document["trust_mode"] not in AUTHENTICATED_TRUST_MODES:
+    if current_runtime_context:
+        if (
+            document["trust_mode"] != "current_runtime_non_release"
+            or document["trust_root_id"]
+            != "market-aligner-current-runtime-non-release-v1"
+            or handoff.emission_profile != "current_runtime_non_release_v1"
+            or handoff.strict_profile
+        ):
+            raise HandoffAdmissionError(
+                "context_environment", "current runtime context binding differs"
+            )
+    elif document["trust_mode"] not in AUTHENTICATED_TRUST_MODES:
         raise HandoffAdmissionError(
             "context_trust_mode", "context trust mode is unsupported"
         )
@@ -1122,6 +1144,24 @@ def _context_document(
             "configured context authenticator rejected the proof",
         ) from exc
     return document, hashlib.sha256(context_bytes).hexdigest(), authenticator_identity
+
+
+def _parse_current_runtime_handoff(raw: bytes) -> ParsedHandoff:
+    from market_aligner.applications.handoff import parse_current_runtime_handoff_v1
+
+    try:
+        return parse_handoff_for_runtime(
+            raw,
+            current_runtime=True,
+            require_strict_profile=False,
+            legacy_parser=parse_handoff,
+            current_parser=parse_current_runtime_handoff_v1,
+            make_parsed=ParsedHandoff,
+        )
+    except ValueError as exc:
+        raise HandoffAdmissionError(
+            "current_runtime_handoff", "current runtime handoff is invalid"
+        ) from exc
 
 
 def _candidate_intent(exact_bytes: bytes, handoff: ParsedHandoff) -> str:
@@ -1525,14 +1565,18 @@ def _verification_receipt(
     trust_mode: str,
     trust_root_id: str,
     current_time_receipt_sha256: str | None,
+    current_runtime_nonrelease: bool = False,
 ) -> bytes:
-    return canonical_json_bytes(
-        {
+    document = {
             "admission_context_sha256": context_sha256,
             "admission_kind": (
-                ADMISSION_KIND_V1
-                if handoff.strict_profile
-                else ADMISSION_KIND_COMPATIBILITY
+                ADMISSION_KIND_CURRENT_RUNTIME
+                if current_runtime_nonrelease
+                else (
+                    ADMISSION_KIND_V1
+                    if handoff.strict_profile
+                    else ADMISSION_KIND_COMPATIBILITY
+                )
             ),
             "admitted_at": admitted_at,
             "authority_scope": authority_scope,
@@ -1544,12 +1588,25 @@ def _verification_receipt(
             "handoff_root_sha256": handoff.root_sha256,
             "payload_sha256": handoff.payload_sha256,
             "references": [row.document() for row in graph.references],
-            "schema_version": VERIFICATION_SCHEMA,
+            "schema_version": (
+                "market-aligner.current-runtime-handoff-verification.v1"
+                if current_runtime_nonrelease
+                else VERIFICATION_SCHEMA
+            ),
             "consumer_freshness_policy": graph.policy_rules.document(),
             "trust_mode": trust_mode,
             "trust_root_id": trust_root_id,
         }
-    )
+    if current_runtime_nonrelease:
+        document.update(
+            {
+                "freshness_provenance": CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+                "release_authority": False,
+                "release_token_issued": False,
+                "submission_authority": False,
+            }
+        )
+    return canonical_json_bytes(document)
 
 
 class HandoffAdmissionStore:
@@ -1649,6 +1706,197 @@ class HandoffAdmissionStore:
                 "hash_collision", "stored root has different exact bytes"
             )
         return self._stored_result(row, created=False)
+
+    def _current_runtime_root_replay(self, raw: bytes) -> HandoffAdmission | None:
+        if type(raw) is not bytes or not raw or len(raw) > MAX_WIRE_BYTES:
+            return None
+        root = hashlib.sha256(raw).hexdigest()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM current_runtime_admissions WHERE handoff_root_sha256=?",
+                (root,),
+            ).fetchone()
+        if row is None:
+            return None
+        if bytes(row["original_bytes"]) != raw:
+            raise HandoffAdmissionError(
+                "hash_collision", "stored current runtime root has different bytes"
+            )
+        return self._stored_current_runtime_result(row, created=False)
+
+    def admit_current_runtime_nonrelease(
+        self,
+        raw: bytes,
+        context_bytes: bytes,
+    ) -> HandoffAdmission:
+        """Persist an authenticated current-runtime handoff without release authority."""
+        replay = self._current_runtime_root_replay(raw)
+        if replay is not None:
+            return replay
+        if type(raw) is not bytes or not raw or len(raw) > MAX_WIRE_BYTES:
+            raise HandoffAdmissionError(
+                "current_runtime_handoff", "current runtime handoff bytes are invalid"
+            )
+        if type(context_bytes) is not bytes or not context_bytes:
+            raise HandoffAdmissionError(
+                "current_runtime_context", "current runtime context bytes are invalid"
+            )
+        if self.context_authenticator is None or self.resolver is None:
+            raise HandoffAdmissionError(
+                "trust_not_configured", "current runtime admission requires bundle trust"
+            )
+        try:
+            handoff = _parse_current_runtime_handoff(raw)
+        except HandoffAdmissionError:
+            raise
+        admitted_at, _ = _evaluation_time(None)
+        context, context_sha256, authenticator_identity = _context_document(
+            context_bytes,
+            handoff,
+            self.context_authenticator,
+            admitted_at,
+        )
+        if (
+            context["environment"] != CURRENT_RUNTIME_ENVIRONMENT
+            or context["trust_mode"] != CURRENT_RUNTIME_TRUST_MODE
+            or context["trust_root_id"] != CURRENT_RUNTIME_TRUST_ROOT_ID
+            or handoff.emission_profile != CURRENT_RUNTIME_EMISSION_PROFILE
+            or handoff.strict_profile
+        ):
+            raise HandoffAdmissionError(
+                "current_runtime_context", "current runtime trust binding differs"
+            )
+        graph = _verify_graph(
+            handoff,
+            self.resolver,
+            context_bytes=context_bytes,
+            context_trust_root_id=CURRENT_RUNTIME_TRUST_ROOT_ID,
+            evaluated_at=admitted_at,
+            authenticate=True,
+            consumer_policy_rules=self.consumer_policy_rules,
+        )
+        receipt = _verification_receipt(
+            handoff,
+            graph,
+            admitted_at=admitted_at,
+            context_sha256=context_sha256,
+            context_authenticator_sha256=authenticator_identity,
+            environment=CURRENT_RUNTIME_ENVIRONMENT,
+            authority_scope=CURRENT_RUNTIME_AUTHORITY_SCOPE,
+            trust_mode=CURRENT_RUNTIME_TRUST_MODE,
+            trust_root_id=CURRENT_RUNTIME_TRUST_ROOT_ID,
+            current_time_receipt_sha256=None,
+            current_runtime_nonrelease=True,
+        )
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            legacy_conflict = connection.execute(
+                """SELECT 1 FROM application_admissions
+                   WHERE application_id=? OR logical_identity_sha256=?
+                      OR handoff_root_sha256=?""",
+                (
+                    handoff.application_id,
+                    handoff.logical_identity_sha256,
+                    handoff.root_sha256,
+                ),
+            ).fetchone()
+            if legacy_conflict is not None:
+                raise HandoffAdmissionError(
+                    "cross_mode_conflict",
+                    "current runtime handoff conflicts with a legacy admission",
+                )
+            existing = connection.execute(
+                """SELECT * FROM current_runtime_admissions
+                   WHERE handoff_root_sha256=?""",
+                (handoff.root_sha256,),
+            ).fetchone()
+            if existing is not None:
+                if bytes(existing["original_bytes"]) != raw:
+                    raise HandoffAdmissionError(
+                        "hash_collision", "current runtime root collision changed bytes"
+                    )
+                connection.commit()
+                return self._stored_current_runtime_result(existing, created=False)
+            conflict = connection.execute(
+                """SELECT 1 FROM current_runtime_admissions
+                   WHERE application_id=? OR logical_identity_sha256=?""",
+                (handoff.application_id, handoff.logical_identity_sha256),
+            ).fetchone()
+            if conflict is not None:
+                raise HandoffAdmissionError(
+                    "replay_conflict",
+                    "current runtime logical identity already has another root",
+                )
+            logical_json = canonical_json_bytes(
+                handoff.logical_identity_document
+            ).decode("utf-8")
+            receipt_sha256 = hashlib.sha256(receipt).hexdigest()
+            payload = handoff.payload
+            connection.execute(
+                """INSERT INTO current_runtime_admissions(
+                     application_id,admission_kind,environment,authority_scope,
+                     emission_profile,logical_identity_json,logical_identity_sha256,
+                     trust_mode,trust_root_id,admission_context_bytes,
+                     admission_context_sha256,context_authenticator_sha256,admitted_at,
+                     producer_product,producer_commit_sha,profile_id,profile_version,
+                     job_key,handoff_root_sha256,payload_sha256,vacancy_snapshot_sha256,
+                     original_bytes,original_bytes_sha256,verification_receipt_bytes,
+                     verification_receipt_sha256,vacancy_source_identity,reference_count,
+                     freshness_provenance,sealed
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+                (
+                    handoff.application_id,
+                    ADMISSION_KIND_CURRENT_RUNTIME,
+                    CURRENT_RUNTIME_ENVIRONMENT,
+                    CURRENT_RUNTIME_AUTHORITY_SCOPE,
+                    CURRENT_RUNTIME_EMISSION_PROFILE,
+                    logical_json,
+                    handoff.logical_identity_sha256,
+                    CURRENT_RUNTIME_TRUST_MODE,
+                    CURRENT_RUNTIME_TRUST_ROOT_ID,
+                    sqlite3.Binary(context_bytes),
+                    context_sha256,
+                    authenticator_identity,
+                    admitted_at,
+                    payload["producer"]["product"],
+                    payload["producer"]["commit_sha"],
+                    payload["profile_id"],
+                    payload["profile_version"],
+                    payload["job_key"],
+                    handoff.root_sha256,
+                    handoff.payload_sha256,
+                    payload["vacancy"]["vacancy_snapshot_sha256"],
+                    sqlite3.Binary(raw),
+                    handoff.root_sha256,
+                    sqlite3.Binary(receipt),
+                    receipt_sha256,
+                    handoff.vacancy_source_identity,
+                    len(graph.references),
+                    CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM current_runtime_admissions WHERE application_id=?",
+                (handoff.application_id,),
+            ).fetchone()
+            assert row is not None
+            return self._stored_current_runtime_result(row, created=True)
+        except HandoffAdmissionError:
+            connection.rollback()
+            raise
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            winner = self._current_runtime_root_replay(raw)
+            if winner is not None:
+                return winner
+            raise HandoffAdmissionError(
+                "persistence_conflict",
+                "current runtime admission conflicts with an immutable record",
+            ) from exc
+        finally:
+            connection.close()
 
     def admit_authenticated(
         self,
@@ -2116,8 +2364,35 @@ class HandoffAdmissionStore:
             created=created,
         )
 
+    @staticmethod
+    def _stored_current_runtime_result(
+        row: sqlite3.Row, *, created: bool
+    ) -> HandoffAdmission:
+        return HandoffAdmission(
+            application_id=str(row["application_id"]),
+            admission_kind=ADMISSION_KIND_CURRENT_RUNTIME,
+            environment=CURRENT_RUNTIME_ENVIRONMENT,
+            authority_scope=CURRENT_RUNTIME_AUTHORITY_SCOPE,
+            emission_profile=CURRENT_RUNTIME_EMISSION_PROFILE,
+            handoff_root_sha256=str(row["handoff_root_sha256"]),
+            job_key=str(row["job_key"]),
+            profile_id=str(row["profile_id"]),
+            profile_version=str(row["profile_version"]),
+            vacancy_source_identity=str(row["vacancy_source_identity"]),
+            verification_receipt_sha256=str(row["verification_receipt_sha256"]),
+            created=created,
+        )
+
     def get(self, application_id: str) -> HandoffAdmission:
         with self._connect() as connection:
+            current_row = connection.execute(
+                "SELECT * FROM current_runtime_admissions WHERE application_id=?",
+                (application_id,),
+            ).fetchone()
+            if current_row is not None:
+                return self._stored_current_runtime_result(
+                    current_row, created=False
+                )
             row = connection.execute(
                 "SELECT * FROM application_admissions WHERE application_id=?",
                 (application_id,),
@@ -2154,6 +2429,12 @@ class HandoffAdmissionStore:
     def verify_stored(self, application_id: str) -> HandoffAdmission:
         connection = self._connect()
         try:
+            current_row = connection.execute(
+                "SELECT * FROM current_runtime_admissions WHERE application_id=?",
+                (application_id,),
+            ).fetchone()
+            if current_row is not None:
+                return self._verify_stored_current_runtime(current_row)
             row = connection.execute(
                 "SELECT * FROM application_admissions WHERE application_id=?",
                 (application_id,),
@@ -2241,12 +2522,88 @@ class HandoffAdmissionStore:
         finally:
             connection.close()
 
+    def _verify_stored_current_runtime(
+        self, row: sqlite3.Row
+    ) -> HandoffAdmission:
+        receipt_bytes = bytes(row["verification_receipt_bytes"])
+        if hashlib.sha256(receipt_bytes).hexdigest() != row[
+            "verification_receipt_sha256"
+        ]:
+            raise HandoffAdmissionError(
+                "stored_verification_invalid", "current runtime receipt digest differs"
+            )
+        try:
+            handoff = _parse_current_runtime_handoff(bytes(row["original_bytes"]))
+            receipt = decode_canonical_json(
+                receipt_bytes, label="current runtime verification receipt"
+            )
+            context_bytes = bytes(row["admission_context_bytes"])
+            context, context_sha256, authenticator_identity = _context_document(
+                context_bytes,
+                handoff,
+                self.context_authenticator,
+                str(row["admitted_at"]),
+            )
+        except (HandoffAdmissionError, HandoffContractError) as exc:
+            raise HandoffAdmissionError(
+                "stored_verification_invalid", "current runtime admission is invalid"
+            ) from exc
+        expected = {
+            "admission_kind": ADMISSION_KIND_CURRENT_RUNTIME,
+            "admitted_at": str(row["admitted_at"]),
+            "authority_scope": CURRENT_RUNTIME_AUTHORITY_SCOPE,
+            "context_authenticator_sha256": authenticator_identity,
+            "admission_context_sha256": context_sha256,
+            "emission_profile": CURRENT_RUNTIME_EMISSION_PROFILE,
+            "environment": CURRENT_RUNTIME_ENVIRONMENT,
+            "handoff_root_sha256": handoff.root_sha256,
+            "payload_sha256": handoff.payload_sha256,
+            "schema_version": "market-aligner.current-runtime-handoff-verification.v1",
+            "trust_mode": CURRENT_RUNTIME_TRUST_MODE,
+            "trust_root_id": CURRENT_RUNTIME_TRUST_ROOT_ID,
+            "freshness_provenance": CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+            "release_authority": False,
+            "release_token_issued": False,
+            "submission_authority": False,
+        }
+        if (
+            type(receipt) is not dict
+            or any(receipt.get(key) != value for key, value in expected.items())
+            or any(type(receipt.get(key)) is not bool for key in (
+                "release_authority", "release_token_issued", "submission_authority"
+            ))
+            or row["application_id"] != handoff.application_id
+            or row["logical_identity_json"]
+            != canonical_json_bytes(handoff.logical_identity_document).decode("utf-8")
+            or row["logical_identity_sha256"] != handoff.logical_identity_sha256
+            or row["handoff_root_sha256"] != handoff.root_sha256
+            or row["original_bytes_sha256"] != handoff.root_sha256
+            or row["payload_sha256"] != handoff.payload_sha256
+            or row["vacancy_source_identity"] != handoff.vacancy_source_identity
+            or row["context_authenticator_sha256"] != authenticator_identity
+            or row["admission_context_sha256"] != context_sha256
+            or row["reference_count"] != len(receipt.get("references", []))
+            or row["sealed"] != 1
+            or context["environment"] != CURRENT_RUNTIME_ENVIRONMENT
+        ):
+            raise HandoffAdmissionError(
+                "stored_verification_invalid", "current runtime binding differs"
+            )
+        return self._stored_current_runtime_result(row, created=False)
+
     def for_boundary(
         self,
         application_id: str,
         boundary: str,
     ) -> VerifiedApplicationInput:
         """Re-resolve references using fresh authenticated current-time evidence."""
+        with self._connect() as connection:
+            current_row = connection.execute(
+                "SELECT 1 FROM current_runtime_admissions WHERE application_id=?",
+                (application_id,),
+            ).fetchone()
+        if current_row is not None:
+            return self._for_current_runtime_boundary(application_id, boundary)
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -2303,6 +2660,137 @@ class HandoffAdmissionStore:
             )
             connection.commit()
             return result
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _for_current_runtime_boundary(
+        self, application_id: str, boundary: str
+    ) -> VerifiedApplicationInput:
+        if boundary not in {"strategy", "review"}:
+            raise HandoffAdmissionError(
+                "release_blocked_admission",
+                "current runtime admission cannot enter a release boundary",
+            )
+        if self.resolver is None:
+            raise HandoffAdmissionError(
+                "trust_not_configured", "current runtime boundary requires resolver"
+            )
+        evaluated_at, _ = _evaluation_time(None)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM current_runtime_admissions WHERE application_id=?",
+                (application_id,),
+            ).fetchone()
+            if row is None:
+                raise HandoffAdmissionError(
+                    "admission_missing", "current runtime admission does not exist"
+                )
+            self._verify_stored_current_runtime(row)
+            try:
+                handoff = _parse_current_runtime_handoff(
+                    bytes(row["original_bytes"])
+                )
+            except HandoffAdmissionError as exc:
+                raise HandoffAdmissionError(
+                    "stored_handoff_invalid", "current runtime handoff is invalid"
+                ) from exc
+            context_bytes = bytes(row["admission_context_bytes"])
+            _context_document(
+                context_bytes,
+                handoff,
+                self.context_authenticator,
+                evaluated_at,
+            )
+            graph = _verify_graph(
+                handoff,
+                self.resolver,
+                context_bytes=context_bytes,
+                context_trust_root_id=CURRENT_RUNTIME_TRUST_ROOT_ID,
+                evaluated_at=evaluated_at,
+                authenticate=True,
+                consumer_policy_rules=self.consumer_policy_rules,
+            )
+            receipt = canonical_json_bytes(
+                {
+                    "admission_receipt_sha256": row[
+                        "verification_receipt_sha256"
+                    ],
+                    "application_id": application_id,
+                    "boundary": boundary,
+                    "evaluated_at": evaluated_at,
+                    "freshness_provenance": CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+                    "handoff_root_sha256": handoff.root_sha256,
+                    "references": [
+                        reference.document() for reference in graph.references
+                    ],
+                    "release_authority": False,
+                    "release_token_issued": False,
+                    "schema_version": "jaa.current-runtime-forward-validation.v1",
+                    "submission_authority": False,
+                    "consumer_freshness_policy": graph.policy_rules.document(),
+                }
+            )
+            receipt_sha256 = hashlib.sha256(receipt).hexdigest()
+            connection.execute(
+                """INSERT OR IGNORE INTO current_runtime_forward_validations(
+                     validation_sha256,application_id,boundary,evaluated_at,
+                     receipt_bytes,reference_count,freshness_provenance
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    receipt_sha256,
+                    application_id,
+                    boundary,
+                    evaluated_at,
+                    sqlite3.Binary(receipt),
+                    len(graph.references),
+                    CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+                ),
+            )
+            existing = connection.execute(
+                """SELECT receipt_bytes FROM current_runtime_forward_validations
+                   WHERE validation_sha256=?""",
+                (receipt_sha256,),
+            ).fetchone()
+            if existing is None or bytes(existing["receipt_bytes"]) != receipt:
+                raise HandoffAdmissionError(
+                    "forward_validation_conflict",
+                    "current runtime boundary evidence differs",
+                )
+            connection.commit()
+            vacancy = handoff.payload["vacancy"]
+            market = _verified_market_decision_references(graph, handoff)
+            return VerifiedApplicationInput(
+                application_id=application_id,
+                admission_kind=ADMISSION_KIND_CURRENT_RUNTIME,
+                environment=CURRENT_RUNTIME_ENVIRONMENT,
+                authority_scope=CURRENT_RUNTIME_AUTHORITY_SCOPE,
+                handoff_root_sha256=handoff.root_sha256,
+                vacancy_source_identity=handoff.vacancy_source_identity,
+                profile_id=handoff.payload["profile_id"],
+                profile_version=handoff.payload["profile_version"],
+                candidate_authority_sha256=graph.candidate_authority_sha256,
+                job_key=handoff.payload["job_key"],
+                vacancy_snapshot_sha256=vacancy["vacancy_snapshot_sha256"],
+                raw_listing_sha256=vacancy["raw_listing_sha256"],
+                raw_listing_bytes=graph.objects["vacancy.raw_listing"],
+                requirements_sha256=vacancy["requirements_sha256"],
+                requirements_bytes=graph.objects["vacancy.requirements"],
+                canonical_url=vacancy["provenance"]["canonical_url"],
+                company_name=vacancy["company_name"],
+                role_title=vacancy["role_title"],
+                location=dict(vacancy["location"]),
+                admission_receipt_sha256=str(
+                    row["verification_receipt_sha256"]
+                ),
+                current_boundary=boundary,
+                current_boundary_receipt_sha256=receipt_sha256,
+                **market,
+            )
         except Exception:
             connection.rollback()
             raise

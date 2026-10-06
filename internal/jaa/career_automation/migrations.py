@@ -2401,6 +2401,143 @@ _JAA_OPERATIONAL_REVIEW_RELEASE_JOIN_MIGRATION = Migration(
 )
 
 
+_CURRENT_RUNTIME_ADMISSION_MIGRATION = Migration(
+    14,
+    "jaa_current_runtime_nonrelease_admission_v1",
+    (
+        """CREATE TABLE current_runtime_admissions(
+             application_id TEXT PRIMARY KEY
+               CHECK(length(application_id)=68
+                 AND substr(application_id,1,4)='app_'),
+             admission_kind TEXT NOT NULL
+               CHECK(admission_kind='current_runtime_non_release'),
+             environment TEXT NOT NULL CHECK(environment='current_runtime'),
+             authority_scope TEXT NOT NULL
+               CHECK(authority_scope='current_runtime_non_release'),
+             emission_profile TEXT NOT NULL
+               CHECK(emission_profile='current_runtime_non_release_v1'),
+             logical_identity_json TEXT NOT NULL,
+             logical_identity_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(logical_identity_sha256)=64
+                 AND logical_identity_sha256 NOT GLOB '*[^0-9a-f]*'),
+             trust_mode TEXT NOT NULL
+               CHECK(trust_mode='current_runtime_non_release'),
+             trust_root_id TEXT NOT NULL
+               CHECK(trust_root_id='market-aligner-current-runtime-non-release-v1'),
+             admission_context_bytes BLOB NOT NULL
+               CHECK(typeof(admission_context_bytes)='blob'),
+             admission_context_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(admission_context_sha256)=64
+                 AND admission_context_sha256 NOT GLOB '*[^0-9a-f]*'),
+             context_authenticator_sha256 TEXT NOT NULL
+               CHECK(length(context_authenticator_sha256)=64
+                 AND context_authenticator_sha256 NOT GLOB '*[^0-9a-f]*'),
+             admitted_at TEXT NOT NULL
+               CHECK(length(admitted_at)=20 AND substr(admitted_at,20,1)='Z'),
+             producer_product TEXT NOT NULL CHECK(producer_product='market-aligner'),
+             producer_commit_sha TEXT NOT NULL
+               CHECK(length(producer_commit_sha)=40
+                 AND producer_commit_sha NOT GLOB '*[^0-9a-f]*'),
+             profile_id TEXT NOT NULL CHECK(length(trim(profile_id))>0),
+             profile_version TEXT NOT NULL CHECK(length(trim(profile_version))>0),
+             job_key TEXT NOT NULL CHECK(length(trim(job_key))>0),
+             handoff_root_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(handoff_root_sha256)=64
+                 AND handoff_root_sha256 NOT GLOB '*[^0-9a-f]*'),
+             payload_sha256 TEXT NOT NULL
+               CHECK(length(payload_sha256)=64
+                 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'),
+             vacancy_snapshot_sha256 TEXT NOT NULL
+               CHECK(length(vacancy_snapshot_sha256)=64
+                 AND vacancy_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'),
+             original_bytes BLOB NOT NULL CHECK(typeof(original_bytes)='blob'),
+             original_bytes_sha256 TEXT NOT NULL
+               CHECK(original_bytes_sha256=handoff_root_sha256),
+             verification_receipt_bytes BLOB NOT NULL
+               CHECK(typeof(verification_receipt_bytes)='blob'),
+             verification_receipt_sha256 TEXT NOT NULL UNIQUE
+               CHECK(length(verification_receipt_sha256)=64
+                 AND verification_receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+             vacancy_source_identity TEXT NOT NULL UNIQUE
+               CHECK(vacancy_source_identity=
+                 'market-aligner-handoff:' || handoff_root_sha256),
+             reference_count INTEGER NOT NULL CHECK(reference_count>0),
+             freshness_provenance TEXT NOT NULL
+               CHECK(freshness_provenance='local_system_utc'),
+             sealed INTEGER NOT NULL DEFAULT 1 CHECK(sealed=1),
+             CHECK(application_id='app_' || logical_identity_sha256)
+           )""",
+        """CREATE TRIGGER current_runtime_admissions_immutable_update
+             BEFORE UPDATE ON current_runtime_admissions
+             BEGIN SELECT RAISE(ABORT,'current runtime admissions are immutable'); END""",
+        """CREATE TRIGGER current_runtime_admissions_immutable_delete
+             BEFORE DELETE ON current_runtime_admissions
+             BEGIN SELECT RAISE(ABORT,'current runtime admissions are immutable'); END""",
+        """CREATE TABLE current_runtime_forward_validations(
+             validation_sha256 TEXT PRIMARY KEY
+               CHECK(length(validation_sha256)=64
+                 AND validation_sha256 NOT GLOB '*[^0-9a-f]*'),
+             application_id TEXT NOT NULL REFERENCES current_runtime_admissions
+               (application_id) ON DELETE RESTRICT,
+             boundary TEXT NOT NULL CHECK(boundary IN ('strategy','review')),
+             evaluated_at TEXT NOT NULL
+               CHECK(length(evaluated_at)=20 AND substr(evaluated_at,20,1)='Z'),
+             receipt_bytes BLOB NOT NULL CHECK(typeof(receipt_bytes)='blob'),
+             reference_count INTEGER NOT NULL CHECK(reference_count>0),
+             freshness_provenance TEXT NOT NULL
+               CHECK(freshness_provenance='local_system_utc'),
+             UNIQUE(application_id,boundary,validation_sha256)
+           )""",
+        """CREATE TRIGGER current_runtime_forward_validations_immutable_update
+             BEFORE UPDATE ON current_runtime_forward_validations
+             BEGIN SELECT RAISE(ABORT,'current runtime validations are immutable'); END""",
+        """CREATE TRIGGER current_runtime_forward_validations_immutable_delete
+             BEFORE DELETE ON current_runtime_forward_validations
+             BEGIN SELECT RAISE(ABORT,'current runtime validations are immutable'); END""",
+    ),
+)
+
+
+_CURRENT_RUNTIME_SCHEMA_TABLES = (
+    "current_runtime_admissions",
+    "current_runtime_forward_validations",
+)
+
+
+def current_runtime_admission_schema_digest(conn: sqlite3.Connection) -> str:
+    placeholders = ",".join("?" for _ in _CURRENT_RUNTIME_SCHEMA_TABLES)
+    rows = conn.execute(
+        f"""SELECT type,name,tbl_name,sql FROM sqlite_schema
+            WHERE sql IS NOT NULL AND tbl_name IN ({placeholders})
+            ORDER BY type,name""",
+        _CURRENT_RUNTIME_SCHEMA_TABLES,
+    ).fetchall()
+    document = json.dumps(
+        [list(row) for row in rows],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(
+        b"jaa-current-runtime-admission-schema-v1\0" + document
+    ).hexdigest()
+
+
+def verify_current_runtime_admission_schema(conn: sqlite3.Connection) -> str:
+    actual = current_runtime_admission_schema_digest(conn)
+    witness = sqlite3.connect(":memory:")
+    try:
+        for statement in _CURRENT_RUNTIME_ADMISSION_MIGRATION.statements:
+            witness.execute(statement)
+        expected = current_runtime_admission_schema_digest(witness)
+    finally:
+        witness.close()
+    if actual != expected:
+        raise RuntimeError("current runtime admission schema differs")
+    return actual
+
+
 # Migration 2 was already allocated to JAA-02 before the independent JAA-01
 # review required an immutable score-import receipt. Public sets remain ordered
 # and checksummed while each slice applies only the schema it owns.
@@ -2433,6 +2570,7 @@ JAA_OPERATIONAL_MIGRATIONS: tuple[Migration, ...] = (
     _JAA_OPERATIONAL_ROLLOVER_MIGRATION,
     _JAA_OPERATIONAL_RECONCILIATION_MIGRATION,
     _JAA_OPERATIONAL_REVIEW_RELEASE_JOIN_MIGRATION,
+    _CURRENT_RUNTIME_ADMISSION_MIGRATION,
 )
 
 
@@ -2484,4 +2622,5 @@ def apply_jaa_operational_migrations(path: str | Path) -> tuple[int, ...]:
         verify_jaa_operational_submission_schema(connection)
         verify_jaa_operational_rollover_schema(connection)
         verify_jaa_operational_reconciliation_schema(connection)
+        verify_current_runtime_admission_schema(connection)
     return applied

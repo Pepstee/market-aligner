@@ -15,7 +15,7 @@ import os
 import re
 import stat
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from market_aligner.applications import production_handoff
 from market_aligner.applications.handoff import canonical_json_bytes
@@ -66,6 +66,49 @@ _COLLECTION_CONFIG_RELATIVE_PATH = Path(
 
 class ProductionHandoffDeploymentError(ValueError):
     """The installed production deployment authority is absent or differs."""
+
+
+def _validate_runtime_route_path(name: str, value: object) -> None:
+    if type(value) is not str:
+        raise ValueError(f"{name} must be a plain str")
+    if not value or value != value.strip():
+        raise ValueError(f"{name} must be nonempty and stripped")
+    path = PurePosixPath(value)
+    if not path.is_absolute():
+        raise ValueError(f"{name} must be absolute")
+    if ".." in path.parts:
+        raise ValueError(f"{name} must not contain a '..' component")
+
+
+def select_runtime_deployment(
+    *,
+    config_path: str | None = None,
+    config_sha256: str | None = None,
+    private_root: str | None = None,
+    legacy_loader,
+    current_loader,
+) -> tuple[bool, object]:
+    if not callable(legacy_loader) or not callable(current_loader):
+        raise ValueError("runtime route options differ")
+    present = (
+        config_path is not None,
+        config_sha256 is not None,
+        private_root is not None,
+    )
+    if all(present):
+        if type(config_sha256) is not str or _SHA256.fullmatch(config_sha256) is None:
+            raise ValueError("config_sha256 must be 64 lowercase ASCII hex chars")
+        _validate_runtime_route_path("config_path", config_path)
+        _validate_runtime_route_path("private_root", private_root)
+        result = current_loader(
+            configuration_path=config_path,
+            configuration_sha256=config_sha256,
+            private_root=private_root,
+        )
+        return True, result
+    if not any(present):
+        return False, legacy_loader()
+    raise ValueError("current runtime opt-in requires config path, raw hash and private root")
 
 
 def decode_bound_json(
@@ -704,30 +747,38 @@ def run_production_handoff(
     current_recovery_manifest_relative_path: str | None = None,
 ) -> ProductionHandoffReceipt:
     """Build the default production handoff or explicit non-release preparation."""
-    current_runtime_values = (
-        current_runtime_config_path,
-        current_runtime_config_sha256,
-        current_runtime_private_root,
-    )
-    if any(value is not None for value in current_runtime_values) and not all(
-        value is not None for value in current_runtime_values
-    ):
-        raise ProductionHandoffDeploymentError(
-            "current runtime opt-in requires config path, raw hash and private root"
+    if current_recovery_manifest_relative_path is not None and not all(
+        value is not None
+        for value in (
+            current_runtime_config_path,
+            current_runtime_config_sha256,
+            current_runtime_private_root,
         )
-    current_runtime = all(value is not None for value in current_runtime_values)
-    if current_recovery_manifest_relative_path is not None and not current_runtime:
+    ):
         raise ProductionHandoffDeploymentError(
             "current recovery manifest locator requires current runtime opt-in"
         )
-    if current_runtime:
-        deployment = installed_current_runtime_handoff_deployment(
-            configuration_path=current_runtime_config_path,
-            configuration_sha256=current_runtime_config_sha256,
-            private_root=current_runtime_private_root,
-        )
-    else:
-        deployment = installed_production_handoff_deployment()
+    config_path = (
+        str(current_runtime_config_path)
+        if isinstance(current_runtime_config_path, Path)
+        else current_runtime_config_path
+    )
+    private_root = (
+        str(current_runtime_private_root)
+        if isinstance(current_runtime_private_root, Path)
+        else current_runtime_private_root
+    )
+    current_runtime, deployment = select_runtime_deployment(
+        config_path=config_path,
+        config_sha256=current_runtime_config_sha256,
+        private_root=private_root,
+        legacy_loader=installed_production_handoff_deployment,
+        current_loader=lambda **options: installed_current_runtime_handoff_deployment(
+            configuration_path=Path(options["configuration_path"]),
+            configuration_sha256=options["configuration_sha256"],
+            private_root=Path(options["private_root"]),
+        ),
+    )
     _validate_deployment_roots(deployment)
     if current_runtime:
         evaluated_at = datetime.now(timezone.utc)
