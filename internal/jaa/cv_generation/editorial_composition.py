@@ -15,6 +15,7 @@ non-authoritative receipts.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import os
 import re
@@ -312,18 +313,75 @@ def _text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+_EDITORIAL_CITY_ERROR = "editorial city binding differs"
+
+
+def validate_editorial_city(
+    value: object, *, allow_missing_city: bool = False
+) -> str | None:
+    if type(allow_missing_city) is not bool:
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+    if value is None and allow_missing_city:
+        return None
+    if type(value) is not str or not value or value != value.strip():
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+    return value
+
+
+def validate_editorial_city_pair(
+    authority_city: object,
+    draft_city: object,
+    *,
+    allow_missing_city: bool = False,
+) -> None:
+    authority = validate_editorial_city(
+        authority_city, allow_missing_city=allow_missing_city
+    )
+    draft = validate_editorial_city(draft_city, allow_missing_city=allow_missing_city)
+    if authority != draft:
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+
+
+def editorial_city_response_schema(
+    base_schema: Mapping[str, object],
+    *,
+    authority_city: object,
+    allow_missing_city: bool = False,
+) -> dict[str, object]:
+    validate_editorial_city(authority_city, allow_missing_city=allow_missing_city)
+    if type(base_schema) is not dict:
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+    properties = base_schema.get("properties")
+    if type(properties) is not dict or type(properties.get("candidate_city")) is not dict:
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+    schema = copy.deepcopy(base_schema)
+    if allow_missing_city and authority_city is None:
+        schema["properties"]["candidate_city"] = {"type": "null"}
+    return schema
+
+
 @dataclass(frozen=True)
 class CandidateEditorialAuthority:
     candidate_name: str
-    candidate_city: str
+    candidate_city: str | None
     graduation_month_year: str | None
     dissertation_title: str | None
     source_sha256: str
     require_dissertation: bool = False
+    allow_missing_city: bool = False
+    current_runtime: bool = False
 
     def __post_init__(self) -> None:
         _required(self.candidate_name, "candidate name")
-        _required(self.candidate_city, "candidate city")
+        validate_editorial_city(
+            self.candidate_city, allow_missing_city=self.allow_missing_city
+        )
+        if type(self.current_runtime) is not bool or type(self.allow_missing_city) is not bool:
+            raise EditorialCompositionError("editorial runtime mode is invalid")
+        if self.allow_missing_city and not self.current_runtime:
+            raise EditorialCompositionError("editorial runtime mode is invalid")
         _digest(self.source_sha256, "candidate authority source hash")
         if self.graduation_month_year is not None and not _MONTH_YEAR.fullmatch(
             self.graduation_month_year
@@ -346,6 +404,14 @@ class CandidateEditorialAuthority:
             "graduation_month_year": self.graduation_month_year,
             "require_dissertation": self.require_dissertation,
             "source_sha256": self.source_sha256,
+            **(
+                {
+                    "current_runtime_pre_review": True,
+                    "allow_missing_city": self.allow_missing_city,
+                }
+                if self.current_runtime
+                else {}
+            ),
         }
 
 
@@ -505,16 +571,19 @@ class CVSection:
 @dataclass(frozen=True)
 class CVEditorialDraft:
     candidate_name: str
-    candidate_city: str
+    candidate_city: str | None
     sections: tuple[CVSection, ...]
     draft_sha256: str
     schema_version: str = DRAFT_SCHEMA
+    allow_missing_city: bool = False
 
     def __post_init__(self) -> None:
         if self.schema_version != DRAFT_SCHEMA:
             raise EditorialCompositionError("editorial draft schema is unsupported")
         _required(self.candidate_name, "draft candidate name")
-        _required(self.candidate_city, "draft candidate city")
+        validate_editorial_city(
+            self.candidate_city, allow_missing_city=self.allow_missing_city
+        )
         if not self.sections:
             raise EditorialCompositionError("editorial draft has no sections")
         for section in self.sections:
@@ -545,9 +614,11 @@ class CVEditorialDraft:
 def build_editorial_draft(
     *,
     candidate_name: str,
-    candidate_city: str,
+    candidate_city: str | None,
     sections: Sequence[CVSection],
+    allow_missing_city: bool = False,
 ) -> CVEditorialDraft:
+    validate_editorial_city(candidate_city, allow_missing_city=allow_missing_city)
     values = {
         "candidate_city": candidate_city,
         "candidate_name": candidate_name,
@@ -559,6 +630,7 @@ def build_editorial_draft(
         candidate_city=candidate_city,
         sections=tuple(sections),
         draft_sha256=content_hash(values),
+        allow_missing_city=allow_missing_city,
     )
 
 
@@ -649,7 +721,7 @@ def _validate_document_authorship(
 
 def _outward_text(draft: CVEditorialDraft) -> str:
     return "\n".join(
-        (draft.candidate_name, draft.candidate_city)
+        tuple(value for value in (draft.candidate_name, draft.candidate_city) if value is not None)
         + tuple(
             value
             for section in draft.sections
@@ -669,8 +741,18 @@ def validate_editorial_draft(
     authority = request.authority
     if draft.candidate_name != authority.candidate_name:
         raise EditorialCompositionError("draft candidate differs from authority")
-    if draft.candidate_city != authority.candidate_city:
-        raise EditorialCompositionError("draft location differs from authority")
+    try:
+        validate_editorial_city_pair(
+            authority.candidate_city,
+            draft.candidate_city,
+            allow_missing_city=authority.allow_missing_city,
+        )
+    except EditorialCompositionError:
+        if draft.candidate_city != authority.candidate_city:
+            raise EditorialCompositionError(
+                "draft location differs from authority"
+            ) from None
+        raise
 
     approved: Mapping[str, ApprovedCVClaim] = {
         claim.claim_id: claim for claim in request.approved_claims
@@ -1729,6 +1811,7 @@ class DetachedCodexEditorialAdapter:
         process_environment: Mapping[str, str] | None = None,
         timeout_seconds: float = 120.0,
         codex_binary_fd: int | None = None,
+        allow_missing_city: bool = False,
     ) -> None:
         if stage not in _EDITORIAL_STAGES:
             raise EditorialCompositionError("editorial Codex adapter stage is invalid")
@@ -1738,6 +1821,9 @@ class DetachedCodexEditorialAdapter:
         self.model = _required(model, "editorial Codex model")
         self.codex_binary = _required(codex_binary, "editorial Codex binary")
         self.environment = environment
+        if type(allow_missing_city) is not bool:
+            raise EditorialCompositionError("editorial city mode is invalid")
+        self.allow_missing_city = allow_missing_city
         self.process_environment = dict(
             os.environ if process_environment is None else process_environment
         )
@@ -1781,10 +1867,25 @@ class DetachedCodexEditorialAdapter:
                 "environment_names": sorted(scrubbed),
                 "ignore_project_rules": True,
                 "model": self.model,
+                "allow_missing_city": self.allow_missing_city,
                 "network_tools_enabled": False,
                 "project_doc_max_bytes": 0,
                 "provider": self.provider,
                 "response_schema_sha256": content_hash(self._response_schema),
+                **(
+                    {
+                        "allow_missing_city": True,
+                        "null_city_response_schema_sha256": content_hash(
+                            editorial_city_response_schema(
+                                dict(self._response_schema),
+                                authority_city=None,
+                                allow_missing_city=True,
+                            )
+                        ),
+                    }
+                    if self.allow_missing_city
+                    else {}
+                ),
                 "sandbox": "read-only",
                 "single_attempt": True,
                 "stage": self.stage,
@@ -1798,6 +1899,39 @@ class DetachedCodexEditorialAdapter:
         return (
             _COVER_LETTER_RESPONSE_SCHEMA
             if self.stage.startswith("cover_letter_") else _DRAFT_RESPONSE_SCHEMA
+        )
+
+    def _request_city_mode(self, request_bytes: bytes) -> tuple[object, bool] | None:
+        if self.stage.startswith("cover_letter_"):
+            return None
+        try:
+            payload = json.loads(request_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or "editorial_request" not in payload:
+            return None
+        try:
+            authority = payload["editorial_request"]["authority"]
+            city = authority["candidate_city"]
+            allow_missing = (
+                self.allow_missing_city
+                and authority.get("current_runtime_pre_review") is True
+                and authority.get("allow_missing_city") is True
+            )
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise EditorialCompositionError("editorial request city mode is invalid") from exc
+        validate_editorial_city(city, allow_missing_city=allow_missing)
+        return city, allow_missing
+
+    def _response_schema_for_request(self, request_bytes: bytes) -> Mapping[str, object]:
+        city_mode = self._request_city_mode(request_bytes)
+        if city_mode is None:
+            return self._response_schema
+        city, allow_missing = city_mode
+        return editorial_city_response_schema(
+            dict(self._response_schema),
+            authority_city=city,
+            allow_missing_city=allow_missing,
         )
 
     def available(self) -> bool:
@@ -1838,6 +1972,7 @@ class DetachedCodexEditorialAdapter:
                 "editorial Codex executable changed after configuration"
             )
         env = _scrubbed_codex_environment(self.process_environment)
+        response_schema = self._response_schema_for_request(request_bytes)
         with tempfile.TemporaryDirectory(
             prefix=f"jaa-{self.stage}-request-"
         ) as request_dir, tempfile.TemporaryDirectory(
@@ -1849,7 +1984,7 @@ class DetachedCodexEditorialAdapter:
             output_path = Path(response_dir) / "last-message.json"
             request_path.write_bytes(request_bytes)
             schema_path.write_text(
-                canonical_json(self._response_schema), encoding="utf-8"
+                canonical_json(response_schema), encoding="utf-8"
             )
             executable = (
                 f"/proc/self/fd/{self.codex_binary_fd}"
@@ -1911,7 +2046,7 @@ class DetachedCodexEditorialAdapter:
                     f"{diagnostic[:4000]}"
                 )
             _validate_codex_jsonl(completed.stdout or "")
-            expected_schema_bytes = canonical_json(self._response_schema).encode()
+            expected_schema_bytes = canonical_json(response_schema).encode()
             if (
                 request_path.read_bytes() != request_bytes
                 or schema_path.read_bytes() != expected_schema_bytes
@@ -1937,7 +2072,13 @@ class DetachedCodexEditorialAdapter:
                     response_bytes, require_transport_shape=True
                 )
             else:
-                _draft_from_response(response_bytes, require_transport_shape=True)
+                _draft_from_response(
+                    response_bytes,
+                    require_transport_shape=True,
+                    allow_missing_city=(
+                        self._request_city_mode(request_bytes) or (None, False)
+                    )[1],
+                )
         return EditorialBackendResult(
             response_bytes=response_bytes,
             invocation_id=invocation_id,
@@ -1995,6 +2136,7 @@ def _draft_from_response(
     value: bytes,
     *,
     require_transport_shape: bool = False,
+    allow_missing_city: bool = False,
 ) -> CVEditorialDraft:
     try:
         document = json.loads(value)
@@ -2037,6 +2179,7 @@ def _draft_from_response(
         candidate_name=document["candidate_name"],
         candidate_city=document["candidate_city"],
         sections=tuple(sections),
+        allow_missing_city=allow_missing_city,
     )
     if document["schema_version"] != DRAFT_SCHEMA:
         raise EditorialCompositionError("editorial backend draft schema differs")
@@ -2180,7 +2323,10 @@ def run_editorial_composition_runtime(
         or writer_result.request_sha256 != hashlib.sha256(writer_request).hexdigest()
     ):
         raise EditorialCompositionError("writer result differs from configured adapter")
-    writer_draft = _draft_from_response(writer_result.response_bytes)
+    writer_draft = _draft_from_response(
+        writer_result.response_bytes,
+        allow_missing_city=request.authority.allow_missing_city,
+    )
     validate_editorial_draft(request, writer_draft)
 
     humanizer_request_sha = humanizer_request_sha256(request, writer_draft)
@@ -2224,7 +2370,10 @@ def run_editorial_composition_runtime(
         != hashlib.sha256(humanizer_request).hexdigest()
     ):
         raise EditorialCompositionError("Humanizer result differs from configured adapter")
-    final_draft = _draft_from_response(humanizer_result.response_bytes)
+    final_draft = _draft_from_response(
+        humanizer_result.response_bytes,
+        allow_missing_city=request.authority.allow_missing_city,
+    )
     writer_evidence = EditorialStageEvidence(
         stage="resume_writer",
         environment=runtime.environment,

@@ -29,6 +29,7 @@ from career_automation.application_compiler import (
     verify_application_source,
 )
 from career_automation.candidate_application_factory import (
+    CURRENT_RUNTIME_ENVIRONMENT,
     CandidateApplicationMaterializationReceipt,
     CandidateApplicationPackage,
     GenerationRevisionWriter,
@@ -52,6 +53,8 @@ from .adversarial_rebuild import (
     rebuild_from_recruiter_assessment,
 )
 from .constraints import (
+    BASE_CV_POLICY,
+    CandidateSourcePolicyReceipt,
     CVConstraintReceipt,
     CVPopplerQualityReceipt,
     policy_for_candidate,
@@ -326,10 +329,32 @@ def _validate_artifact_cv(
     draft: CVEditorialDraft,
     source: ApplicationSource,
     artifacts: ApplicationArtifacts,
-) -> CVConstraintReceipt:
+) -> CVConstraintReceipt | CandidateSourcePolicyReceipt:
     verify_application_artifacts(artifacts)
     if artifacts.source_id != source.source_id:
         raise CVCompositionServiceError("rendered artifacts target another source")
+    if request.authority.current_runtime:
+        receipt = validate_generated_cv(
+            source_id=source.source_id,
+            candidate_name=source.contact.full_name,
+            candidate_city=source.contact.city,
+            cv_text=artifacts.editable.cv_text,
+            cv_sha256=artifacts.editable.cv_sha256,
+            sections={
+                section.heading: tuple(atom.text for atom in section.atoms)
+                for section in draft.sections
+            },
+            rendered_pages=artifacts.cv_pdf.rendered_lines,
+            policy=BASE_CV_POLICY,
+            target_role_title=request.role_title,
+            _source_policy_only=True,
+            allow_missing_city=request.authority.allow_missing_city,
+        )
+        if type(receipt) is not CandidateSourcePolicyReceipt:
+            raise CVCompositionServiceError(
+                "current pre-review CV validation returned the wrong receipt"
+            )
+        return receipt
     selected = policy_for_candidate(request.authority.candidate_name)
     if selected.candidate_name is not None and (
         selected.candidate_name != request.authority.candidate_name
@@ -567,6 +592,105 @@ class CVCompositionOrchestrationResult:
         return value
 
 
+@dataclass(frozen=True)
+class CurrentRuntimeDraftCompositionResult:
+    editorial_receipt: EditorialCompositionReceipt
+    cover_letter_editorial_receipt: CoverLetterEditorialCompositionReceipt
+    initial_constraint_receipt: CandidateSourcePolicyReceipt
+    initial_artifacts: ApplicationArtifacts
+    initial_quality_receipt: DocumentQualityReceipt
+    initial_benchmark_receipt: CVBenchmarkDiagnosticReceipt | None
+    orchestration_sha256: str
+    review_status: str = "not_performed"
+    release_authority: bool = False
+    schema_version: str = "jaa.cv-current-runtime-pre-review.v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "jaa.cv-current-runtime-pre-review.v1":
+            raise CVCompositionServiceError(
+                "current pre-review result schema is unsupported"
+            )
+        if self.review_status != "not_performed" or self.release_authority is not False:
+            raise CVCompositionServiceError(
+                "current pre-review result cannot claim review or release"
+            )
+        if type(self.editorial_receipt) is not EditorialCompositionReceipt:
+            raise CVCompositionServiceError(
+                "current pre-review result lacks editorial composition evidence"
+            )
+        if type(self.cover_letter_editorial_receipt) is not CoverLetterEditorialCompositionReceipt:
+            raise CVCompositionServiceError(
+                "current pre-review result lacks cover-letter composition evidence"
+            )
+        if type(self.initial_constraint_receipt) is not CandidateSourcePolicyReceipt:
+            raise CVCompositionServiceError(
+                "current pre-review result lacks source-only CV validation"
+            )
+        self.editorial_receipt.__post_init__()
+        self.cover_letter_editorial_receipt.__post_init__()
+        self.initial_constraint_receipt.__post_init__()
+        self.initial_quality_receipt.__post_init__()
+        verify_application_artifacts(self.initial_artifacts)
+        if (
+            self.initial_constraint_receipt.source_id
+            != self.initial_artifacts.source_id
+            or self.initial_constraint_receipt.cv_sha256
+            != self.initial_artifacts.editable.cv_sha256
+            or self.initial_quality_receipt.artifact_set_sha256
+            != self.initial_artifacts.artifact_set_sha256
+        ):
+            raise CVCompositionServiceError(
+                "current pre-review evidence is out of order"
+            )
+        if self.initial_benchmark_receipt is not None:
+            self.initial_benchmark_receipt.__post_init__()
+            if (
+                self.initial_benchmark_receipt.draft_sha256
+                != self.editorial_receipt.final_draft_sha256
+            ):
+                raise CVCompositionServiceError(
+                    "current pre-review benchmark differs from the admitted draft"
+                )
+        if not _SHA256.fullmatch(self.orchestration_sha256):
+            raise CVCompositionServiceError(
+                "current pre-review orchestration hash is malformed"
+            )
+        if self.orchestration_sha256 != content_hash(
+            self.document(include_identity=False)
+        ):
+            raise CVCompositionServiceError(
+                "current pre-review orchestration identity is invalid"
+            )
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "environment": CURRENT_RUNTIME_ENVIRONMENT,
+            "final_document_admitted": False,
+            "initial_artifact_set_sha256": self.initial_artifacts.artifact_set_sha256,
+            "initial_constraint_receipt_sha256": (
+                self.initial_constraint_receipt.receipt_sha256
+            ),
+            "initial_quality_receipt_sha256": (
+                self.initial_quality_receipt.receipt_sha256
+            ),
+            "initial_benchmark_receipt_sha256": (
+                self.initial_benchmark_receipt.receipt_sha256
+                if self.initial_benchmark_receipt is not None
+                else None
+            ),
+            "editorial_receipt_sha256": self.editorial_receipt.receipt_sha256,
+            "cover_letter_editorial_receipt_sha256": (
+                self.cover_letter_editorial_receipt.receipt_sha256
+            ),
+            "release_authority": False,
+            "review_status": "not_performed",
+            "schema_version": self.schema_version,
+        }
+        if include_identity:
+            value["orchestration_sha256"] = self.orchestration_sha256
+        return value
+
+
 def run_cv_composition_orchestration(
     *,
     request: CVEditorialRequest,
@@ -593,10 +717,64 @@ def run_cv_composition_orchestration(
     cover_letter_bindings: Sequence[CoverLetterRecruiterImprovementBinding] = (),
     cover_letter_improvement_binder: CoverLetterImprovementBinder | None = None,
     poppler_runtime: PopplerRuntime | None = None,
-) -> CVCompositionOrchestrationResult:
+    current_runtime_pre_review: bool = False,
+) -> CVCompositionOrchestrationResult | CurrentRuntimeDraftCompositionResult:
     """Run one offline-safe CV composition, assessment and rebuild cycle."""
 
-    if environment == "production":
+    if type(current_runtime_pre_review) is not bool:
+        raise CVCompositionServiceError("current pre-review mode must be boolean")
+    if environment == CURRENT_RUNTIME_ENVIRONMENT:
+        cover_inputs = (
+            cover_letter_request,
+            cover_letter_writer_draft,
+            cover_letter_humanized_draft,
+            cover_letter_writer_evidence,
+            cover_letter_humanizer_evidence,
+        )
+        if (
+            current_runtime_pre_review is not True
+            or type(materialization_receipt)
+            is not CandidateApplicationMaterializationReceipt
+            or any(value is None for value in cover_inputs)
+        ):
+            raise CVCompositionServiceError(
+                "current runtime requires the explicit pre-review composition path"
+            )
+        try:
+            CandidateApplicationMaterializationReceipt.__post_init__(
+                materialization_receipt
+            )
+            CandidateApplicationMaterializationReceipt.authorize_editorial_request(
+                materialization_receipt, request
+            )
+            CandidateApplicationMaterializationReceipt.authorize_editorial_request(
+                materialization_receipt, cover_letter_request
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise CVCompositionServiceError(
+                "current editorial request differs from materialization"
+            ) from exc
+        if (
+            production_recruiter_assessor is not None
+            or recruiter_assessor is not None
+            or recruiter_receipt is not None
+            or improvement_binder is not None
+            or bindings
+            or cover_letter_improvement_binder is not None
+            or cover_letter_bindings
+        ):
+            raise CVCompositionServiceError(
+                "current pre-review path refuses recruiter assessment inputs"
+            )
+        if type(poppler_runtime) is not PopplerRuntime or not poppler_runtime.tool_descriptors:
+            raise CVCompositionServiceError(
+                "current pre-review path requires a pinned Poppler runtime"
+            )
+    elif environment == "production":
+        if current_runtime_pre_review:
+            raise CVCompositionServiceError(
+                "legacy production cannot enter current pre-review mode"
+            )
         if type(materialization_receipt) is not CandidateApplicationMaterializationReceipt:
             raise CVCompositionServiceError(
                 "production requires exact candidate source materialization"
@@ -640,6 +818,10 @@ def run_cv_composition_orchestration(
                 "production requires a pinned Poppler runtime"
             )
     elif environment == "synthetic":
+        if current_runtime_pre_review:
+            raise CVCompositionServiceError(
+                "synthetic composition cannot enter current pre-review mode"
+            )
         if production_recruiter_assessor is not None or (
             (recruiter_assessor is None) == (recruiter_receipt is None)
         ):
@@ -747,6 +929,43 @@ def run_cv_composition_orchestration(
         )
         if benchmark_manifest is not None else None
     )
+    if environment == CURRENT_RUNTIME_ENVIRONMENT:
+        if type(initial_constraint) is not CandidateSourcePolicyReceipt:
+            raise CVCompositionServiceError(
+                "current pre-review CV validation returned the wrong receipt"
+            )
+        values = {
+            "cover_letter_editorial_receipt_sha256": (
+                cover_letter_editorial_receipt.receipt_sha256
+                if cover_letter_editorial_receipt is not None
+                else None
+            ),
+            "editorial_receipt_sha256": editorial_receipt.receipt_sha256,
+            "environment": CURRENT_RUNTIME_ENVIRONMENT,
+            "final_document_admitted": False,
+            "initial_artifact_set_sha256": initial_artifacts.artifact_set_sha256,
+            "initial_benchmark_receipt_sha256": (
+                initial_benchmark.receipt_sha256
+                if initial_benchmark is not None
+                else None
+            ),
+            "initial_constraint_receipt_sha256": initial_constraint.receipt_sha256,
+            "initial_quality_receipt_sha256": initial_quality.receipt_sha256,
+            "release_authority": False,
+            "review_status": "not_performed",
+            "schema_version": "jaa.cv-current-runtime-pre-review.v1",
+        }
+        result = CurrentRuntimeDraftCompositionResult(
+            editorial_receipt=editorial_receipt,
+            cover_letter_editorial_receipt=cover_letter_editorial_receipt,
+            initial_constraint_receipt=initial_constraint,
+            initial_artifacts=initial_artifacts,
+            initial_quality_receipt=initial_quality,
+            initial_benchmark_receipt=initial_benchmark,
+            orchestration_sha256=content_hash(values),
+        )
+        result.__post_init__()
+        return result
     package = RecruiterAssessmentPackage(
         listing_text=listing_text,
         listing_text_sha256=listing_sha256,

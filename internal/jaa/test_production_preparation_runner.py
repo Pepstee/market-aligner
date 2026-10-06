@@ -33,6 +33,38 @@ def test_current_contact_json_codecs_keep_artifact_and_wire_formats_separate() -
         runner.decode_canonical_json(wire_bytes)
 
 
+def test_current_evidence_archive_is_exact_and_content_addressed() -> None:
+    document = {"schema_version": "fixture.v1", "rows": [{"id": "row-1"}]}
+    references, objects = preparation._current_evidence_archive(
+        {"materialization": document, "duplicate": document, "absent": None}
+    )
+    encoded = preparation._json_bytes(document)
+    digest = hashlib.sha256(encoded).hexdigest()
+
+    assert references == {"materialization": digest, "duplicate": digest}
+    assert objects == {digest: encoded}
+
+
+def test_current_preparation_uses_luna_and_legacy_model_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    legacy = _deployment(tmp_path)
+    current = runner._current_preparation_deployment(
+        SimpleNamespace(
+            data_home=tmp_path,
+            repository_root=tmp_path / "repo",
+            output_root=tmp_path / "outbox",
+            candidate_authority_path=tmp_path / "candidate.json",
+            candidate_authority_sha256="a" * 64,
+        ),
+        "recovered-inputs/approved/recovery-manifest.json",
+    )
+
+    assert legacy.model == "gpt-test"
+    assert runner.PRODUCTION_CODEX_MODEL == "gpt-5.6-sol"
+    assert current.model == "gpt-6-luna"
+
+
 def test_current_contact_projection_bundle_keeps_receipt_separate() -> None:
     activation_sha256 = "a" * 64
     documents = {"candidate_projection_bytes": b'{"projection":"current"}\n'}
@@ -900,11 +932,14 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     )
 
     descriptor_holder: dict[str, int] = {}
+    pin_calls: list[tuple[Path, dict[str, object]]] = []
 
     class _Resources:
         def __init__(self):
             self.directory_descriptors: list[int] = []
-        def pin_file(self, *args, **kwargs): return args[0]
+        def pin_file(self, *args, **kwargs):
+            pin_calls.append((args[0], dict(kwargs)))
+            return args[0]
         def pin_private_directory(self, path):
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
             return path
@@ -1017,6 +1052,16 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     monkeypatch.setattr(runner, "prepare_admitted_market_application_from_authorities", prepare)
     result = runner._run_production_preparation(application_id, deployment)
     assert result == expected
+    legacy_file_pins = {path: values for path, values in pin_calls}
+    for name, digest in hashes.items():
+        poppler_pin = legacy_file_pins[tmp_path / name]
+        assert poppler_pin["expected_sha256"] == digest
+        assert poppler_pin["expected_mode"] == 0o755
+        assert poppler_pin["expected_uid"] == os.geteuid()
+    codex_pin = legacy_file_pins[deployment.codex_binary]
+    assert codex_pin["expected_sha256"] == runner.PRODUCTION_CODEX_BINARY_SHA256
+    assert codex_pin["expected_mode"] == 0o755
+    assert codex_pin["expected_uid"] == runner.PRODUCTION_CODEX_OWNER_UID
     assert stages == [
         "resume_writer", "humanizer", "cover_letter_writer", "cover_letter_humanizer"
     ]

@@ -696,6 +696,58 @@ def test_location_is_bound_to_candidate_authority() -> None:
         validate_editorial_draft(request, draft)
 
 
+def test_current_runtime_allows_only_authority_bound_absent_city() -> None:
+    request, writer, _ = _fixture()
+    authority = replace(
+        request.authority,
+        candidate_city=None,
+        allow_missing_city=True,
+        current_runtime=True,
+    )
+    current_request = build_editorial_request(
+        authority=authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=request.approved_claims,
+    )
+    draft = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=None,
+        sections=writer.sections,
+        allow_missing_city=True,
+    )
+    validate_editorial_draft(current_request, draft)
+    schema = editorial_module.editorial_city_response_schema(
+        dict(editorial_module._DRAFT_RESPONSE_SCHEMA),
+        authority_city=None,
+        allow_missing_city=True,
+    )
+    assert schema["properties"]["candidate_city"] == {"type": "null"}
+    assert editorial_module._DRAFT_RESPONSE_SCHEMA["properties"]["candidate_city"] == {
+        "type": "string",
+        "minLength": 1,
+    }
+    with pytest.raises(EditorialCompositionError):
+        CandidateEditorialAuthority(
+            candidate_name=request.authority.candidate_name,
+            candidate_city=None,
+            graduation_month_year=None,
+            dissertation_title=None,
+            source_sha256="a" * 64,
+        )
+    with pytest.raises(EditorialCompositionError):
+        validate_editorial_draft(
+            current_request,
+            build_editorial_draft(
+                candidate_name=writer.candidate_name,
+                candidate_city="Invented City",
+                sections=writer.sections,
+                allow_missing_city=True,
+            ),
+        )
+
+
 def test_graduation_day_and_wrong_dissertation_are_rejected() -> None:
     request, writer, _ = _fixture()
     wrong = _claim(

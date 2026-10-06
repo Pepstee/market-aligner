@@ -116,6 +116,7 @@ PRODUCTION_CODEX_BINARY_SHA256 = (
 )
 PRODUCTION_CODEX_OWNER_UID = 0
 PRODUCTION_CODEX_MODEL = "gpt-5.6-sol"
+CURRENT_RUNTIME_CODEX_MODEL = "gpt-6-luna"
 PRODUCTION_CODEX_TIMEOUT_SECONDS = 300.0
 PRODUCTION_POPPLER_BIN = Path("/home/gutua/.local/poppler/usr/bin")
 PRODUCTION_POPPLER_LIBRARY_DIRECTORY = Path(
@@ -1125,12 +1126,45 @@ def _current_preparation_deployment(
         ),
         codex_binary=None,
         poppler_bin=None,
-        model=PRODUCTION_CODEX_MODEL,
+        model=CURRENT_RUNTIME_CODEX_MODEL,
         timeout_seconds=PRODUCTION_CODEX_TIMEOUT_SECONDS,
         current_runtime=True,
         candidate_authority_sha256=handoff.candidate_authority_sha256,
         recovery_manifest_relative_path=recovery_manifest_relative_path,
     )
+
+
+def _current_runtime_tool_paths() -> tuple[Path, Path]:
+    codex_found = shutil.which("codex")
+    poppler_found = {
+        name: shutil.which(name) for name in PRODUCTION_POPPLER_SHA256
+    }
+    if codex_found is None or any(value is None for value in poppler_found.values()):
+        raise ProductionPreparationDeploymentError(
+            "current preparation tools are unavailable"
+        )
+    codex_path = Path(codex_found).resolve(strict=True)
+    poppler_paths = {
+        name: Path(value).resolve(strict=True)
+        for name, value in poppler_found.items()
+        if value is not None
+    }
+    if len({path.parent for path in poppler_paths.values()}) != 1:
+        raise ProductionPreparationDeploymentError(
+            "current Poppler tools do not share a pinned directory"
+        )
+    for path in (codex_path, *poppler_paths.values()):
+        metadata = path.stat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or not metadata.st_mode & stat.S_IXUSR
+            or metadata.st_uid not in {0, os.geteuid()}
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise ProductionPreparationDeploymentError(
+                "current preparation tool identity is invalid"
+            )
+    return codex_path, next(iter(poppler_paths.values())).parent
 
 
 def _source_record_for_application(
@@ -1933,6 +1967,7 @@ def _run_production_preparation(
     *,
     after_preflight_hook: Callable[[str], None] | None = None,
     materialization_only: bool = False,
+    current_runtime_pre_review: bool = False,
 ) -> MarketApplicationPreparation | MarketApplicationMaterializationContext:
     if (
         not application_id.startswith("app_")
@@ -1941,7 +1976,8 @@ def _run_production_preparation(
     ):
         raise ProductionPreparationDeploymentError("application ID is malformed")
     if deployment.current_runtime and (
-        not materialization_only
+        (not materialization_only and not current_runtime_pre_review)
+        or (materialization_only and current_runtime_pre_review)
         or not deployment.recovery_manifest_relative_path
         or deployment.candidate_authority_sha256 is None
         or deployment.contact_authority_path is not None
@@ -1949,9 +1985,18 @@ def _run_production_preparation(
         or deployment.contact_registry_path is not None
     ):
         raise ProductionPreparationDeploymentError(
-            "current runtime supports only pinned non-release materialization"
+            "current runtime requires explicit materialization or pre-review mode"
         )
     resources = _PinnedPreparationResources()
+    codex_binary = deployment.codex_binary
+    poppler_bin = deployment.poppler_bin
+    current_poppler_hashes: dict[str, str] = {}
+    if current_runtime_pre_review:
+        if not deployment.current_runtime:
+            raise ProductionPreparationDeploymentError(
+                "current pre-review requires current runtime deployment"
+            )
+        codex_binary, poppler_bin = _current_runtime_tool_paths()
     pinned: _PinnedProductionPaths | None = None
     admission_descriptor: int | None = None
     database_descriptor: int | None = None
@@ -1961,28 +2006,63 @@ def _run_production_preparation(
     }
     try:
         if not materialization_only:
-            for name, expected in PRODUCTION_POPPLER_SHA256.items():
+            expected_poppler_hashes = (
+                {
+                    name: hashlib.sha256((poppler_bin / name).read_bytes()).hexdigest()
+                    for name in PRODUCTION_POPPLER_SHA256
+                }
+                if current_runtime_pre_review and poppler_bin is not None
+                else PRODUCTION_POPPLER_SHA256
+            )
+            for name, expected in expected_poppler_hashes.items():
+                assert poppler_bin is not None
+                tool_path = poppler_bin / name
+                metadata = tool_path.stat()
                 resources.pin_file(
-                    deployment.poppler_bin / name,
+                    tool_path,
                     expected_sha256=expected,
-                    expected_mode=0o755,
-                    expected_uid=os.geteuid(),
+                    expected_mode=(
+                        stat.S_IMODE(metadata.st_mode)
+                        if current_runtime_pre_review
+                        else 0o755
+                    ),
+                    expected_uid=(
+                        metadata.st_uid
+                        if current_runtime_pre_review
+                        else os.geteuid()
+                    ),
                     executable=True,
                     label="Poppler",
                 )
-            for name, expected in PRODUCTION_POPPLER_LIBRARY_SHA256.items():
-                resources.pin_file(
-                    deployment.poppler_library_directory / name,
-                    expected_sha256=expected,
-                    expected_mode=0o644,
-                    expected_uid=os.geteuid(),
-                    label="Poppler library",
-                )
+                current_poppler_hashes[name] = expected
+            if not current_runtime_pre_review:
+                for name, expected in PRODUCTION_POPPLER_LIBRARY_SHA256.items():
+                    resources.pin_file(
+                        deployment.poppler_library_directory / name,
+                        expected_sha256=expected,
+                        expected_mode=0o644,
+                        expected_uid=os.geteuid(),
+                        label="Poppler library",
+                    )
+            assert codex_binary is not None
+            codex_metadata = codex_binary.stat()
             resources.pin_file(
-                deployment.codex_binary,
-                expected_sha256=PRODUCTION_CODEX_BINARY_SHA256,
-                expected_mode=0o755,
-                expected_uid=PRODUCTION_CODEX_OWNER_UID,
+                codex_binary,
+                expected_sha256=(
+                    hashlib.sha256(codex_binary.read_bytes()).hexdigest()
+                    if current_runtime_pre_review
+                    else PRODUCTION_CODEX_BINARY_SHA256
+                ),
+                expected_mode=(
+                    stat.S_IMODE(codex_metadata.st_mode)
+                    if current_runtime_pre_review
+                    else 0o755
+                ),
+                expected_uid=(
+                    codex_metadata.st_uid
+                    if current_runtime_pre_review
+                    else PRODUCTION_CODEX_OWNER_UID
+                ),
                 executable=True,
                 label="Codex",
             )
@@ -2119,8 +2199,8 @@ def _run_production_preparation(
             os.environ[PUBLIC_KEY_ENV] = str(deployment.contact_public_key_path)
             os.environ[REGISTRY_ENV] = str(deployment.contact_registry_path)
         if not materialization_only:
-            assert deployment.poppler_bin is not None
-            os.environ["JAA_POPPLER_BIN"] = str(deployment.poppler_bin)
+            assert poppler_bin is not None
+            os.environ["JAA_POPPLER_BIN"] = str(poppler_bin)
         candidate_bytes = resources.file_bytes(deployment.candidate_authority_path)
         contact_lease = None
         contact_provenance = None
@@ -2164,22 +2244,30 @@ def _run_production_preparation(
         codex_descriptor = None
         poppler_runtime = None
         if not materialization_only:
-            assert deployment.codex_binary is not None
-            codex_descriptor = resources.file_descriptor(deployment.codex_binary)
-            assert deployment.poppler_bin is not None
+            assert codex_binary is not None
+            codex_descriptor = resources.file_descriptor(codex_binary)
+            assert poppler_bin is not None
             poppler_runtime = pinned_poppler_runtime(
                 {
-                    name: resources.file_descriptor(deployment.poppler_bin / name)
-                    for name in PRODUCTION_POPPLER_SHA256
+                    name: resources.file_descriptor(poppler_bin / name)
+                    for name in current_poppler_hashes
                 },
-                PRODUCTION_POPPLER_SHA256,
-                library_descriptors={
-                    name: resources.file_descriptor(
-                        deployment.poppler_library_directory / name
-                    )
-                    for name in PRODUCTION_POPPLER_LIBRARY_SHA256
-                },
-                expected_library_sha256=PRODUCTION_POPPLER_LIBRARY_SHA256,
+                current_poppler_hashes,
+                library_descriptors=(
+                    None
+                    if current_runtime_pre_review
+                    else {
+                        name: resources.file_descriptor(
+                            deployment.poppler_library_directory / name
+                        )
+                        for name in PRODUCTION_POPPLER_LIBRARY_SHA256
+                    }
+                ),
+                expected_library_sha256=(
+                    None
+                    if current_runtime_pre_review
+                    else PRODUCTION_POPPLER_LIBRARY_SHA256
+                ),
             )
 
         editorial_runtime = None
@@ -2193,41 +2281,52 @@ def _run_production_preparation(
                     writer=DetachedCodexEditorialAdapter(
                         stage=f"{prefix}writer" if prefix else "resume_writer",
                         model=deployment.model,
-                        codex_binary=str(deployment.codex_binary),
+                        codex_binary=str(codex_binary),
                         environment="production",
                         timeout_seconds=deployment.timeout_seconds,
                         codex_binary_fd=codex_descriptor,
+                        allow_missing_city=(
+                            current_runtime_pre_review
+                            and contact_provenance is not None
+                            and contact_provenance.contact.city is None
+                        ),
                     ),
                     humanizer=DetachedCodexEditorialAdapter(
                         stage=f"{prefix}humanizer" if prefix else "humanizer",
                         model=deployment.model,
-                        codex_binary=str(deployment.codex_binary),
+                        codex_binary=str(codex_binary),
                         environment="production",
                         timeout_seconds=deployment.timeout_seconds,
                         codex_binary_fd=codex_descriptor,
+                        allow_missing_city=(
+                            current_runtime_pre_review
+                            and contact_provenance is not None
+                            and contact_provenance.contact.city is None
+                        ),
                     ),
                     document_kind=kind,
                 )
 
             editorial_runtime = runtime("cv")
             cover_letter_editorial_runtime = runtime("cover_letter")
-            assessor = ProductionDetachedRecruiterAssessor(
-                model=deployment.model,
-                archive_root=deployment.recruiter_archive_root,
-                repository_root=deployment.repository_root,
-                cli_timeout_seconds=deployment.timeout_seconds,
-                codex_binary=str(deployment.codex_binary),
-                codex_binary_fd=codex_descriptor,
-                archive_descriptor=resources.directory_descriptor(
-                    deployment.recruiter_archive_root
-                ),
-            )
             orchestration_extras = {
                 "bindings": (),
                 "form_fields": (),
-                "production_recruiter_assessor": assessor,
                 "poppler_runtime": poppler_runtime,
             }
+            if not current_runtime_pre_review:
+                assessor = ProductionDetachedRecruiterAssessor(
+                    model=deployment.model,
+                    archive_root=deployment.recruiter_archive_root,
+                    repository_root=deployment.repository_root,
+                    cli_timeout_seconds=deployment.timeout_seconds,
+                    codex_binary=str(codex_binary),
+                    codex_binary_fd=codex_descriptor,
+                    archive_descriptor=resources.directory_descriptor(
+                        deployment.recruiter_archive_root
+                    ),
+                )
+                orchestration_extras["production_recruiter_assessor"] = assessor
         preparation_environment, contact_authority_bytes = (
             _preparation_environment_and_contact_bytes(
                 deployment, contact_lease
@@ -2259,8 +2358,9 @@ def _run_production_preparation(
                 deployment.output_root
             ),
             materialization_only=materialization_only,
+            current_runtime_pre_review=current_runtime_pre_review,
         )
-        if not materialization_only:
+        if not materialization_only and not current_runtime_pre_review:
             _verify_preparation_output(
                 result,
                 deployment.output_root,
@@ -2361,11 +2461,77 @@ def run_production_market_materialization(
     return result
 
 
+def run_production_market_pre_review(
+    *,
+    application_id: str,
+    current_runtime_config_path: str | Path,
+    current_runtime_config_sha256: str,
+    current_runtime_private_root: str | Path,
+    current_recovery_manifest_relative_path: str,
+) -> MarketApplicationPreparation:
+    config_path = (
+        str(current_runtime_config_path)
+        if isinstance(current_runtime_config_path, Path)
+        else current_runtime_config_path
+    )
+    private_root = (
+        str(current_runtime_private_root)
+        if isinstance(current_runtime_private_root, Path)
+        else current_runtime_private_root
+    )
+    if not all(
+        type(value) is str and value
+        for value in (
+            config_path,
+            current_runtime_config_sha256,
+            private_root,
+            current_recovery_manifest_relative_path,
+        )
+    ):
+        raise ProductionPreparationDeploymentError(
+            "current pre-review requires complete runtime configuration bindings"
+        )
+    current_runtime, selected_deployment = select_runtime_deployment(
+        config_path=config_path,
+        config_sha256=current_runtime_config_sha256,
+        private_root=private_root,
+        legacy_loader=installed_production_preparation_deployment,
+        current_loader=lambda **options: installed_current_runtime_handoff_deployment(
+            configuration_path=Path(options["configuration_path"]),
+            configuration_sha256=options["configuration_sha256"],
+            private_root=Path(options["private_root"]),
+        ),
+    )
+    if not current_runtime:
+        raise ProductionPreparationDeploymentError(
+            "current pre-review refuses the legacy deployment mode"
+        )
+    _validate_deployment_roots(selected_deployment)
+    deployment = _current_preparation_deployment(
+        selected_deployment, current_recovery_manifest_relative_path
+    )
+    result = _run_production_preparation(
+        application_id,
+        deployment,
+        materialization_only=False,
+        current_runtime_pre_review=True,
+    )
+    if (
+        getattr(result, "review_status", None) != "not_performed"
+        or getattr(result, "release_authority", None) is not False
+    ):
+        raise ProductionPreparationDeploymentError(
+            "current pre-review returned an invalid preparation result"
+        )
+    return result
+
+
 __all__ = [
     "PRODUCTION_PREPARATION_CONFIG_PATH",
     "ProductionPreparationDeploymentError",
     "installed_production_preparation_deployment",
     "production_preparation_configuration_bytes",
     "run_production_preparation",
+    "run_production_market_pre_review",
     "run_production_market_materialization",
 ]

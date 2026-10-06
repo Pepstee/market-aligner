@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping, Protocol
 from cv_generation.constraints import policy_for_candidate
 from cv_generation.service import (
     CVCompositionOrchestrationResult,
+    CurrentRuntimeDraftCompositionResult,
     run_cv_composition_orchestration,
 )
 
@@ -65,10 +66,25 @@ def _json_bytes(value: object) -> bytes:
 
 
 def _candidate_editorial_authority(
-    *, candidate_name: str, candidate_city: str, source_sha256: str
+    *,
+    candidate_name: str,
+    candidate_city: str | None,
+    source_sha256: str,
+    current_runtime: bool = False,
 ) -> CandidateEditorialAuthority:
-    """Project the canonical candidate-specific CV policy into editorial authority."""
+    """Bind only the policy source available at this preparation boundary."""
 
+    if current_runtime:
+        return CandidateEditorialAuthority(
+            candidate_name=candidate_name,
+            candidate_city=candidate_city,
+            graduation_month_year=None,
+            dissertation_title=None,
+            source_sha256=source_sha256,
+            require_dissertation=False,
+            allow_missing_city=candidate_city is None,
+            current_runtime=True,
+        )
     policy = policy_for_candidate(candidate_name)
     return CandidateEditorialAuthority(
         candidate_name=candidate_name,
@@ -121,6 +137,21 @@ def _input_document(value: object) -> object:
     return value
 
 
+def _current_evidence_archive(
+    values: Mapping[str, object],
+) -> tuple[dict[str, str], dict[str, bytes]]:
+    references: dict[str, str] = {}
+    objects: dict[str, bytes] = {}
+    for name, value in values.items():
+        if value is None:
+            continue
+        encoded = _json_bytes(_input_document(value))
+        digest = hashlib.sha256(encoded).hexdigest()
+        references[name] = digest
+        objects.setdefault(digest, encoded)
+    return references, objects
+
+
 def _read_private(path: Path) -> bytes:
     if path.is_symlink():
         raise ValueError("stored preparation files cannot be symlinks")
@@ -143,6 +174,7 @@ class MarketApplicationPreparation:
     recruiter_archive_root: str | None = None
     recruiter_archive_manifest_relative_path: str | None = None
     release_authority: bool = False
+    review_status: str | None = None
 
 
 def _valid_materialization_geography_rank(
@@ -468,6 +500,9 @@ class CanonicalPreparationInputMaterializer:
                     candidate_name=contact.full_name,
                     candidate_city=contact.city,
                     source_sha256=deployment_binding.candidate_authority_file_sha256,
+                    current_runtime=(
+                        deployment_binding.environment == CURRENT_RUNTIME_ENVIRONMENT
+                    ),
                 ),
                 role_title=role_title,
                 company_name=company_name,
@@ -544,6 +579,7 @@ def prepare_admitted_market_application_from_authorities(
     current_contact_bindings: Mapping[str, object] | None = None,
     output_root_descriptor: int | None = None,
     materialization_only: bool = False,
+    current_runtime_pre_review: bool = False,
 ) -> MarketApplicationPreparation | MarketApplicationMaterializationContext:
     """Materialize one real preparation from admitted and operator authority.
 
@@ -554,13 +590,16 @@ def prepare_admitted_market_application_from_authorities(
 
     repository = repository_root.resolve(strict=True)
     verified = admission_store.for_boundary(application_id, "strategy")
+    if type(current_runtime_pre_review) is not bool:
+        raise ValueError("current pre-review mode must be boolean")
     if verified.environment != environment:
         raise HandoffAdmissionError(
             "preparation_environment",
             "requested preparation environment differs from admitted environment",
         )
     if environment == CURRENT_RUNTIME_ENVIRONMENT and (
-        not materialization_only
+        (not materialization_only and not current_runtime_pre_review)
+        or (materialization_only and current_runtime_pre_review)
         or type(input_materializer) is not CanonicalPreparationInputMaterializer
     ):
         raise ValueError(
@@ -586,6 +625,16 @@ def prepare_admitted_market_application_from_authorities(
         raise ValueError(
             "production preparation requires canonical materializer and editorial runtime"
         )
+    if current_runtime_pre_review and (
+        environment != CURRENT_RUNTIME_ENVIRONMENT
+        or materialization_only
+        or type(input_materializer) is not CanonicalPreparationInputMaterializer
+        or type(editorial_runtime) is not EditorialCompositionRuntime
+        or type(cover_letter_editorial_runtime) is not EditorialCompositionRuntime
+        or editorial_runtime.document_kind != "cv"
+        or cover_letter_editorial_runtime.document_kind != "cover_letter"
+    ):
+        raise ValueError("current pre-review requires canonical inputs and editorial runtimes")
     candidate_path = (
         candidate_authority_path.resolve(strict=True)
         if candidate_authority_bytes is None
@@ -786,7 +835,7 @@ def prepare_admitted_market_application_from_authorities(
             geography_priority_rank=verified.geography_priority_rank,
             source_observed_at=verified.source_observed_at,
         )
-    if environment == "production":
+    if environment in {"production", CURRENT_RUNTIME_ENVIRONMENT} and not materialization_only:
         assert editorial_runtime is not None
         assert cover_letter_editorial_runtime is not None
         reserved = {
@@ -862,6 +911,7 @@ def prepare_admitted_market_application_from_authorities(
         orchestration_arguments=arguments,
         environment=environment,
         output_root_descriptor=output_root_descriptor,
+        current_runtime_pre_review=current_runtime_pre_review,
     )
 
 
@@ -907,6 +957,175 @@ def prepare_admitted_market_application(
     )
 
 
+def _persist_current_runtime_drafts(
+    *,
+    verified: VerifiedApplicationInput,
+    repository_root: Path,
+    data_home: Path,
+    output_root_descriptor: int | None,
+    candidate_authority_bytes: bytes,
+    candidate_authority_sha256: str,
+    contact_authority_bytes: bytes,
+    contact_authority_sha256: str,
+    contact_object_sha256: str,
+    orchestration_arguments: Mapping[str, Any],
+    result: CurrentRuntimeDraftCompositionResult,
+) -> MarketApplicationPreparation:
+    if type(result) is not CurrentRuntimeDraftCompositionResult:
+        raise ValueError("current preparation returned an invalid pre-review result")
+    result.__post_init__()
+    materialization_receipt = orchestration_arguments.get("materialization_receipt")
+    request = orchestration_arguments.get("request")
+    cover_request = orchestration_arguments.get("cover_letter_request")
+    base_source = orchestration_arguments.get("base_source")
+    if (
+        type(materialization_receipt) is not CandidateApplicationMaterializationReceipt
+        or request is None
+        or cover_request is None
+        or base_source is None
+        or result.release_authority is not False
+    ):
+        raise ValueError("current draft persistence inputs are incomplete")
+    evidence_values = {
+        "base_source": base_source,
+        "materialization": orchestration_arguments.get("materialization"),
+        "materialization_receipt": materialization_receipt,
+        "candidate_projection": orchestration_arguments.get("candidate_projection"),
+        "decision_receipt": orchestration_arguments.get("decision_receipt"),
+        "market_decision_authority": orchestration_arguments.get(
+            "market_decision_authority"
+        ),
+        "request": request,
+        "cover_letter_request": cover_request,
+        "writer_draft": orchestration_arguments.get("writer_draft"),
+        "humanized_draft": orchestration_arguments.get("humanized_draft"),
+        "writer_evidence": orchestration_arguments.get("writer_evidence"),
+        "humanizer_evidence": orchestration_arguments.get("humanizer_evidence"),
+        "cover_letter_writer_draft": orchestration_arguments.get(
+            "cover_letter_writer_draft"
+        ),
+        "cover_letter_humanized_draft": orchestration_arguments.get(
+            "cover_letter_humanized_draft"
+        ),
+        "cover_letter_writer_evidence": orchestration_arguments.get(
+            "cover_letter_writer_evidence"
+        ),
+        "cover_letter_humanizer_evidence": orchestration_arguments.get(
+            "cover_letter_humanizer_evidence"
+        ),
+        "editorial_receipt": result.editorial_receipt,
+        "cover_letter_editorial_receipt": result.cover_letter_editorial_receipt,
+        "initial_constraint_receipt": result.initial_constraint_receipt,
+        "initial_quality_receipt": result.initial_quality_receipt,
+        "initial_benchmark_receipt": result.initial_benchmark_receipt,
+    }
+    evidence_object_references, evidence_object_bytes = _current_evidence_archive(
+        evidence_values
+    )
+    input_identity = {
+        "admission_receipt_sha256": verified.admission_receipt_sha256,
+        "application_id": verified.application_id,
+        "candidate_authority_sha256": candidate_authority_sha256,
+        "contact_authority_sha256": contact_authority_sha256,
+        "contact_object_sha256": contact_object_sha256,
+        "current_boundary_receipt_sha256": verified.current_boundary_receipt_sha256,
+        "handoff_root_sha256": verified.handoff_root_sha256,
+        "materialization_receipt_sha256": materialization_receipt.receipt_sha256,
+        "request_sha256": request.request_sha256,
+        "cover_letter_request_sha256": cover_request.request_sha256,
+        "source_sha256": base_source.content_sha256,
+        "schema_version": "jaa.market-application-pre-review-input.v1",
+    }
+    preparation_id = content_hash(input_identity)
+    root = _private_external_root(
+        data_home, repository_root, descriptor=output_root_descriptor
+    )
+    destination = root / "pre-review-drafts" / preparation_id
+    canonical_destination = data_home / "pre-review-drafts" / preparation_id
+    cv_bytes = result.initial_artifacts.cv_pdf.pdf_bytes
+    cover_bytes = result.initial_artifacts.cover_letter_pdf.pdf_bytes
+    receipt = {
+        **input_identity,
+        "contact_provenance_sha256": contact_authority_sha256,
+        "cv_draft_pdf_sha256": hashlib.sha256(cv_bytes).hexdigest(),
+        "cover_letter_draft_pdf_sha256": hashlib.sha256(cover_bytes).hexdigest(),
+        "editorial_receipt_sha256": result.editorial_receipt.receipt_sha256,
+        "cover_letter_editorial_receipt_sha256": (
+            result.cover_letter_editorial_receipt.receipt_sha256
+        ),
+        "initial_artifact_set_sha256": result.initial_artifacts.artifact_set_sha256,
+        "initial_constraint_receipt_sha256": (
+            result.initial_constraint_receipt.receipt_sha256
+        ),
+        "initial_quality_receipt_sha256": result.initial_quality_receipt.receipt_sha256,
+        "current_evidence_objects": evidence_object_references,
+        "initial_benchmark_receipt_sha256": (
+            result.initial_benchmark_receipt.receipt_sha256
+            if result.initial_benchmark_receipt is not None
+            else None
+        ),
+        "orchestration_sha256": result.orchestration_sha256,
+        "environment": CURRENT_RUNTIME_ENVIRONMENT,
+        "final_document_admitted": False,
+        "review_status": "not_performed",
+        "release_authority": False,
+        "schema_version": "jaa.market-application-pre-review-draft.v1",
+    }
+    receipt_bytes = _json_bytes(receipt)
+    receipt_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
+    if destination.exists() or destination.is_symlink():
+        for directory in (destination, destination / "objects"):
+            metadata = directory.stat(follow_symlinks=False)
+            if (
+                not directory.is_dir()
+                or directory.is_symlink()
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o777 != 0o700
+            ):
+                raise ValueError("stored current pre-review directory differs")
+        stored_bytes = _read_private(destination / "receipt.json")
+        if stored_bytes != receipt_bytes:
+            raise ValueError("stored current pre-review replay differs")
+        for name, expected in (
+            ("cv-draft.pdf", cv_bytes),
+            ("cover-letter-draft.pdf", cover_bytes),
+            (f"objects/{candidate_authority_sha256}", candidate_authority_bytes),
+            (f"objects/{contact_object_sha256}", contact_authority_bytes),
+            *(
+                (f"objects/{object_sha256}", object_bytes)
+                for object_sha256, object_bytes in evidence_object_bytes.items()
+            ),
+        ):
+            if _read_private(destination / name) != expected:
+                raise ValueError("stored current pre-review object differs")
+    else:
+        temporary = Path(tempfile.mkdtemp(prefix=".pre-review-", dir=root))
+        os.chmod(temporary, 0o700)
+        try:
+            _write(temporary / "objects" / candidate_authority_sha256, candidate_authority_bytes)
+            _write(temporary / "objects" / contact_object_sha256, contact_authority_bytes)
+            for object_sha256, object_bytes in evidence_object_bytes.items():
+                _write(temporary / "objects" / object_sha256, object_bytes)
+            _write(temporary / "cv-draft.pdf", cv_bytes)
+            _write(temporary / "cover-letter-draft.pdf", cover_bytes)
+            _write(temporary / "receipt.json", receipt_bytes)
+            os.chmod(temporary / "objects", 0o700)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(destination.parent, 0o700)
+            os.replace(temporary, destination)
+        except BaseException:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+    return MarketApplicationPreparation(
+        preparation_id=preparation_id,
+        path=canonical_destination,
+        receipt_sha256=receipt_sha256,
+        orchestration_sha256=result.orchestration_sha256,
+        release_authority=False,
+        review_status="not_performed",
+    )
+
+
 def _prepare_admitted_market_application(
     *,
     admission_store: HandoffAdmissionStore,
@@ -921,6 +1140,7 @@ def _prepare_admitted_market_application(
     orchestration_arguments: Mapping[str, Any],
     environment: str,
     output_root_descriptor: int | None = None,
+    current_runtime_pre_review: bool = False,
 ) -> MarketApplicationPreparation:
     """Prepare one admitted application; never authorize upload or submission."""
 
@@ -955,9 +1175,32 @@ def _prepare_admitted_market_application(
             "preparation_environment",
             "requested preparation environment differs from admitted environment",
         )
-    if environment not in {"production", "synthetic"}:
+    if environment not in {"production", "synthetic", CURRENT_RUNTIME_ENVIRONMENT}:
         raise HandoffAdmissionError(
             "preparation_environment", "admitted environment is unsupported"
+        )
+    if (environment == CURRENT_RUNTIME_ENVIRONMENT) != current_runtime_pre_review:
+        raise HandoffAdmissionError(
+            "preparation_environment", "current pre-review opt-in differs"
+        )
+    if current_runtime_pre_review:
+        current_result = run_cv_composition_orchestration(
+            **dict(orchestration_arguments),
+            environment=environment,
+            current_runtime_pre_review=True,
+        )
+        return _persist_current_runtime_drafts(
+            verified=verified,
+            repository_root=repository_root,
+            data_home=data_home,
+            output_root_descriptor=output_root_descriptor,
+            candidate_authority_bytes=candidate_authority_bytes,
+            candidate_authority_sha256=candidate_authority_sha256,
+            contact_authority_bytes=contact_authority_bytes,
+            contact_authority_sha256=contact_authority_sha256,
+            contact_object_sha256=exact_contact_sha256,
+            orchestration_arguments=orchestration_arguments,
+            result=current_result,
         )
     assessor = orchestration_arguments.get("production_recruiter_assessor")
     if environment == "production":
