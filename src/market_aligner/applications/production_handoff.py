@@ -88,6 +88,9 @@ class _ProductionHandoffDeployment:
     research_archive_root_identity: str
     candidate_authority_path: Path = PRODUCTION_CANDIDATE_AUTHORITY_PATH
     candidate_authority_sha256: str = PRODUCTION_CANDIDATE_AUTHORITY_SHA256
+    environment: str = "production"
+    trust_root_id: str = PRODUCTION_HANDOFF_TRUST_ROOT_ID
+    freshness_provenance: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,9 +115,11 @@ class ProductionHandoffReceipt:
     execution_receipt_sha256: str
     environment: str = "production"
     release_authority: bool = False
+    trust_root_id: str = PRODUCTION_HANDOFF_TRUST_ROOT_ID
+    freshness_provenance: str | None = None
 
     def document(self) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "application_id": self.application_id,
             "bundle_path": str(self.bundle_path),
             "employer_dossier_sha256": self.employer_dossier_sha256,
@@ -133,12 +138,20 @@ class ProductionHandoffReceipt:
             "source_content_sha256": self.source_content_sha256,
             "processing_promotion_sha256": self.processing_promotion_sha256,
             "release_token_issued": False,
-            "schema_version": "market-aligner.production-handoff-receipt.v2",
+            "schema_version": (
+                "market-aligner.current-runtime-handoff-receipt.v1"
+                if self.environment == "current_runtime"
+                else "market-aligner.production-handoff-receipt.v2"
+            ),
             "source_job_key": self.source_job_key,
             "source_record_sha256": self.source_record_sha256,
             "submission_authority": False,
-            "trust_root_id": PRODUCTION_HANDOFF_TRUST_ROOT_ID,
+            "trust_root_id": self.trust_root_id,
         }
+        if self.environment == "current_runtime":
+            document["release_authority"] = False
+            document["freshness_provenance"] = self.freshness_provenance
+        return document
 
 
 def _sha(value: bytes) -> str:
@@ -1960,28 +1973,36 @@ def _build_production_handoff_from_authenticated_time(
         output,
         handoff,
         references=references,
-        environment="production",
-        trust_root_id=PRODUCTION_HANDOFF_TRUST_ROOT_ID,
+        environment=deployment.environment,
+        trust_root_id=deployment.trust_root_id,
         issued_at=_utc(handoff_issued_at),
         source_job_key=source_job_key,
     )
+    current_runtime = deployment.environment == "current_runtime"
     receipt_basis = {
         "application_id": handoff.application_id,
         "bundle_identity": f"bundles/{written.source_record_sha256}",
         "employer_dossier_sha256": _sha(dossier_bytes),
-        "environment": "production",
+        "environment": deployment.environment,
         "handoff_job_key": handoff_job_key,
         "handoff_root_sha256": written.handoff_root_sha256,
         "manifest_sha256": written.manifest_sha256,
         "processing_promotion_sha256": str(promotion_row["receipt_sha256"]),
         "producer_commit_sha": producer_commit,
         "release_token_issued": False,
-        "schema_version": "market-aligner.production-handoff-execution.v2",
+        "schema_version": (
+            "market-aligner.current-runtime-handoff-execution.v1"
+            if current_runtime
+            else "market-aligner.production-handoff-execution.v2"
+        ),
         "source_job_key": source_job_key,
         "source_record_sha256": written.source_record_sha256,
         "submission_authority": False,
-        "trust_root_id": PRODUCTION_HANDOFF_TRUST_ROOT_ID,
+        "trust_root_id": deployment.trust_root_id,
     }
+    if current_runtime:
+        receipt_basis["release_authority"] = False
+        receipt_basis["freshness_provenance"] = deployment.freshness_provenance
     receipt_semantic_sha = _sha(_canonical(receipt_basis))
     receipt_bytes = _canonical(
         {**receipt_basis, "semantic_receipt_sha256": receipt_semantic_sha}
@@ -2009,6 +2030,10 @@ def _build_production_handoff_from_authenticated_time(
         employer_dossier_sha256=_sha(dossier_bytes),
         execution_receipt_path=receipt_path,
         execution_receipt_sha256=_sha(receipt_bytes),
+        environment=deployment.environment,
+        release_authority=False,
+        trust_root_id=deployment.trust_root_id,
+        freshness_provenance=deployment.freshness_provenance,
     )
 
 

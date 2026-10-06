@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -52,6 +53,10 @@ PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT = PRODUCTION_MARKET_OUTBOX_ROOT / "rece
 PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY = "state/public-employer-research-v2"
 _DEPLOYMENT_SCHEMA = "jaa.production-market-handoff-deployment.v1"
 _DEPLOYMENT_SCHEMA_V2 = "jaa.production-market-handoff-deployment.v2"
+_CURRENT_RUNTIME_DEPLOYMENT_SCHEMA = (
+    "market-aligner.current-runtime-handoff-deployment.v1"
+)
+_CURRENT_RUNTIME_TRUST_ROOT_ID = "market-aligner-current-runtime-non-release-v1"
 _MAX_CONFIG_BYTES = 8192
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COLLECTION_CONFIG_RELATIVE_PATH = Path(
@@ -61,6 +66,53 @@ _COLLECTION_CONFIG_RELATIVE_PATH = Path(
 
 class ProductionHandoffDeploymentError(ValueError):
     """The installed production deployment authority is absent or differs."""
+
+
+def decode_bound_json(
+    raw: bytes, expected_sha256: str, max_bytes: int = _MAX_CONFIG_BYTES
+) -> dict[str, object]:
+    """Decode one size-bounded JSON object only after verifying its raw hash."""
+    try:
+        if type(raw) is not bytes:
+            raise ValueError
+        if type(expected_sha256) is not str or not _SHA256.fullmatch(expected_sha256):
+            raise ValueError
+        if type(max_bytes) is not int or not 1 <= max_bytes <= 1_048_576:
+            raise ValueError
+        if not 0 < len(raw) <= max_bytes:
+            raise ValueError
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise ValueError
+        text = raw.decode("utf-8", "strict")
+
+        def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+
+        def finite_float(value: str) -> float:
+            result = float(value)
+            if not math.isfinite(result):
+                raise ValueError
+            return result
+
+        def reject_constant(_value: str) -> object:
+            raise ValueError
+
+        document = json.loads(
+            text,
+            object_pairs_hook=unique_object,
+            parse_float=finite_float,
+            parse_constant=reject_constant,
+        )
+        if type(document) is not dict:
+            raise ValueError
+        return document
+    except Exception:
+        raise ValueError("private_runtime_config_invalid") from None
 
 
 def _expected_deployment_document(
@@ -111,7 +163,11 @@ def _normalized_absolute_path(document: dict[str, object], key: str) -> Path:
     return path
 
 
-def _validate_deployment_document(document: object) -> dict[str, object]:
+def _validate_deployment_document(
+    document: object,
+    *,
+    current_runtime_root: Path | None = None,
+) -> dict[str, object]:
     expected_keys = set(_expected_deployment_document())
     if type(document) is not dict:
         raise ProductionHandoffDeploymentError(
@@ -122,11 +178,21 @@ def _validate_deployment_document(document: object) -> dict[str, object]:
             "deployment configuration keys differ from the supported schema"
         )
     schema_version = document["schema_version"]
+    is_current_runtime = schema_version == _CURRENT_RUNTIME_DEPLOYMENT_SCHEMA
+    expected_trust_root = (
+        _CURRENT_RUNTIME_TRUST_ROOT_ID
+        if is_current_runtime
+        else production_handoff.PRODUCTION_HANDOFF_TRUST_ROOT_ID
+    )
     if (
         type(schema_version) is not str
-        or schema_version not in {_DEPLOYMENT_SCHEMA, _DEPLOYMENT_SCHEMA_V2}
-        or document["trust_root_id"]
-        != production_handoff.PRODUCTION_HANDOFF_TRUST_ROOT_ID
+        or (is_current_runtime and current_runtime_root is None)
+        or (current_runtime_root is not None and not is_current_runtime)
+        or (
+            not is_current_runtime
+            and schema_version not in {_DEPLOYMENT_SCHEMA, _DEPLOYMENT_SCHEMA_V2}
+        )
+        or document["trust_root_id"] != expected_trust_root
         or document["research_archive_root_identity"]
         != PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY
     ):
@@ -160,6 +226,14 @@ def _validate_deployment_document(document: object) -> dict[str, object]:
     collection_config = _normalized_absolute_path(
         document, "collection_config_path"
     )
+    if is_current_runtime and (
+        current_runtime_root is None
+        or data_home != current_runtime_root
+        or str(document["collection_config_path"]).startswith("//")
+    ):
+        raise ProductionHandoffDeploymentError(
+            "current runtime configuration path or private root differs"
+        )
     if schema_version == _DEPLOYMENT_SCHEMA_V2 and str(
         document["collection_config_path"]
     ).startswith("//"):
@@ -282,6 +356,149 @@ def _parse_deployment_configuration(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _current_runtime_path(value: str | Path, label: str) -> Path:
+    if not isinstance(value, (str, Path)):
+        raise ProductionHandoffDeploymentError(
+            f"current runtime {label} is invalid"
+        )
+    raw = str(value)
+    path = Path(raw)
+    if (
+        not path.is_absolute()
+        or str(path).startswith("//")
+        or ".." in path.parts
+        or str(path) != raw
+        or path == Path("/")
+    ):
+        raise ProductionHandoffDeploymentError(
+            f"current runtime {label} is not a normalized absolute path"
+        )
+    return path
+
+
+def _read_current_runtime_configuration(
+    path_value: str | Path,
+    private_root_value: str | Path,
+    expected_sha256: str,
+) -> bytes:
+    path = _current_runtime_path(path_value, "configuration path")
+    private_root = _current_runtime_path(private_root_value, "private root")
+    if private_root not in path.parents:
+        raise ProductionHandoffDeploymentError(
+            "current runtime configuration must be beneath its private root"
+        )
+    if type(expected_sha256) is not str or not _SHA256.fullmatch(expected_sha256):
+        raise ProductionHandoffDeploymentError(
+            "current runtime configuration hash is invalid"
+        )
+
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        private_root_depth = len(private_root.parts) - 1
+        for depth, component in enumerate(path.parent.parts[1:], start=1):
+            next_descriptor = os.open(
+                component,
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | os.O_CLOEXEC
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=descriptor,
+            )
+            try:
+                metadata = os.fstat(next_descriptor)
+                mode = stat.S_IMODE(metadata.st_mode)
+                if depth < private_root_depth:
+                    valid_directory = (
+                        metadata.st_uid in {0, os.geteuid()} and not mode & 0o022
+                    )
+                else:
+                    valid_directory = (
+                        metadata.st_uid == os.geteuid() and mode == 0o700
+                    )
+                if not stat.S_ISDIR(metadata.st_mode) or not valid_directory:
+                    raise ProductionHandoffDeploymentError(
+                        "current runtime configuration directory is not protected"
+                    )
+            except BaseException:
+                try:
+                    os.close(next_descriptor)
+                except OSError:
+                    pass
+                raise
+            os.close(descriptor)
+            descriptor = next_descriptor
+
+        file_descriptor = os.open(
+            path.name,
+            os.O_RDONLY
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=descriptor,
+        )
+        try:
+            before = os.fstat(file_descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_uid != os.geteuid()
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_nlink != 1
+                or before.st_size <= 0
+                or before.st_size > _MAX_CONFIG_BYTES
+            ):
+                raise ProductionHandoffDeploymentError(
+                    "current runtime configuration file is not private"
+                )
+            chunks: list[bytes] = []
+            remaining = _MAX_CONFIG_BYTES + 1
+            while remaining:
+                chunk = os.read(file_descriptor, min(4096, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            after = os.fstat(file_descriptor)
+            before_state = (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_uid,
+                before.st_nlink,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            after_state = (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_uid,
+                after.st_nlink,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            if (
+                before_state != after_state
+                or len(raw) != before.st_size
+                or len(raw) > _MAX_CONFIG_BYTES
+                or hashlib.sha256(raw).hexdigest() != expected_sha256
+            ):
+                raise ProductionHandoffDeploymentError(
+                    "current runtime configuration binding differs"
+                )
+            return raw
+        finally:
+            os.close(file_descriptor)
+    except OSError:
+        raise ProductionHandoffDeploymentError(
+            "current runtime configuration cannot be opened safely"
+        ) from None
+    finally:
+        os.close(descriptor)
+
+
 def _read_root_owned_configuration(path: Path) -> bytes:
     if not path.is_absolute() or ".." in path.parts:
         raise ProductionHandoffDeploymentError(
@@ -371,6 +588,52 @@ def installed_production_handoff_deployment() -> _ProductionHandoffDeployment:
     )
 
 
+def installed_current_runtime_handoff_deployment(
+    *,
+    configuration_path: str | Path,
+    configuration_sha256: str,
+    private_root: str | Path,
+) -> _ProductionHandoffDeployment:
+    """Load one explicitly selected, private non-release deployment document."""
+    root = _current_runtime_path(private_root, "private root")
+    raw = _read_current_runtime_configuration(
+        configuration_path, root, configuration_sha256
+    )
+    document = decode_bound_json(raw, configuration_sha256)
+    validated = _validate_deployment_document(
+        document, current_runtime_root=root
+    )
+    if canonical_json_bytes(validated) != raw:
+        raise ProductionHandoffDeploymentError(
+            "current runtime configuration is not canonical JSON"
+        )
+    repository_root = Path(str(validated["repository_root"]))
+    executing_repository = Path(__file__).resolve().parents[3]
+    if executing_repository != repository_root:
+        raise ProductionHandoffDeploymentError(
+            "executing repository differs from the current runtime repository"
+        )
+    return _ProductionHandoffDeployment(
+        data_home=root,
+        repository_root=repository_root,
+        output_root=Path(str(validated["output_root"])),
+        collection_config_path=Path(str(validated["collection_config_path"])),
+        collection_config_sha256=str(validated["collection_config_sha256"]),
+        collection_config_file_sha256=str(
+            validated["collection_config_file_sha256"]
+        ),
+        deployment_configuration_sha256=configuration_sha256,
+        research_archive_root_identity=str(
+            validated["research_archive_root_identity"]
+        ),
+        candidate_authority_path=Path(str(validated["candidate_authority_path"])),
+        candidate_authority_sha256=str(validated["candidate_authority_sha256"]),
+        environment="current_runtime",
+        trust_root_id=_CURRENT_RUNTIME_TRUST_ROOT_ID,
+        freshness_provenance="local_system_utc",
+    )
+
+
 def _validate_deployment_roots(deployment: _ProductionHandoffDeployment) -> None:
     """Reject link substitution or permission drift before time/state access."""
 
@@ -435,39 +698,63 @@ def run_production_handoff(
     profile_id: str,
     track: str,
     source_job_key: str,
+    current_runtime_config_path: str | Path | None = None,
+    current_runtime_config_sha256: str | None = None,
+    current_runtime_private_root: str | Path | None = None,
 ) -> ProductionHandoffReceipt:
-    """Build a preparation handoff using authenticated production time."""
-
-    deployment = installed_production_handoff_deployment()
-    _validate_deployment_roots(deployment)
-    subject = {
-        "candidate_authority_sha256": deployment.candidate_authority_sha256,
-        "collection_config_path": str(deployment.collection_config_path),
-        "collection_config_sha256": deployment.collection_config_sha256,
-        "collection_config_file_sha256": deployment.collection_config_file_sha256,
-        "data_home": str(deployment.data_home.absolute()),
-        "deployment_configuration_sha256": deployment.deployment_configuration_sha256,
-        "execution_receipt_root": str(deployment.output_root / "receipts"),
-        "output_root": str(deployment.output_root.absolute()),
-        "profile_id": profile_id,
-        "repository_root": str(deployment.repository_root.absolute()),
-        "schema_version": "jaa.production-handoff-freshness-subject.v1",
-        "source_job_key": source_job_key,
-        "track": track,
-    }
-    subject_sha256 = hashlib.sha256(canonical_json_bytes(subject)).hexdigest()
-    evidence = obtain_current_time(
-        installed_production_current_time_witness(),
-        environment="production",
-        purpose="production_handoff_freshness",
-        subject_sha256=subject_sha256,
-        maximum_clock_skew_seconds=300,
+    """Build the default production handoff or explicit non-release preparation."""
+    current_runtime_values = (
+        current_runtime_config_path,
+        current_runtime_config_sha256,
+        current_runtime_private_root,
     )
-    evaluated_at = datetime.fromisoformat(
-        evidence.evaluated_at[:-1] + "+00:00"
-        if evidence.evaluated_at.endswith("Z")
-        else evidence.evaluated_at
-    ).astimezone(timezone.utc)
+    if any(value is not None for value in current_runtime_values) and not all(
+        value is not None for value in current_runtime_values
+    ):
+        raise ProductionHandoffDeploymentError(
+            "current runtime opt-in requires config path, raw hash and private root"
+        )
+    current_runtime = all(value is not None for value in current_runtime_values)
+    if current_runtime:
+        deployment = installed_current_runtime_handoff_deployment(
+            configuration_path=current_runtime_config_path,
+            configuration_sha256=current_runtime_config_sha256,
+            private_root=current_runtime_private_root,
+        )
+    else:
+        deployment = installed_production_handoff_deployment()
+    _validate_deployment_roots(deployment)
+    if current_runtime:
+        evaluated_at = datetime.now(timezone.utc)
+    else:
+        subject = {
+            "candidate_authority_sha256": deployment.candidate_authority_sha256,
+            "collection_config_path": str(deployment.collection_config_path),
+            "collection_config_sha256": deployment.collection_config_sha256,
+            "collection_config_file_sha256": deployment.collection_config_file_sha256,
+            "data_home": str(deployment.data_home.absolute()),
+            "deployment_configuration_sha256": deployment.deployment_configuration_sha256,
+            "execution_receipt_root": str(deployment.output_root / "receipts"),
+            "output_root": str(deployment.output_root.absolute()),
+            "profile_id": profile_id,
+            "repository_root": str(deployment.repository_root.absolute()),
+            "schema_version": "jaa.production-handoff-freshness-subject.v1",
+            "source_job_key": source_job_key,
+            "track": track,
+        }
+        subject_sha256 = hashlib.sha256(canonical_json_bytes(subject)).hexdigest()
+        evidence = obtain_current_time(
+            installed_production_current_time_witness(),
+            environment="production",
+            purpose="production_handoff_freshness",
+            subject_sha256=subject_sha256,
+            maximum_clock_skew_seconds=300,
+        )
+        evaluated_at = datetime.fromisoformat(
+            evidence.evaluated_at[:-1] + "+00:00"
+            if evidence.evaluated_at.endswith("Z")
+            else evidence.evaluated_at
+        ).astimezone(timezone.utc)
     return _build_production_handoff_from_authenticated_time(
         deployment=deployment,
         profile_id=profile_id,
@@ -488,6 +775,8 @@ __all__ = [
     "PRODUCTION_MARKET_REPOSITORY_ROOT",
     "PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY",
     "ProductionHandoffDeploymentError",
+    "decode_bound_json",
+    "installed_current_runtime_handoff_deployment",
     "installed_production_handoff_deployment",
     "production_handoff_deployment_configuration_bytes",
     "run_production_handoff",

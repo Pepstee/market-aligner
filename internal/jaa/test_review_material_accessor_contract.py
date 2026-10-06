@@ -1125,6 +1125,51 @@ def test_protected_review_producer_to_assembler(tmp_path):
         projection_bytes=result.projection_bytes, admission_context_bytes=outbox.context_bytes)
 
 
+def test_current_runtime_bundle_carries_distinct_nonrelease_context(tmp_path):
+    import base64
+    from importlib.resources import files
+
+    from market_aligner.applications.producer import (
+        HandoffReference,
+        write_protected_handoff_bundle,
+    )
+    from career_automation.market_aligner_handoff import parse_handoff
+
+    vector = json.loads(
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
+    handoff = parse_handoff(base64.b64decode(vector["handoff"]["canonical_base64"]))
+    references = {}
+    for row in vector["reference_bundle"]["value"]["entries"]:
+        metadata = row["metadata"]
+        references[metadata["reference_key"]] = HandoffReference(
+            exact_bytes=base64.b64decode(row["object_base64"]),
+            type_id=metadata["type_id"],
+            schema_version=metadata["schema_version"],
+            subject=metadata["subject"],
+            issued_at=metadata["issued_at"],
+            valid_until=metadata["valid_until"],
+            issuer_id=metadata["issuer_id"],
+        )
+    written = write_protected_handoff_bundle(
+        tmp_path / "current-runtime-outbox",
+        handoff,
+        references=references,
+        environment="current_runtime",
+        trust_root_id="market-aligner-current-runtime-non-release-v1",
+        issued_at=ISSUED_AT,
+        source_job_key="synthetic-source",
+    )
+    context = json.loads((written.path / "context.json").read_bytes())
+    assert context["environment"] == "current_runtime"
+    assert context["trust_mode"] == "current_runtime_non_release"
+    assert context["trust_root_id"] == (
+        "market-aligner-current-runtime-non-release-v1"
+    )
+
+
 def test_protected_review_without_capture_fails_closed(tmp_path):
     _, _, assembler, admission = _protected_review_ready(tmp_path, include_capture=False)
     with pytest.raises(ReviewMaterialError, match="review accessor failed"):

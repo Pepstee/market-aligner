@@ -1351,7 +1351,7 @@ class AssessmentStore:
             raise ContractValidationError("published execution receipt must be an object")
         basis = dict(receipt)
         semantic = basis.pop("semantic_receipt_sha256", None)
-        if (receipt.get("schema_version") != "market-aligner.production-handoff-execution.v2"
+        if (not self._published_handoff_mode_valid(receipt)
                 or receipt.get("application_id") != handoff.application_id
                 or receipt.get("handoff_root_sha256") != handoff.root_sha256
                 or receipt.get("release_token_issued") is not False
@@ -1374,6 +1374,28 @@ class AssessmentStore:
             ).fetchone()
             if row is None or tuple(row) != values:
                 raise ContractValidationError("published handoff registry identity conflicts")
+
+    @staticmethod
+    def _published_handoff_mode_valid(receipt: object) -> bool:
+        if type(receipt) is not dict:
+            return False
+        schema = receipt.get("schema_version")
+        if type(schema) is str and schema == "market-aligner.production-handoff-execution.v2":
+            return True
+        if type(schema) is not str or schema != "market-aligner.current-runtime-handoff-execution.v1":
+            return False
+        expected_strings = {
+            "environment": "current_runtime",
+            "trust_root_id": "market-aligner-current-runtime-non-release-v1",
+            "freshness_provenance": "local_system_utc",
+        }
+        if any(type(receipt.get(key)) is not str or receipt.get(key) != value
+               for key, value in expected_strings.items()):
+            return False
+        return all(
+            receipt.get(key) is False
+            for key in ("release_authority", "release_token_issued", "submission_authority")
+        )
 
     def upsert_score(
         self,

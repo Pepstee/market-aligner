@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from dataclasses import replace
+from datetime import timezone
 from itertools import combinations
 from pathlib import Path
 from types import SimpleNamespace
@@ -465,3 +467,235 @@ def test_outbox_symlink_is_rejected_before_time_or_state(
             source_job_key="workable:cogna:847CFBC5F4",
         )
     assert called["time"] is False
+
+
+def _current_runtime_document(
+    tmp_path: Path, *, repository_root: Path | None = None
+) -> tuple[dict[str, object], Path]:
+    private_root = tmp_path / "private-runtime"
+    document = runner._expected_deployment_document()
+    document.update(
+        {
+            "candidate_authority_path": str(
+                tmp_path / "authority" / "candidate-authority.json"
+            ),
+            "candidate_authority_sha256": "a" * 64,
+            "collection_config_path": "/srv/artvault/control/programme/collection.yaml",
+            "collection_config_sha256": "b" * 64,
+            "collection_config_file_sha256": "c" * 64,
+            "data_home": str(private_root),
+            "output_root": str(tmp_path / "handoff-outbox"),
+            "repository_root": str(repository_root or tmp_path / "repository"),
+            "schema_version": "market-aligner.current-runtime-handoff-deployment.v1",
+            "trust_root_id": "market-aligner-current-runtime-non-release-v1",
+        }
+    )
+    return document, private_root
+
+
+def test_bound_json_decoder_rejects_mismatch_duplicates_and_nonfinite_values() -> None:
+    raw = b'{"a":1,"nested":{"b":"x"}}'
+    assert runner.decode_bound_json(raw, hashlib.sha256(raw).hexdigest()) == {
+        "a": 1,
+        "nested": {"b": "x"},
+    }
+    for invalid in (
+        (raw + b"\n", hashlib.sha256(raw).hexdigest()),
+        (b'{"a":1,"a":2}', hashlib.sha256(b'{"a":1,"a":2}').hexdigest()),
+        (b'{"v":1e999}', hashlib.sha256(b'{"v":1e999}').hexdigest()),
+        (b'{"v":NaN}', hashlib.sha256(b'{"v":NaN}').hexdigest()),
+        (b"[1]", hashlib.sha256(b"[1]").hexdigest()),
+        (b'{"v":"\xff"}', hashlib.sha256(b'{"v":"\xff"}').hexdigest()),
+    ):
+        with pytest.raises(ValueError, match="^private_runtime_config_invalid$"):
+            runner.decode_bound_json(*invalid)
+
+
+def test_current_runtime_configuration_has_distinct_schema_and_trust_root(
+    tmp_path: Path,
+) -> None:
+    document, private_root = _current_runtime_document(tmp_path)
+    raw = canonical_json_bytes(document)
+
+    assert runner._validate_deployment_document(
+        document, current_runtime_root=private_root
+    ) == document
+    assert document["collection_config_path"] not in str(private_root)
+    with pytest.raises(runner.ProductionHandoffDeploymentError):
+        runner._validate_deployment_document(document)
+    with pytest.raises(runner.ProductionHandoffDeploymentError):
+        runner._parse_deployment_configuration(raw)
+
+    for field, value in (
+        ("schema_version", runner._DEPLOYMENT_SCHEMA_V2),
+        ("trust_root_id", production_module.PRODUCTION_HANDOFF_TRUST_ROOT_ID),
+        ("data_home", str(tmp_path / "other-private-root")),
+    ):
+        changed = dict(document)
+        changed[field] = value
+        with pytest.raises(runner.ProductionHandoffDeploymentError):
+            runner._validate_deployment_document(
+                changed, current_runtime_root=private_root
+            )
+
+
+def test_current_runtime_loader_binds_raw_hash_and_exact_private_root(
+    monkeypatch, tmp_path: Path
+) -> None:
+    document, private_root = _current_runtime_document(
+        tmp_path, repository_root=Path(__file__).resolve().parents[2]
+    )
+    raw = canonical_json_bytes(document)
+    digest = hashlib.sha256(raw).hexdigest()
+    config_path = private_root / "deployment" / "market-handoff.json"
+    observed: dict[str, object] = {}
+
+    def read(path, root, expected):
+        observed.update(path=path, root=root, expected=expected)
+        return raw
+
+    monkeypatch.setattr(runner, "_read_current_runtime_configuration", read)
+    deployment = runner.installed_current_runtime_handoff_deployment(
+        configuration_path=config_path,
+        configuration_sha256=digest,
+        private_root=private_root,
+    )
+    assert observed == {"path": config_path, "root": private_root, "expected": digest}
+    assert deployment.data_home == private_root
+    assert deployment.environment == "current_runtime"
+    assert deployment.trust_root_id == "market-aligner-current-runtime-non-release-v1"
+    assert deployment.freshness_provenance == "local_system_utc"
+
+
+def test_current_runtime_config_path_must_be_strictly_beneath_private_root(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        runner.ProductionHandoffDeploymentError,
+        match="must be beneath its private root",
+    ):
+        runner._read_current_runtime_configuration(
+            tmp_path / "public-config.json",
+            tmp_path / "private-runtime",
+            "a" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    "provided",
+    [
+        {"current_runtime_config_path": "/private/config.json"},
+        {"current_runtime_config_sha256": "a" * 64},
+        {"current_runtime_private_root": "/private"},
+    ],
+)
+def test_current_runtime_cli_arguments_are_all_or_none(provided: dict[str, str]) -> None:
+    with pytest.raises(
+        runner.ProductionHandoffDeploymentError,
+        match="requires config path, raw hash and private root",
+    ):
+        runner.run_production_handoff(
+            profile_id="prf_" + "1" * 32,
+            track="software-engineering",
+            source_job_key="workable:cogna:847CFBC5F4",
+            **provided,
+        )
+
+
+def test_current_runtime_runner_uses_local_time_and_never_calls_production_witness(
+    monkeypatch, tmp_path: Path
+) -> None:
+    data_home = tmp_path / "data"
+    repository_root = tmp_path / "repository"
+    output_root = tmp_path / "outbox"
+    candidate_directory = tmp_path / "authority"
+    deployment = _ProductionHandoffDeployment(
+        data_home=data_home,
+        repository_root=repository_root,
+        output_root=output_root,
+        collection_config_path=Path("/srv/artvault/collection.yaml"),
+        collection_config_sha256="b" * 64,
+        collection_config_file_sha256="c" * 64,
+        deployment_configuration_sha256="d" * 64,
+        research_archive_root_identity=runner.PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY,
+        candidate_authority_path=candidate_directory / "candidate.json",
+        candidate_authority_sha256="a" * 64,
+        environment="current_runtime",
+        trust_root_id="market-aligner-current-runtime-non-release-v1",
+        freshness_provenance="local_system_utc",
+    )
+    observed: dict[str, object] = {}
+    expected = object()
+    monkeypatch.setattr(
+        runner,
+        "installed_current_runtime_handoff_deployment",
+        lambda **kwargs: deployment,
+    )
+    monkeypatch.setattr(runner, "_validate_deployment_roots", lambda _value: None)
+    monkeypatch.setattr(
+        runner,
+        "installed_production_current_time_witness",
+        lambda: (_ for _ in ()).throw(AssertionError("production witness used")),
+    )
+
+    def build(**kwargs):
+        observed.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(
+        runner, "_build_production_handoff_from_authenticated_time", build
+    )
+    result = runner.run_production_handoff(
+        profile_id="prf_" + "1" * 32,
+        track="software-engineering",
+        source_job_key="workable:cogna:847CFBC5F4",
+        current_runtime_config_path="/private/config.json",
+        current_runtime_config_sha256="e" * 64,
+        current_runtime_private_root="/private",
+    )
+    assert result is expected
+    assert observed["deployment"].environment == "current_runtime"
+    assert observed["freshness_time"].tzinfo == timezone.utc
+
+
+def test_current_runtime_receipt_document_is_distinct_and_nonrelease() -> None:
+    production_receipt = production_module.ProductionHandoffReceipt(
+        source_job_key="source",
+        handoff_job_key="handoff",
+        application_id="application",
+        handoff_root_sha256="a" * 64,
+        source_record_sha256="b" * 64,
+        manifest_sha256="c" * 64,
+        bundle_path=Path("/private/bundle"),
+        canonical_vacancy_metadata_sha256="d" * 64,
+        canonical_vacancy_object_sha256="e" * 64,
+        research_semantic_receipt_sha256="f" * 64,
+        research_receipt_file_sha256="1" * 64,
+        research_archive_root_identity=runner.PRODUCTION_RESEARCH_ARCHIVE_ROOT_IDENTITY,
+        research_vacancy_snapshot_sha256="2" * 64,
+        source_content_sha256="3" * 64,
+        processing_promotion_sha256="4" * 64,
+        employer_dossier_sha256="5" * 64,
+        execution_receipt_path=Path("/private/receipt.json"),
+        execution_receipt_sha256="6" * 64,
+    )
+    assert production_receipt.document()["schema_version"] == (
+        "market-aligner.production-handoff-receipt.v2"
+    )
+    current_receipt = replace(
+        production_receipt,
+        environment="current_runtime",
+        trust_root_id="market-aligner-current-runtime-non-release-v1",
+        freshness_provenance="local_system_utc",
+    ).document()
+    assert current_receipt["schema_version"] == (
+        "market-aligner.current-runtime-handoff-receipt.v1"
+    )
+    assert current_receipt["environment"] == "current_runtime"
+    assert current_receipt["trust_root_id"] == (
+        "market-aligner-current-runtime-non-release-v1"
+    )
+    assert current_receipt["freshness_provenance"] == "local_system_utc"
+    assert current_receipt["release_authority"] is False
+    assert current_receipt["release_token_issued"] is False
+    assert current_receipt["submission_authority"] is False

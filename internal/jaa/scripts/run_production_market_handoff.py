@@ -23,11 +23,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile-id", required=True)
     parser.add_argument("--track", required=True)
     parser.add_argument("--source-job-key", required=True)
+    parser.add_argument("--current-runtime-config-path")
+    parser.add_argument("--current-runtime-config-sha256")
+    parser.add_argument("--current-runtime-private-root")
     args = parser.parse_args(argv)
     receipt = run_production_handoff(
         profile_id=args.profile_id,
         track=args.track,
         source_job_key=args.source_job_key,
+        current_runtime_config_path=args.current_runtime_config_path,
+        current_runtime_config_sha256=args.current_runtime_config_sha256,
+        current_runtime_private_root=args.current_runtime_private_root,
     )
     sys.stdout.buffer.write(canonical_json_bytes(receipt.document()) + b"\n")
     return 0

@@ -216,7 +216,7 @@ def write_protected_handoff_bundle(
     Replaying identical inputs returns the existing immutable directory.
     """
 
-    if environment not in {"production", "synthetic"}:
+    if environment not in {"production", "synthetic", "current_runtime"}:
         raise HandoffProducerError("bundle environment is unsupported")
     if not references:
         raise HandoffProducerError("bundle requires typed reference objects")
@@ -324,7 +324,11 @@ def write_protected_handoff_bundle(
         "producer_commit_sha": producer_commit,
         "producer_product": "market-aligner",
         "source_record_sha256": source_record_sha,
-        "trust_mode": "protected_local_outbox",
+        "trust_mode": (
+            "current_runtime_non_release"
+            if environment == "current_runtime"
+            else "protected_local_outbox"
+        ),
         "trust_root_id": trust_root_id,
     }
     context = dict(context_basis)

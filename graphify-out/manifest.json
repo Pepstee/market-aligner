@@ -3744,9 +3744,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/research/store.py": {
-    "mtime": 1791256113.6237836,
-    "seen": 1791257441.395005,
-    "ast_hash": "086a210b2a83e953b5fa0022ddd23e48",
+    "mtime": 1791283511.6033394,
+    "seen": 1791283939.8572242,
+    "ast_hash": "1036375bca4f1776b8086dd8fcce8d16",
     "semantic_hash": ""
   },
   "src/market_aligner/research/worker.py": {
@@ -4026,9 +4026,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_handoff_runner.py": {
-    "mtime": 1791253543.0198352,
-    "seen": 1791253826.2874615,
-    "ast_hash": "143fe7e4adef99c2db2552e84108d7ab",
+    "mtime": 1791282994.7433572,
+    "seen": 1791283320.776451,
+    "ast_hash": "3da2a7eb0fb59702ab95b4f38ba66638",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_preparation_runner.py": {
@@ -4128,9 +4128,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/scripts/run_production_market_handoff.py": {
-    "mtime": 1788246507.3064437,
-    "seen": 1790775868.5200922,
-    "ast_hash": "ab814f23da213cee377dd032ad8739b8",
+    "mtime": 1791282918.0513625,
+    "seen": 1791283320.7767022,
+    "ast_hash": "048b8bc026d7d7ecc2b08b67ab9ac30b",
     "semantic_hash": ""
   },
   "internal/jaa/test_authority_provisioning.py": {
@@ -4212,9 +4212,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_production_handoff_runner.py": {
-    "mtime": 1791253543.0558352,
-    "seen": 1791253826.2879143,
-    "ast_hash": "ff6dedd4589db2ffc31e286a8bc27ac3",
+    "mtime": 1791283052.2073555,
+    "seen": 1791283320.7768826,
+    "ast_hash": "90b654550f2adee0791e564f3a395acd",
     "semantic_hash": ""
   },
   "internal/jaa/test_production_operational_surfaces.py": {
@@ -4260,15 +4260,15 @@
     "semantic_hash": ""
   },
   "src/market_aligner/applications/producer.py": {
-    "mtime": 1790113918.033165,
-    "seen": 1790775868.5203168,
-    "ast_hash": "5d9883c0bc3089752d9a8397180440fd",
+    "mtime": 1791282896.0513606,
+    "seen": 1791283320.7769125,
+    "ast_hash": "0346609cc4e14ae7036aeba9794b1adc",
     "semantic_hash": ""
   },
   "src/market_aligner/applications/production_handoff.py": {
-    "mtime": 1791269127.6755645,
-    "seen": 1791269554.1433864,
-    "ast_hash": "c280eb9a3d89e0f6feed0ce89537bb17",
+    "mtime": 1791282896.0153606,
+    "seen": 1791283320.7769132,
+    "ast_hash": "f69f7aac7cfd1d03dfa51326d7064901",
     "semantic_hash": ""
   },
   "src/market_aligner/assessment/geography.py": {
@@ -4302,9 +4302,9 @@
     "semantic_hash": ""
   },
   "tests/test_production_handoff.py": {
-    "mtime": 1790113918.049165,
-    "seen": 1790775868.5204277,
-    "ast_hash": "0ba0ac2abf3b175811953f9c3703b930",
+    "mtime": 1791283511.6433394,
+    "seen": 1791283939.8572702,
+    "ast_hash": "5364abce5ca5aa96edb0e2715d882e06",
     "semantic_hash": ""
   },
   "tests/test_public_research_provider.py": {
@@ -4518,9 +4518,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_review_material_accessor_contract.py": {
-    "mtime": 1790113918.033165,
-    "seen": 1790775868.5202944,
-    "ast_hash": "00bc2e0387ee3cf66a42848642c23262",
+    "mtime": 1791283081.2393553,
+    "seen": 1791283320.7768905,
+    "ast_hash": "efc7fe226ddfee5944e18e31f5adc914",
     "semantic_hash": ""
   },
   "internal/jaa/test_runtime_compatibility.py": {
