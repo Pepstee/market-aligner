@@ -404,7 +404,9 @@ def test_runtime_rejects_backend_with_history_access() -> None:
         run_editorial_composition_runtime(request, runtime=runtime)
 
 
-def _detached_adapter(tmp_path, draft, *, stage="resume_writer"):
+def _detached_adapter(
+    tmp_path, draft, *, stage="resume_writer", allow_missing_city=False
+):
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / f"codex-{stage}"
     binary.write_bytes(f"synthetic {stage} codex binary".encode())
@@ -420,6 +422,7 @@ def _detached_adapter(tmp_path, draft, *, stage="resume_writer"):
             "OPENAI_API_KEY": "must-not-cross",
             "CANDIDATE_SECRET": "must-not-cross",
         },
+        allow_missing_city=allow_missing_city,
     ), binary, draft
 
 
@@ -746,6 +749,89 @@ def test_current_runtime_allows_only_authority_bound_absent_city() -> None:
                 allow_missing_city=True,
             ),
         )
+
+
+def test_detached_adapter_city_mode_is_stage_scoped_and_preserves_legacy_identity(
+    tmp_path,
+) -> None:
+    _, draft, _ = _fixture()
+    for stage in (
+        "resume_writer",
+        "humanizer",
+        "cover_letter_writer",
+        "cover_letter_humanizer",
+    ):
+        for requested_mode in (False, True):
+            adapter, binary, _ = _detached_adapter(
+                tmp_path / stage / str(requested_mode),
+                draft,
+                stage=stage,
+                allow_missing_city=requested_mode,
+            )
+            expected_mode = requested_mode and stage in {
+                "resume_writer",
+                "humanizer",
+            }
+            assert adapter.allow_missing_city is expected_mode
+
+            expected_identity = {
+                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "cli_contract_sha256": editorial_module.content_hash(
+                    {
+                        "environment": "synthetic",
+                        "executable_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                    }
+                ),
+                "cwd_policy": "fresh-request-material-only",
+                "disabled_features": list(editorial_module._DISABLED_CODEX_FEATURES),
+                "environment_names": sorted(
+                    editorial_module._scrubbed_codex_environment(
+                        adapter.process_environment
+                    )
+                ),
+                "ignore_project_rules": True,
+                "model": "gpt-5.6-sol",
+                "network_tools_enabled": False,
+                "project_doc_max_bytes": 0,
+                "provider": editorial_module.EDITORIAL_PROVIDER_IDENTITY,
+                "response_schema_sha256": editorial_module.content_hash(
+                    adapter._response_schema
+                ),
+                "sandbox": "read-only",
+                "single_attempt": True,
+                "stage": stage,
+                "timeout_seconds": 120.0,
+                "output_path_policy": "fresh-response-directory-only",
+            }
+            if expected_mode:
+                null_city_schema = editorial_module.editorial_city_response_schema(
+                    dict(adapter._response_schema),
+                    authority_city=None,
+                    allow_missing_city=True,
+                )
+                expected_identity.update(
+                    {
+                        "allow_missing_city": True,
+                        "null_city_response_schema_sha256": editorial_module.content_hash(
+                            null_city_schema
+                        ),
+                    }
+                )
+            assert adapter.transport_identity == editorial_module.content_hash(
+                expected_identity
+            )
+
+
+def test_editorial_city_mode_rejects_non_exact_stage_and_flag_types() -> None:
+    class StageSubclass(str):
+        pass
+
+    for stage, flag in (
+        (StageSubclass("resume_writer"), True),
+        ("resume_writer", 1),
+    ):
+        with pytest.raises(EditorialCompositionError, match="invalid editorial city mode"):
+            editorial_module.effective_editorial_city_mode(stage, flag)
 
 
 def test_graduation_day_and_wrong_dissertation_are_rejected() -> None:

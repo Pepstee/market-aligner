@@ -1,11 +1,11 @@
 {
   "community_count": 29688,
-  "edge_count": 76039,
-  "node_count": 57235,
+  "edge_count": 76054,
+  "node_count": 57239,
   "outputs": {
     ".graphify_labels.json": "958acceca6590be59b5abe496d1da2b771cde8a75bf348c766f377db451ecf62",
     "GRAPH_REPORT.md": "ce27e7ebb64972e1172f0ab3a8534c993e4bc4efc932459e785b9017967fc201",
-    "graph.json": "a81701695d11bb8964a0ba170f9321bcf1590e48eae55f539dcd0f6e8de24056"
+    "graph.json": "a4107c3b224f7530ab84e6e0f46b972ca262134e8d4a106d6dbdaf7d35059ee1"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "d9bc48ce3305ba43add1b84a1d5ab17d30bcf0c5",
+  "source_base_commit": "c6e09673d96f85fbaa7b0d6e2562992c08655b6d",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -232,7 +232,7 @@
     "internal/jaa/cv_generation/benchmark_learning.py": "f50cfaca4eb54046c9dfe91ca0452a1f893852a842c759f715cf63d9671bff30",
     "internal/jaa/cv_generation/constraints.py": "fe822acb7502183db47361b108549080315b5ed0410bad5595d2779981e1d4cc",
     "internal/jaa/cv_generation/document_quality.py": "871734dce186ac773f9d5b468506e1e73963f560958502b1e9c8be9579fc21aa",
-    "internal/jaa/cv_generation/editorial_composition.py": "ce7b3a5eb09e1b0a6a994c75ff384d0c664d2caa82b74333c6d7f9343ded2440",
+    "internal/jaa/cv_generation/editorial_composition.py": "047231b954d46424d861a66e66c7f75e702f36b6ced8dcc1862c5f9c40c04c75",
     "internal/jaa/cv_generation/service.py": "d297f3a9be82c57c775117b4feef9d79915ed51a184ef8063c66a81514c16fd8",
     "internal/jaa/docs/APPLICATION_SANITY_REVIEW.md": "24063e6959ec9c58870d6e793e55f209edc1cb2d44fdfbdb7749f3f396b03dda",
     "internal/jaa/docs/AUTONOMOUS_CAREER_PIPELINE.md": "6bab386a619fe56dc01d8f0865f5d0e98624d2f245cf40d43615ff4eb8d3c627",
@@ -515,7 +515,7 @@
     "internal/jaa/test_cv_benchmark_learning.py": "8d5851cc6c2a7505ff94e612e788c290c3f5582bde481a109097d507537cb4c4",
     "internal/jaa/test_cv_composition_service.py": "e100fde9f4c1f7ecd45e192450c533f9f0d5e24567d29c0f9456760f8087a721",
     "internal/jaa/test_cv_document_quality.py": "4f10d6a2317a5dbf8a13dfeff7f54071de7b5ed2ffaa94acb67091d58affdd8f",
-    "internal/jaa/test_cv_editorial_composition.py": "15d1403b2d9f28084c5d7451844507aa1faebdd8844a528215f7eb66ee3e4652",
+    "internal/jaa/test_cv_editorial_composition.py": "32dede6b4ec7e63a80f902646fe3128694d97e330155710b77473f5e60c20892",
     "internal/jaa/test_cv_generation_constraints.py": "357491d63f0aec06588fe1c51bd5fc1af6ba80f0fa245e4c4b3992ea35330b5d",
     "internal/jaa/test_cv_import_order.py": "b24016df69f119b9083bde3cff86c57012bfc27e38e23e54fc23f79479e0a90a",
     "internal/jaa/test_discover_live_vacancies.py": "3fb0b3383869b4767f7b513554f1351a5b997c2842e78bc6233d47f9115a44ea",

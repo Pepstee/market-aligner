@@ -39,6 +39,7 @@ COMPOSITION_RECEIPT_SCHEMA = "jaa.cv-editorial-composition-receipt.v1"
 COVER_LETTER_COMPOSITION_RECEIPT_SCHEMA = "jaa.cover-letter-editorial-composition-receipt.v3"
 EDITORIAL_PROVIDER_IDENTITY = "openai-codex-cli"
 _EDITORIAL_STAGES = frozenset({"resume_writer", "humanizer", "cover_letter_writer", "cover_letter_humanizer"})
+_COVER_LETTER_STAGES = frozenset({"cover_letter_writer", "cover_letter_humanizer"})
 
 _ENV_ALLOWLIST = frozenset(
     {
@@ -360,6 +361,43 @@ def editorial_city_response_schema(
     if allow_missing_city and authority_city is None:
         schema["properties"]["candidate_city"] = {"type": "null"}
     return schema
+
+
+def effective_editorial_city_mode(
+    stage: object, allow_missing_city: object = False
+) -> bool:
+    if (
+        type(stage) is not str
+        or stage not in _EDITORIAL_STAGES
+        or type(allow_missing_city) is not bool
+    ):
+        raise EditorialCompositionError("invalid editorial city mode")
+    if stage in _COVER_LETTER_STAGES:
+        return False
+    return allow_missing_city
+
+
+def editorial_city_transport_extensions(
+    stage: object,
+    allow_missing_city: object,
+    response_schema: object,
+    *,
+    schema_hasher,
+    city_schema_adapter,
+) -> dict[str, object]:
+    if not effective_editorial_city_mode(stage, allow_missing_city):
+        return {}
+    if type(response_schema) is not dict:
+        raise EditorialCompositionError("invalid editorial city mode")
+    adapted_schema = city_schema_adapter(
+        copy.deepcopy(response_schema),
+        authority_city=None,
+        allow_missing_city=True,
+    )
+    return {
+        "allow_missing_city": True,
+        "null_city_response_schema_sha256": schema_hasher(adapted_schema),
+    }
 
 
 @dataclass(frozen=True)
@@ -1813,7 +1851,7 @@ class DetachedCodexEditorialAdapter:
         codex_binary_fd: int | None = None,
         allow_missing_city: bool = False,
     ) -> None:
-        if stage not in _EDITORIAL_STAGES:
+        if type(stage) is not str or stage not in _EDITORIAL_STAGES:
             raise EditorialCompositionError("editorial Codex adapter stage is invalid")
         if environment not in {"production", "synthetic"}:
             raise EditorialCompositionError("editorial Codex environment is invalid")
@@ -1821,9 +1859,9 @@ class DetachedCodexEditorialAdapter:
         self.model = _required(model, "editorial Codex model")
         self.codex_binary = _required(codex_binary, "editorial Codex binary")
         self.environment = environment
-        if type(allow_missing_city) is not bool:
-            raise EditorialCompositionError("editorial city mode is invalid")
-        self.allow_missing_city = allow_missing_city
+        self.allow_missing_city = effective_editorial_city_mode(
+            stage, allow_missing_city
+        )
         self.process_environment = dict(
             os.environ if process_environment is None else process_environment
         )
@@ -1858,41 +1896,34 @@ class DetachedCodexEditorialAdapter:
                 }
             )
         scrubbed = _scrubbed_codex_environment(self.process_environment)
-        self.transport_identity = content_hash(
-            {
-                "binary_sha256": self.executable_sha256,
-                "cli_contract_sha256": self.cli_contract_sha256,
-                "cwd_policy": "fresh-request-material-only",
-                "disabled_features": list(_DISABLED_CODEX_FEATURES),
-                "environment_names": sorted(scrubbed),
-                "ignore_project_rules": True,
-                "model": self.model,
-                "allow_missing_city": self.allow_missing_city,
-                "network_tools_enabled": False,
-                "project_doc_max_bytes": 0,
-                "provider": self.provider,
-                "response_schema_sha256": content_hash(self._response_schema),
-                **(
-                    {
-                        "allow_missing_city": True,
-                        "null_city_response_schema_sha256": content_hash(
-                            editorial_city_response_schema(
-                                dict(self._response_schema),
-                                authority_city=None,
-                                allow_missing_city=True,
-                            )
-                        ),
-                    }
-                    if self.allow_missing_city
-                    else {}
-                ),
-                "sandbox": "read-only",
-                "single_attempt": True,
-                "stage": self.stage,
-                "timeout_seconds": self.timeout_seconds,
-                "output_path_policy": "fresh-response-directory-only",
-            }
+        transport_identity = {
+            "binary_sha256": self.executable_sha256,
+            "cli_contract_sha256": self.cli_contract_sha256,
+            "cwd_policy": "fresh-request-material-only",
+            "disabled_features": list(_DISABLED_CODEX_FEATURES),
+            "environment_names": sorted(scrubbed),
+            "ignore_project_rules": True,
+            "model": self.model,
+            "network_tools_enabled": False,
+            "project_doc_max_bytes": 0,
+            "provider": self.provider,
+            "response_schema_sha256": content_hash(self._response_schema),
+            "sandbox": "read-only",
+            "single_attempt": True,
+            "stage": self.stage,
+            "timeout_seconds": self.timeout_seconds,
+            "output_path_policy": "fresh-response-directory-only",
+        }
+        transport_identity.update(
+            editorial_city_transport_extensions(
+                self.stage,
+                self.allow_missing_city,
+                dict(self._response_schema),
+                schema_hasher=content_hash,
+                city_schema_adapter=editorial_city_response_schema,
+            )
         )
+        self.transport_identity = content_hash(transport_identity)
 
     @property
     def _response_schema(self) -> Mapping[str, object]:
