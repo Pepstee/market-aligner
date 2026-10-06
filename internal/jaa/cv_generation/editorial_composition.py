@@ -388,6 +388,79 @@ class EditorialCompositionError(ValueError):
     """An editorial draft is not admissible against candidate authority."""
 
 
+_COVER_CLAIM_SECTIONS = ("Opening", "Evidence Match", "Company Fit")
+_COVER_CLAIM_ROW_KEYS = frozenset({"claim_id", "fact_kind", "section_heading"})
+
+
+def _cover_claim_policy_string(value: object) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError("invalid cover claim policy")
+    return value
+
+
+def cover_claim_section_policy(
+    *, current_runtime: bool = False
+) -> dict[str, frozenset[str]]:
+    if type(current_runtime) is not bool:
+        raise ValueError("invalid cover claim policy")
+    if current_runtime:
+        sections = frozenset(_COVER_CLAIM_SECTIONS)
+        return {"candidate": frozenset(sections), "employer": frozenset(sections)}
+    return {
+        "candidate": frozenset({"Evidence Match"}),
+        "employer": frozenset({"Opening", "Company Fit"}),
+    }
+
+
+def cover_claim_requirements(
+    rows: object, *, current_runtime: bool = False
+) -> dict[str, object]:
+    policy = cover_claim_section_policy(current_runtime=current_runtime)
+    if type(rows) not in (list, tuple) or not rows:
+        raise ValueError("invalid cover claim policy")
+    seen: set[str] = set()
+    counts = dict.fromkeys(_COVER_CLAIM_SECTIONS, 0)
+    has_candidate = False
+    for row in rows:
+        if (
+            type(row) is not dict
+            or any(type(key) is not str for key in row)
+            or frozenset(row) != _COVER_CLAIM_ROW_KEYS
+        ):
+            raise ValueError("invalid cover claim policy")
+        kind = _cover_claim_policy_string(row["fact_kind"])
+        heading = _cover_claim_policy_string(row["section_heading"])
+        claim_id = _cover_claim_policy_string(row["claim_id"])
+        if kind not in policy or heading not in policy[kind] or claim_id in seen:
+            raise ValueError("invalid cover claim policy")
+        seen.add(claim_id)
+        counts[heading] += 1
+        has_candidate = has_candidate or kind == "candidate"
+    if current_runtime and not has_candidate:
+        raise ValueError("invalid cover claim policy")
+    if not current_runtime:
+        return {
+            "section_min_facts": dict.fromkeys(_COVER_CLAIM_SECTIONS, 1),
+            "require_employer_hook": True,
+            "require_company_fit_employer": True,
+            "require_all_bound_claims": False,
+        }
+    return {
+        "section_min_facts": {
+            section: 1 if counts[section] else 0
+            for section in _COVER_CLAIM_SECTIONS
+        },
+        "require_employer_hook": False,
+        "require_company_fit_employer": False,
+        "require_all_bound_claims": True,
+    }
+
+
 def _required(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise EditorialCompositionError(f"{label} is absent or malformed")
@@ -1039,10 +1112,7 @@ class ApprovedCoverLetterClaim:
             raise EditorialCompositionError("cover-letter claim lacks evidence identities")
         if len(set(self.evidence_ids)) != len(self.evidence_ids):
             raise EditorialCompositionError("cover-letter claim repeats evidence identities")
-        expected = {
-            "candidate": {"Evidence Match"},
-            "employer": {"Opening", "Company Fit"},
-        }
+        expected = cover_claim_section_policy(current_runtime=True)
         if (
             self.fact_kind not in expected
             or self.section_heading not in expected[self.fact_kind]
@@ -1085,6 +1155,20 @@ class CoverLetterEditorialRequest:
         identifiers = tuple(claim.claim_id for claim in self.approved_claims)
         if len(set(identifiers)) != len(identifiers):
             raise EditorialCompositionError("cover-letter request repeats claim identities")
+        try:
+            cover_claim_requirements(
+                [
+                    {
+                        "claim_id": claim.claim_id,
+                        "fact_kind": claim.fact_kind,
+                        "section_heading": claim.section_heading,
+                    }
+                    for claim in self.approved_claims
+                ],
+                current_runtime=self.authority.current_runtime,
+            )
+        except ValueError:
+            raise EditorialCompositionError("cover-letter claim policy is invalid") from None
         _digest(self.request_sha256, "cover-letter request hash")
         if self.request_sha256 != content_hash(self.document(include_identity=False)):
             raise EditorialCompositionError("cover-letter request identity is invalid")
@@ -1216,13 +1300,25 @@ def validate_cover_letter_editorial_draft(
             "cover letter exceeds the deterministic UK one-page proxy"
         )
 
+    requirements = cover_claim_requirements(
+        [
+            {
+                "claim_id": claim.claim_id,
+                "fact_kind": claim.fact_kind,
+                "section_heading": claim.section_heading,
+            }
+            for claim in request.approved_claims
+        ],
+        current_runtime=request.authority.current_runtime,
+    )
+    section_min_facts = requirements["section_min_facts"]
     rhetorical_catalog = _cover_letter_rhetorical_catalog(request)
     opening = draft.sections[0]
     required_salutation = EditorialAtom(
         "connective", COVER_LETTER_SALUTATION, None
     )
     if (
-        len(opening.atoms) < 3
+        len(opening.atoms) < 2 + section_min_facts["Opening"]
         or opening.atoms[0] != required_salutation
         or opening.atoms[1].source_kind != "connective"
         or opening.atoms[1].text not in rhetorical_catalog["Opening"][1:]
@@ -1236,7 +1332,7 @@ def validate_cover_letter_editorial_draft(
             value for value in draft.sections if value.heading == section_heading
         )
         if (
-            len(section.atoms) < 2
+            len(section.atoms) < 1 + section_min_facts[section_heading]
             or section.atoms[0].source_kind != "connective"
             or section.atoms[0].text not in rhetorical_catalog[section_heading]
             or any(atom.source_kind != "approved_claim" for atom in section.atoms[1:])
@@ -1289,22 +1385,28 @@ def validate_cover_letter_editorial_draft(
             factual_span_seen = True
     if len(set(used)) != len(used):
         raise EditorialCompositionError("cover-letter draft repeats an approved claim")
+    if requirements["require_all_bound_claims"] and set(used) != set(approved):
+        raise EditorialCompositionError("cover-letter draft omits an approved claim")
     used_claims = [approved[value] for value in used]
     evidence_claims = [
         claim for claim in used_claims if claim.section_heading == "Evidence Match"
     ]
-    if not evidence_claims or any(
-        claim.fact_kind != "candidate" for claim in evidence_claims
+    if not requirements["require_all_bound_claims"] and (
+        not evidence_claims
+        or any(claim.fact_kind != "candidate" for claim in evidence_claims)
     ):
         raise EditorialCompositionError("cover letter lacks candidate evidence")
     opening_claims = [
         claim for claim in used_claims if claim.section_heading == "Opening"
     ]
-    if not opening_claims or not any(
-        claim.fact_kind == "employer"
-        and request.company_name.casefold() in claim.text.casefold()
-        and request.role_title.casefold() in claim.text.casefold()
-        for claim in opening_claims
+    if requirements["require_employer_hook"] and (
+        not opening_claims
+        or not any(
+            claim.fact_kind == "employer"
+            and request.company_name.casefold() in claim.text.casefold()
+            and request.role_title.casefold() in claim.text.casefold()
+            for claim in opening_claims
+        )
     ):
         raise EditorialCompositionError(
             "cover-letter opening lacks exact company and role hook evidence"
@@ -1312,8 +1414,11 @@ def validate_cover_letter_editorial_draft(
     company_fit_claims = [
         claim for claim in used_claims if claim.section_heading == "Company Fit"
     ]
-    if not company_fit_claims or any(
-        claim.fact_kind != "employer" for claim in company_fit_claims
+    if requirements["require_company_fit_employer"] and (
+        not company_fit_claims
+        or any(
+            claim.fact_kind != "employer" for claim in company_fit_claims
+        )
     ):
         raise EditorialCompositionError("cover letter lacks employer evidence in Company Fit")
 

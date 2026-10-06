@@ -193,6 +193,88 @@ def _fixture():
     return listing, request, claims, writer, final
 
 
+def _current_cover_fixture():
+    authority = CandidateEditorialAuthority(
+        candidate_name="Casey Test",
+        candidate_city="Leeds, United Kingdom",
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+        current_runtime=True,
+    )
+    claims = (
+        _claim(
+            "candidate-opening",
+            "Built a reproducible evidence review process.",
+            "candidate",
+            "Opening",
+        ),
+        _claim(
+            "employer-evidence",
+            "Example Systems describes evidence-led delivery.",
+            "employer",
+            "Evidence Match",
+        ),
+    )
+    request = build_cover_letter_editorial_request(
+        authority=authority,
+        role_title="Data Engineer",
+        company_name="Example Systems",
+        vacancy_sha256="b" * 64,
+        approved_claims=claims,
+    )
+    sections = (
+        CoverLetterSection(
+            "Opening",
+            (
+                EditorialAtom("connective", "Dear Hiring Manager,", None),
+                EditorialAtom(
+                    "connective",
+                    "The Data Engineer role at Example Systems caught my attention because of the work described in the vacancy.",
+                    None,
+                ),
+                EditorialAtom("approved_claim", claims[0].text, claims[0].claim_id),
+            ),
+        ),
+        CoverLetterSection(
+            "Evidence Match",
+            (
+                EditorialAtom(
+                    "connective", "The strongest relevant evidence is set out below.", None
+                ),
+                EditorialAtom("approved_claim", claims[1].text, claims[1].claim_id),
+            ),
+        ),
+        CoverLetterSection(
+            "Company Fit",
+            (
+                EditorialAtom(
+                    "connective",
+                    "My interest in Example Systems comes from the work described in the vacancy.",
+                    None,
+                ),
+            ),
+        ),
+        CoverLetterSection(
+            "Close",
+            (
+                EditorialAtom(
+                    "connective",
+                    "I would welcome the opportunity to discuss how this evidence could support Example Systems in this Data Engineer position.",
+                    None,
+                ),
+                EditorialAtom("connective", "Kind regards", None),
+                EditorialAtom("connective", authority.candidate_name, None),
+            ),
+        ),
+    )
+    draft = build_cover_letter_editorial_draft(
+        candidate_name=authority.candidate_name,
+        sections=sections,
+    )
+    return authority, claims, request, draft
+
+
 def _evidence(request, writer, final):
     return (
         EditorialStageEvidence(
@@ -392,6 +474,57 @@ def test_cover_letter_admission_rejects_claim_mutation_and_kolhoz_text() -> None
         match="forbidden em or en dash",
     ):
         validate_cover_letter_editorial_draft(request, kolhoz)
+
+
+def test_current_cover_letter_uses_bound_sections_and_exact_claims() -> None:
+    _, claims, request, draft = _current_cover_fixture()
+    validate_cover_letter_editorial_draft(request, draft)
+
+    omitted = build_cover_letter_editorial_draft(
+        candidate_name=draft.candidate_name,
+        sections=(
+            draft.sections[0],
+            replace(draft.sections[1], atoms=draft.sections[1].atoms[:1]),
+            *draft.sections[2:],
+        ),
+    )
+    with pytest.raises(EditorialCompositionError):
+        validate_cover_letter_editorial_draft(request, omitted)
+
+    duplicated = build_cover_letter_editorial_draft(
+        candidate_name=draft.candidate_name,
+        sections=(
+            replace(
+                draft.sections[0],
+                atoms=(*draft.sections[0].atoms, draft.sections[0].atoms[2]),
+            ),
+            *draft.sections[1:],
+        ),
+    )
+    with pytest.raises(EditorialCompositionError, match="repeats an approved claim"):
+        validate_cover_letter_editorial_draft(request, duplicated)
+
+    with pytest.raises(EditorialCompositionError, match="claim policy"):
+        build_cover_letter_editorial_request(
+            authority=request.authority,
+            role_title=request.role_title,
+            company_name=request.company_name,
+            vacancy_sha256=request.vacancy_sha256,
+            approved_claims=(claims[1],),
+        )
+
+
+def test_current_cover_letter_pairs_remain_invalid_in_legacy_mode() -> None:
+    authority, claims, _, _ = _current_cover_fixture()
+    legacy_authority = replace(authority, current_runtime=False)
+    with pytest.raises(EditorialCompositionError, match="claim policy"):
+        build_cover_letter_editorial_request(
+            authority=legacy_authority,
+            role_title="Data Engineer",
+            company_name="Example Systems",
+            vacancy_sha256="b" * 64,
+            approved_claims=claims,
+        )
 
 
 @pytest.mark.parametrize(
