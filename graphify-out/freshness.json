@@ -1,11 +1,11 @@
 {
-  "community_count": 30076,
-  "edge_count": 73851,
-  "node_count": 56672,
+  "community_count": 30055,
+  "edge_count": 73861,
+  "node_count": 56674,
   "outputs": {
-    ".graphify_labels.json": "a0a38f74a122d265e28eb433ad5187e4be776d4f510bb9511f528d8048094c4d",
-    "GRAPH_REPORT.md": "7114c4ba40a974c318641468f3a1eba59e5270a2b90700aca23898d2a0dc9053",
-    "graph.json": "cf84e7f2bc0a6faaa164bdae456226f0b45957709885996640ff6352afc0768c"
+    ".graphify_labels.json": "20575e7d1541c9f9b4e9529f58fb6d1f7667f8a6b203c97321be758ece96a337",
+    "GRAPH_REPORT.md": "1d74cbbb04ab18bd17dcd71d85ac838719215eb8facf1c1214d3e68897e5e7fe",
+    "graph.json": "7bae281c80cd61e5f921bacd908db4547f2ea5ae6ba47e61451c285f01fd720e"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "021feb25e4664d53b03c59e6bb144c8c9cab2e8c",
+  "source_base_commit": "3f050b82b98d9c81c30f2863046458af658c90dd",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -779,7 +779,7 @@
     "src/market_aligner/profiler/intent.py": "87aceccbf7e6908ef7bcd9324f7aee57b144f1a6e8294ae16ce7a1a3ffb2a635",
     "src/market_aligner/profiler/intent_store.py": "8d07195c78e12ddc8b070bc1d8cb7625f8ce4c15a9fec9b0679c0146e5394675",
     "src/market_aligner/profiler/schema.py": "616c748948f21d90c9abd082fb3f3f27467a5088a3a6bd97fb7bb972e18a4dc4",
-    "src/market_aligner/profiler/store.py": "9bdf27d009c27efdb1f7b1bfb6299f8a05550386cf02f7b5349c2c9b4e9d2b38",
+    "src/market_aligner/profiler/store.py": "a39a815a563e863b7ccc429aac670091e6e66d3c72787dc8aebf49941d3f704d",
     "src/market_aligner/reporting/__init__.py": "a7b59bb4b646a774a2e9065dc3f88d0b98b5565f492e6855054e7d9df2533a4e",
     "src/market_aligner/reporting/reports.py": "2e8ba39a61b6a87f9aa6109257935a9028848a02d2a2230dcd8e3cab0d38574c",
     "src/market_aligner/research/__init__.py": "6a320135063517a4f219fbd4a11f3b9807631a46428f7bc5ab70d2e0bf457d2e",
@@ -834,7 +834,7 @@
     "tests/test_privacy.py": "1db78024b79b6109a53a9654ac8c15ddc9e29da702a5ab1e7c95ea26ee9bf164",
     "tests/test_process_one.py": "5395adf6a05df3354dcd1b58fdb4a9ed9a9903d85e928b569d46ca72519c0e97",
     "tests/test_production_handoff.py": "ae08be16b36ecc4039ccce2b2492e900e7ed1805ba563991679014014d030bde",
-    "tests/test_profiles.py": "91001da9e021af41dd79ae027fe2b13e6e67d9a160ec72a5a8f16344230ec212",
+    "tests/test_profiles.py": "14a21fc1018c44ba4220bbd8eb080b44212bd15a720c614a779264370afdf5bc",
     "tests/test_public_research_provider.py": "0eebc9a2ff0d6e24ec8028d998d2199b74a478050d99472cfbd045e160c8623c",
     "tests/test_reporting.py": "f4ad41784913efcf702d05a5280c0ff9b7e5ab92522328ee740a486c807935a3",
     "tests/test_research_worker.py": "9dd7b6f0d3bd6d11153ca76539e30ba5633ac4b72eb01510d93b9d9b01c18586",

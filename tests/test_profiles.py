@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -54,6 +54,46 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual([profile.profile_id], store.list_profile_ids())
             self.assertTrue(
                 str(store.directory(profile.profile_id)).startswith(str(Path(temporary).resolve()))
+            )
+
+    def test_store_load_normalizes_yaml_dates_without_rewriting_generation(self) -> None:
+        profile = CandidateProfile(
+            profile_id=new_profile_id(),
+            version="v1",
+            tracks={
+                "automation": TrackProfile(
+                    interest=1,
+                    demonstrated_skill=1,
+                    confidence=0.5,
+                    market_readiness=1,
+                )
+            },
+            constraints={
+                "reviewed_on": date(2026, 10, 6),
+                "reviewed_at": datetime(2026, 10, 6, 12, 30, tzinfo=timezone.utc),
+                "enabled": True,
+                "count": 3,
+            },
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = ProfileStore(temporary)
+            store.save(profile, [])
+            directory = store.directory(profile.profile_id)
+            committed_names = ("profile.yaml", "evidence.jsonl", "generation.json")
+            before = {name: directory.joinpath(name).read_bytes() for name in committed_names}
+
+            loaded, evidence = store.load(profile.profile_id)
+
+            self.assertEqual({}, evidence)
+            self.assertEqual("2026-10-06", loaded.constraints["reviewed_on"])
+            self.assertEqual(
+                "2026-10-06T12:30:00+00:00", loaded.constraints["reviewed_at"]
+            )
+            self.assertIs(loaded.constraints["enabled"], True)
+            self.assertEqual(3, loaded.constraints["count"])
+            self.assertEqual(
+                before,
+                {name: directory.joinpath(name).read_bytes() for name in committed_names},
             )
 
     def test_missing_evidence_is_rejected(self) -> None:

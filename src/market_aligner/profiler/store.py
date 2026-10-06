@@ -13,6 +13,7 @@ classification as the sole recovery authority. Readers never write.
 from __future__ import annotations
 
 import errno as _errno
+import datetime
 import fcntl
 import hashlib
 import json
@@ -568,6 +569,18 @@ def _open_profile_chain(
         raise
 
 
+def _normalize_profile_dates(value: Any) -> Any:
+    if isinstance(value, datetime.datetime):
+        return value.isoformat()
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _normalize_profile_dates(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_profile_dates(item) for item in value]
+    return value
+
+
 def _parse_profile_content(
     profile_id: str, profile_bytes: bytes, evidence_bytes: bytes
 ) -> tuple[CandidateProfile, dict[str, EvidenceItem], list[EvidenceItem]]:
@@ -576,6 +589,7 @@ def _parse_profile_content(
         raise ValueError("profile.yaml root must be a mapping")
     if payload.get("profile_id") != profile_id:
         raise ValueError("profile.yaml binds a different profile_id")
+    payload = _normalize_profile_dates(payload)
     payload["tracks"] = {
         name: TrackProfile(
             **{
