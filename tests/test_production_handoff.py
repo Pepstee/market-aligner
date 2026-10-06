@@ -1746,24 +1746,37 @@ def test_published_handoff_registry_is_exact_replayable_and_immutable(tmp_path):
     store._record_published_handoff(handoff.exact_bytes, receipt)
     reopened = AssessmentStore(store.path)
     reopened._record_published_handoff(handoff.exact_bytes, receipt)
+    current_handoff = encode_current_runtime_handoff_v1(
+        _synthetic_current_runtime_handoff_payload(unknown_mode=True)
+    )
     current_basis = {
         **basis,
         "schema_version": "market-aligner.current-runtime-handoff-execution.v1",
+        "application_id": current_handoff.application_id,
+        "handoff_root_sha256": current_handoff.root_sha256,
         "environment": "current_runtime",
         "trust_root_id": "market-aligner-current-runtime-non-release-v1",
         "freshness_provenance": "local_system_utc",
         "release_authority": False,
     }
     current_receipt = exact(current_basis)
-    reopened._record_published_handoff(handoff.exact_bytes, current_receipt)
-    reopened._record_published_handoff(handoff.exact_bytes, current_receipt)
+    reopened._record_published_handoff(
+        current_handoff.exact_bytes,
+        current_receipt,
+        current_runtime=True,
+    )
+    reopened._record_published_handoff(
+        current_handoff.exact_bytes,
+        current_receipt,
+        current_runtime=True,
+    )
     with reopened.connection() as connection:
         rows = connection.execute("SELECT * FROM published_application_handoffs").fetchall()
         assert len(rows) == 2
         legacy_row = next(row for row in rows if bytes(row["execution_receipt_bytes"]) == receipt)
         current_row = next(row for row in rows if bytes(row["execution_receipt_bytes"]) == current_receipt)
         assert bytes(legacy_row["handoff_exact_bytes"]) == handoff.exact_bytes
-        assert bytes(current_row["handoff_exact_bytes"]) == handoff.exact_bytes
+        assert bytes(current_row["handoff_exact_bytes"]) == current_handoff.exact_bytes
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
             connection.execute("DELETE FROM published_application_handoffs")
     for changes in ({"application_id": "app_" + "a" * 64},
@@ -1771,9 +1784,26 @@ def test_published_handoff_registry_is_exact_replayable_and_immutable(tmp_path):
                     {"submission_authority": True}):
         with pytest.raises(ContractValidationError, match="binding differs"):
             reopened._record_published_handoff(handoff.exact_bytes, exact({**basis, **changes}))
-    current_invalid = (
+    with pytest.raises(ValueError, match="published handoff mode differs"):
+        reopened._record_published_handoff(current_handoff.exact_bytes, current_receipt)
+    with pytest.raises(ValueError, match="published handoff mode differs"):
+        reopened._record_published_handoff(
+            handoff.exact_bytes,
+            receipt,
+            current_runtime=True,
+        )
+    current_binding_invalid = (
         {"application_id": "app_" + "a" * 64},
         {"handoff_root_sha256": "a" * 64},
+    )
+    for changes in current_binding_invalid:
+        with pytest.raises(ContractValidationError, match="binding differs"):
+            reopened._record_published_handoff(
+                current_handoff.exact_bytes,
+                exact({**current_basis, **changes}),
+                current_runtime=True,
+            )
+    current_mode_invalid = (
         {"environment": "production"},
         {"trust_root_id": "market-aligner-production-v1"},
         {"freshness_provenance": "authenticated_production"},
@@ -1781,17 +1811,20 @@ def test_published_handoff_registry_is_exact_replayable_and_immutable(tmp_path):
         {"release_token_issued": True},
         {"submission_authority": True},
     )
-    for changes in current_invalid:
-        with pytest.raises(ContractValidationError, match="binding differs"):
+    for changes in current_mode_invalid:
+        with pytest.raises(ValueError, match="published handoff mode differs"):
             reopened._record_published_handoff(
-                handoff.exact_bytes, exact({**current_basis, **changes})
+                current_handoff.exact_bytes,
+                exact({**current_basis, **changes}),
+                current_runtime=True,
             )
     altered_digest = json.loads(current_receipt)
     altered_digest["unrelated"] = True
     with pytest.raises(ContractValidationError, match="binding differs"):
         reopened._record_published_handoff(
-            handoff.exact_bytes,
+            current_handoff.exact_bytes,
             canonical_json_bytes(altered_digest),
+            current_runtime=True,
         )
     with reopened.connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM published_application_handoffs").fetchone()[0] == 2

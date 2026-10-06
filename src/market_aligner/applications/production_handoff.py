@@ -2692,7 +2692,11 @@ def _build_production_handoff_from_authenticated_time(
     receipt_path = _persist_execution_receipt(
         deployment.output_root, receipt_semantic_sha, receipt_bytes
     )
-    service.assessments._record_published_handoff(handoff.exact_bytes, receipt_bytes)
+    service.assessments._record_published_handoff(
+        handoff.exact_bytes,
+        receipt_bytes,
+        current_runtime=current_runtime,
+    )
     return ProductionHandoffReceipt(
         source_job_key=source_job_key,
         handoff_job_key=handoff_job_key,

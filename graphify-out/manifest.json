@@ -3744,9 +3744,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/research/store.py": {
-    "mtime": 1791304436.1750088,
-    "seen": 1791304897.1315038,
-    "ast_hash": "08effb2a12502ea4bff043ecd3744171",
+    "mtime": 1791306098.4229796,
+    "seen": 1791306189.0013325,
+    "ast_hash": "50252bb195e67e5bf4a9b6d926db7914",
     "semantic_hash": ""
   },
   "src/market_aligner/research/worker.py": {
@@ -4266,9 +4266,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/applications/production_handoff.py": {
-    "mtime": 1791304451.4310093,
-    "seen": 1791304897.131431,
-    "ast_hash": "e466720efc3572f4eecb984060352193",
+    "mtime": 1791305808.5389886,
+    "seen": 1791306189.0012546,
+    "ast_hash": "ec488973499401ed25dd78f539eea495",
     "semantic_hash": ""
   },
   "src/market_aligner/assessment/geography.py": {
@@ -4302,9 +4302,9 @@
     "semantic_hash": ""
   },
   "tests/test_production_handoff.py": {
-    "mtime": 1791300880.0950923,
-    "seen": 1791302696.4747355,
-    "ast_hash": "f357650a7d967c76b7771041376878bb",
+    "mtime": 1791305945.9309828,
+    "seen": 1791306189.0013819,
+    "ast_hash": "cab7dc7ed7baf58f8a63f88c69413ffd",
     "semantic_hash": ""
   },
   "tests/test_public_research_provider.py": {

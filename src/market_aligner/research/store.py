@@ -8,7 +8,7 @@ import json
 import math
 import re
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -1458,7 +1458,11 @@ class AssessmentStore:
                 connection.close()
 
     def _record_published_handoff(
-        self, handoff_exact_bytes: bytes, execution_receipt_bytes: bytes
+        self,
+        handoff_exact_bytes: bytes,
+        execution_receipt_bytes: bytes,
+        *,
+        current_runtime: bool = False,
     ) -> None:
         """Record producer-published evidence; this grants no release authority.
 
@@ -1468,16 +1472,25 @@ class AssessmentStore:
         from market_aligner.applications.canonical import (
             canonical_json_bytes, parse_canonical_json, ContractValidationError,
         )
-        from market_aligner.applications.handoff import parse_handoff_v1
+        from market_aligner.applications.handoff import (
+            parse_current_runtime_handoff_v1,
+            parse_handoff_v1,
+        )
 
-        handoff = parse_handoff_v1(handoff_exact_bytes)
         receipt = parse_canonical_json(execution_receipt_bytes)
         if not isinstance(receipt, dict):
             raise ContractValidationError("published execution receipt must be an object")
+        parser = self.select_publication_parser(
+            receipt,
+            current_runtime=current_runtime,
+            legacy_parser=parse_handoff_v1,
+            current_parser=parse_current_runtime_handoff_v1,
+            mode_valid=self._published_handoff_mode_valid,
+        )
+        handoff = parser(handoff_exact_bytes)
         basis = dict(receipt)
         semantic = basis.pop("semantic_receipt_sha256", None)
-        if (not self._published_handoff_mode_valid(receipt)
-                or receipt.get("application_id") != handoff.application_id
+        if (receipt.get("application_id") != handoff.application_id
                 or receipt.get("handoff_root_sha256") != handoff.root_sha256
                 or receipt.get("release_token_issued") is not False
                 or receipt.get("submission_authority") is not False
@@ -1499,6 +1512,35 @@ class AssessmentStore:
             ).fetchone()
             if row is None or tuple(row) != values:
                 raise ContractValidationError("published handoff registry identity conflicts")
+
+    @staticmethod
+    def select_publication_parser(
+        receipt: object,
+        *,
+        current_runtime: bool = False,
+        legacy_parser: Callable[[bytes], Any],
+        current_parser: Callable[[bytes], Any],
+        mode_valid: Callable[[object], object],
+    ) -> Callable[[bytes], Any]:
+        if type(current_runtime) is not bool or type(receipt) is not dict:
+            raise ValueError("published handoff mode differs")
+        if not (
+            callable(legacy_parser)
+            and callable(current_parser)
+            and callable(mode_valid)
+        ):
+            raise ValueError("published handoff mode differs")
+        expected_schema = (
+            "market-aligner.current-runtime-handoff-execution.v1"
+            if current_runtime
+            else "market-aligner.production-handoff-execution.v2"
+        )
+        schema_version = receipt.get("schema_version")
+        if type(schema_version) is not str or schema_version != expected_schema:
+            raise ValueError("published handoff mode differs")
+        if mode_valid(receipt) is not True:
+            raise ValueError("published handoff mode differs")
+        return current_parser if current_runtime else legacy_parser
 
     @staticmethod
     def _published_handoff_mode_valid(receipt: object) -> bool:
