@@ -7,10 +7,11 @@ import hashlib
 import json
 import os
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from importlib.resources import files
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,12 +21,15 @@ sys.path.insert(0, str(SOURCE_ROOT))
 sys.path.insert(0, str(JAA_ROOT))
 
 from career_automation.current_time import configured_hmac_current_time_witness
+from career_automation import production_preparation_runner
 from career_automation.handoff_admission import (
     ADMISSION_KIND_V1,
     HandoffAdmissionError,
     HandoffAdmissionStore,
     ProtectedLocalOutbox,
     ResolvedReference,
+    _parse_current_runtime_handoff,
+    _verified_market_decision_references,
 )
 from career_automation.market_aligner_handoff import (
     COMPATIBILITY_PROFILE,
@@ -291,10 +295,19 @@ def test_current_runtime_admission_is_persistent_nonrelease_and_revalidated(
     )
     current = encode_current_runtime_handoff_v1(payload)
     current_root = "market-aligner-current-runtime-non-release-v1"
+    source_record_sha256 = hashlib.sha256(fixture_bytes).hexdigest()
+    allowed_commits = [current.payload["producer"]["commit_sha"]]
 
     class ContextAuthenticator:
         authenticator_identity_sha256 = hashlib.sha256(
-            b"current-runtime-context-authenticator"
+            canonical_json_bytes(
+                {
+                    "kind": "protected-local-outbox-context",
+                    "allowed_producer_commits": allowed_commits,
+                    "source_record_sha256": source_record_sha256,
+                    "trust_root_id": current_root,
+                }
+            )
         ).hexdigest()
 
         def authenticate(self, *, context_bytes, handoff_bytes, evaluated_at):
@@ -341,19 +354,22 @@ def test_current_runtime_admission_is_persistent_nonrelease_and_revalidated(
             context = json.loads(admission_context_bytes)
             assert context["trust_root_id"] == current_root
 
+    context_body = {
+        "environment": "current_runtime",
+        "handoff_root_sha256": current.root_sha256,
+        "issued_at": current.payload["created_at"],
+        "producer_commit_sha": current.payload["producer"]["commit_sha"],
+        "producer_product": "market-aligner",
+        "source_record_sha256": source_record_sha256,
+        "trust_mode": "current_runtime_non_release",
+        "trust_root_id": current_root,
+    }
     context = canonical_json_bytes(
         {
-            "environment": "current_runtime",
-            "handoff_root_sha256": current.root_sha256,
-                "issued_at": current.payload["created_at"],
-            "producer_commit_sha": current.payload["producer"]["commit_sha"],
-            "producer_product": "market-aligner",
-            "source_record_sha256": hashlib.sha256(fixture_bytes).hexdigest(),
-            "trust_mode": "current_runtime_non_release",
+            **context_body,
             "trust_proof_sha256": hashlib.sha256(
-                b"current-runtime-context-proof"
+                canonical_json_bytes(context_body)
             ).hexdigest(),
-            "trust_root_id": current_root,
         }
     )
     store = HandoffAdmissionStore(
@@ -385,6 +401,110 @@ def test_current_runtime_admission_is_persistent_nonrelease_and_revalidated(
         assert connection.execute(
             "SELECT COUNT(*) FROM application_admissions"
         ).fetchone()[0] == 0
+
+    admitted_source = production_preparation_runner._source_record_for_application(
+        store.database, admission.application_id
+    )
+    assert admitted_source.source_record_sha256 == hashlib.sha256(
+        fixture_bytes
+    ).hexdigest()
+    assert admitted_source.producer_commit_sha == current.payload["producer"][
+        "commit_sha"
+    ]
+
+    with sqlite3.connect(store.database) as connection:
+        receipt_bytes = connection.execute(
+            "SELECT verification_receipt_bytes FROM current_runtime_admissions "
+            "WHERE application_id=?",
+            (admission.application_id,),
+        ).fetchone()[0]
+        receipt = json.loads(receipt_bytes)
+        receipt["submission_authority"] = True
+        forged_receipt = canonical_json_bytes(receipt)
+        connection.execute(
+            "DROP TRIGGER current_runtime_admissions_immutable_update"
+        )
+        connection.execute(
+            "UPDATE current_runtime_admissions SET verification_receipt_bytes=?, "
+            "verification_receipt_sha256=? WHERE application_id=?",
+            (
+                sqlite3.Binary(forged_receipt),
+                hashlib.sha256(forged_receipt).hexdigest(),
+                admission.application_id,
+            ),
+        )
+    with pytest.raises(
+        production_preparation_runner.ProductionPreparationDeploymentError,
+        match="current runtime admission differs",
+    ):
+        production_preparation_runner._source_record_for_application(
+            store.database, admission.application_id
+        )
+
+
+def test_compact_promotion_uses_authenticated_handoff_assessment_scores() -> None:
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
+    document = json.loads(fixture_bytes)
+    legacy_bytes = base64.b64decode(
+        document["handoff"]["canonical_base64"], validate=True
+    )
+    legacy = parse_handoff(legacy_bytes)
+    payload = json.loads(json.dumps(legacy.payload))
+    location = payload["vacancy"]["location"]
+    geography = resolve_preparation_geography(
+        country_code=location["country_code"],
+        work_mode=location["work_mode"],
+        current_runtime=True,
+        unknown_uk_mode_allowed=False,
+    )
+    payload["selection"]["geographic_preference_policy_sha256"] = "a" * 64
+    payload["preparation_geography"] = preparation_geography_document(
+        geography, current_runtime=True, unknown_uk_mode_allowed=False
+    )
+    current = encode_current_runtime_handoff_v1(payload)
+    handoff = _parse_current_runtime_handoff(current.exact_bytes)
+    job_key = handoff.payload["job_key"]
+    compact_promotion = canonical_json_bytes(
+        {
+            "job_key": job_key,
+            "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+        }
+    )
+    graph = SimpleNamespace(
+        objects={
+            "assessment.receipt": compact_promotion,
+            "eligibility.receipt": canonical_json_bytes(
+                {"source_job_key": job_key}
+            ),
+            "selection.receipt": canonical_json_bytes(
+                {"geography_priority_rank": None, "source_job_key": job_key}
+            ),
+            "evidence_ledger": b"synthetic evidence ledger",
+            "candidate_intent.authority_source": b"synthetic candidate authority",
+        }
+    )
+
+    result = _verified_market_decision_references(graph, handoff)
+
+    assert "final" not in json.loads(compact_promotion)
+    assert result["final_score"] == handoff.payload["assessment"]["final"] * 100
+    assert result["opportunity_score"] == handoff.payload["assessment"][
+        "opportunity"
+    ]
+    assert result["geography_priority_rank"] is None
+
+    for field, invalid in (("final", True), ("opportunity", 1.1)):
+        assessment = dict(handoff.payload["assessment"])
+        assessment[field] = invalid
+        invalid_payload = dict(handoff.payload)
+        invalid_payload["assessment"] = assessment
+        invalid_handoff = replace(handoff, payload=invalid_payload)
+        with pytest.raises(HandoffAdmissionError, match="market_decision_ranking"):
+            _verified_market_decision_references(graph, invalid_handoff)
 
 
 def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
@@ -994,7 +1114,7 @@ def test_persisted_gated_assessment_emits_exact_handoff_and_enters_jaa(
 def _synthetic_candidate_materialization_authority(
     expected: dict[str, object],
 ) -> tuple[tuple[tuple[str, str, str], ...], dict[str, object], bytes]:
-    from career_automation.evidence_matching import canonical_json, content_hash
+    from career_automation.evidence_matching import canonical_json
 
     statements = (
         (
@@ -1043,6 +1163,23 @@ def _synthetic_candidate_materialization_authority(
             "Implemented a synthetic anomaly detection package with documented interfaces and reproducible local evaluation.",
         ),
     )
+    evidence_bytes = (
+        canonical_json(
+            {
+                "schema_version": "jaa.synthetic-approved-evidence.v1",
+                "statements": [
+                    {
+                        "id": evidence_id,
+                        "kind": kind,
+                        "proof_class": kind,
+                        "statement": statement,
+                    }
+                    for evidence_id, kind, statement in statements
+                ],
+            }
+        )
+        + "\n"
+    ).encode()
     projection_body = {
         "approved_evidence": [
             {
@@ -1053,10 +1190,15 @@ def _synthetic_candidate_materialization_authority(
         ],
         "policy_sha256": hashlib.sha256(b"synthetic-projection-policy").hexdigest(),
         "schema_version": "jaa.synthetic-candidate-projection.v1",
+        "source_hashes": {
+            "approved_evidence": hashlib.sha256(evidence_bytes).hexdigest(),
+        },
     }
     candidate_projection = {
         **projection_body,
-        "projection_sha256": content_hash(projection_body),
+        "projection_sha256": hashlib.sha256(
+            (canonical_json(projection_body) + "\n").encode()
+        ).hexdigest(),
     }
     vacancy = expected["vacancy"]
     requirement_text = "Deliver reliable services through tested software."

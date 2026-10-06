@@ -107,6 +107,7 @@ def _fixture(
     blind_spots: tuple[str, ...] = (),
     unknowns: tuple[str, ...] = (),
     exclusions: tuple[str, ...] = (),
+    saved_cvs: tuple[tuple[str, bytes], ...] = (),
 ) -> tuple[ProfileStore, bytes, bytes, bytes, str]:
     data_home = tmp_path / "data-home"
     data_home.mkdir(mode=0o700)
@@ -195,6 +196,22 @@ def _fixture(
             "source_path": "/never-open-this-synthetic-source-either",
         },
     ]
+    for relative_path, cv_bytes in saved_cvs:
+        cv_path = approved_dir.joinpath(*relative_path.split("/"))
+        cv_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for parent in (approved_dir, cv_path.parent):
+            parent.chmod(0o700)
+        cv_path.write_bytes(cv_bytes)
+        cv_path.chmod(0o600)
+        descriptors.append(
+            {
+                "kind": "saved_cv",
+                "destination_relative": relative_path,
+                "sha256": hashlib.sha256(cv_bytes).hexdigest(),
+                "bytes": len(cv_bytes),
+                "source_path": "/never-open-this-synthetic-cv-source",
+            }
+        )
     manifest = {
         "schema": "market-aligner.private-input-recovery.v1",
         "approval_id": _APPROVAL,
@@ -437,6 +454,42 @@ def test_activation_binds_manifest_current_snapshot_selection_and_exact_spans(
     assert document["submission_authority"] is False
     assert document["provider_receipt"]["transport"]["invocation_count"] == 1
     assert runner.calls == 1
+
+
+def test_pinned_recovery_inputs_reads_only_saved_cv_rows_from_approved_manifest(
+    tmp_path: Path,
+) -> None:
+    store, manifest_bytes, _profile, _evidence, relative_manifest = _fixture(
+        tmp_path,
+        saved_cvs=(
+            ("saved-cv/one.pdf", b"synthetic cv one"),
+            ("saved-cv/two.pdf", b"synthetic cv two"),
+        ),
+    )
+    with PinnedRecoveryInputs(
+        data_home=store.paths.root,
+        manifest_relative_path=relative_manifest,
+        expected_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        approval_id=_APPROVAL,
+        include_saved_cvs=True,
+    ) as recovered:
+        assert recovered.saved_cv_bytes == {
+            "saved-cv/one.pdf": b"synthetic cv one",
+            "saved-cv/two.pdf": b"synthetic cv two",
+        }
+        assert recovered.saved_cv_descriptors == [
+            {
+                "relative_path": "saved-cv/one.pdf",
+                "sha256": hashlib.sha256(b"synthetic cv one").hexdigest(),
+                "bytes": len(b"synthetic cv one"),
+            },
+            {
+                "relative_path": "saved-cv/two.pdf",
+                "sha256": hashlib.sha256(b"synthetic cv two").hexdigest(),
+                "bytes": len(b"synthetic cv two"),
+            },
+        ]
+        recovered.revalidate()
 
 
 def test_activation_selection_receives_profile_exclusions_and_preserves_other_facts(

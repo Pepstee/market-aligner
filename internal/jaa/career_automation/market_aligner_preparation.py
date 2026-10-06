@@ -27,9 +27,14 @@ from .evidence_matching import canonical_json, content_hash
 from .candidate_contact_authority import (
     CandidateContactAuthority,
     CandidateContactResourceLease,
+    CurrentContactProvenance,
     load_candidate_contact_authority,
 )
 from .candidate_application_factory import (
+    CURRENT_RUNTIME_DECISION_AUTHORITY_SCHEMA,
+    CURRENT_RUNTIME_DEPLOYMENT_BINDING_SCHEMA,
+    CURRENT_RUNTIME_ENVIRONMENT,
+    CURRENT_RUNTIME_MATERIALIZATION_RECEIPT_SCHEMA,
     CandidateApplicationMaterialization,
     CandidateApplicationMaterializationReceipt,
     CandidateApplicationDeploymentBinding,
@@ -140,6 +145,14 @@ class MarketApplicationPreparation:
     release_authority: bool = False
 
 
+def _valid_materialization_geography_rank(
+    value: object, *, current_runtime_bound: bool
+) -> bool:
+    if value is None:
+        return current_runtime_bound
+    return type(value) is int and value in {1, 2, 3, 4, 5}
+
+
 @dataclass(frozen=True)
 class MarketApplicationMaterializationContext:
     """Exact admitted MA source and authorities for the system submit runner."""
@@ -151,17 +164,36 @@ class MarketApplicationMaterializationContext:
     candidate_projection: Mapping[str, object]
     raw_listing_bytes: bytes = field(repr=False)
     candidate_authority_bytes: bytes = field(repr=False)
-    contact_authority_path: Path
+    contact_authority_path: Path | None
     profile_id: str
     profile_version: str
     candidate_intent_sha256: str
     final_score: float
     opportunity_score: float
-    geography_priority_rank: int
+    geography_priority_rank: int | None
     source_observed_at: str
     release_authority: bool = False
+    contact_provenance: CurrentContactProvenance | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
+        materialization_receipt = getattr(self.materialization, "receipt", None)
+        deployment_binding = getattr(
+            materialization_receipt, "deployment_binding", None
+        )
+        current_runtime_bound = (
+            getattr(self.market_decision_authority, "environment", None)
+            == CURRENT_RUNTIME_ENVIRONMENT
+            and getattr(self.market_decision_authority, "schema_version", None)
+            == CURRENT_RUNTIME_DECISION_AUTHORITY_SCHEMA
+            and getattr(deployment_binding, "environment", None)
+            == CURRENT_RUNTIME_ENVIRONMENT
+            and getattr(deployment_binding, "schema_version", None)
+            == CURRENT_RUNTIME_DEPLOYMENT_BINDING_SCHEMA
+            and getattr(materialization_receipt, "schema_version", None)
+            == CURRENT_RUNTIME_MATERIALIZATION_RECEIPT_SCHEMA
+        )
         if (
             not isinstance(self.application_id, str)
             or len(self.application_id) != 68
@@ -173,6 +205,16 @@ class MarketApplicationMaterializationContext:
             or self.market_decision_authority.application_id != self.application_id
             or self.materialization.receipt.deployment_binding.application_id
             != self.application_id
+            or self.market_decision_authority.environment
+            != self.materialization.receipt.deployment_binding.environment
+            or self.market_decision_authority.handoff_root_sha256
+            != self.materialization.receipt.deployment_binding.handoff_root_sha256
+            or self.market_decision_authority.admission_receipt_sha256
+            != self.materialization.receipt.deployment_binding.admission_receipt_sha256
+            or self.market_decision_authority.current_boundary_receipt_sha256
+            != self.materialization.receipt.deployment_binding.current_boundary_receipt_sha256
+            or self.market_decision_authority.candidate_authority_file_sha256
+            != self.materialization.receipt.deployment_binding.candidate_authority_file_sha256
             or self.materialization.source.job_key
             != self.market_decision_authority.source_job_key
             or self.materialization.source.vacancy_sha256
@@ -204,16 +246,34 @@ class MarketApplicationMaterializationContext:
             or not isinstance(self.opportunity_score, (int, float))
             or not math.isfinite(self.opportunity_score)
             or not (0.0 <= self.opportunity_score <= 1.0)
-            or isinstance(self.geography_priority_rank, bool)
-            or not isinstance(self.geography_priority_rank, int)
-            or self.geography_priority_rank not in {1, 2, 3, 4, 5}
+            or not _valid_materialization_geography_rank(
+                self.geography_priority_rank,
+                current_runtime_bound=current_runtime_bound,
+            )
             or not isinstance(self.source_observed_at, str)
             or not self.source_observed_at
-            or not isinstance(self.contact_authority_path, Path)
-            or not self.contact_authority_path.is_absolute()
             or self.release_authority is not False
         ):
             raise ValueError("market application materialization context differs")
+        if current_runtime_bound:
+            if (
+                self.contact_authority_path is not None
+                or type(self.contact_provenance) is not CurrentContactProvenance
+                or self.materialization.source.contact
+                != self.contact_provenance.contact
+                or self.materialization.receipt.contact_provenance_sha256
+                != self.contact_provenance.sha256
+                or self.materialization.receipt.contact_source_hashes
+                != self.contact_provenance.source_hashes
+            ):
+                raise ValueError("current materialization contact provenance differs")
+            self.contact_provenance.__post_init__()
+        elif (
+            not isinstance(self.contact_authority_path, Path)
+            or not self.contact_authority_path.is_absolute()
+            or self.contact_provenance is not None
+        ):
+            raise ValueError("legacy materialization contact authority differs")
         self.market_decision_authority.__post_init__()
         self.materialization.receipt.__post_init__()
 
@@ -225,7 +285,7 @@ class PreparationInputMaterializer(Protocol):
         self,
         verified: VerifiedApplicationInput,
         deployment_binding: CandidateApplicationDeploymentBinding,
-        contact_authority: CandidateContactAuthority,
+        contact_authority: CandidateContactAuthority | CurrentContactProvenance,
     ) -> Mapping[str, Any]: ...
 
 
@@ -249,7 +309,7 @@ class CanonicalPreparationInputMaterializer:
         self,
         verified: VerifiedApplicationInput,
         deployment_binding: CandidateApplicationDeploymentBinding,
-        contact_authority: CandidateContactAuthority,
+        contact_authority: CandidateContactAuthority | CurrentContactProvenance,
     ) -> Mapping[str, Any]:
         candidate_path = (
             self.candidate_authority_path.resolve(strict=True)
@@ -342,10 +402,25 @@ class CanonicalPreparationInputMaterializer:
             source_url = self.source_url
             role_title = self.role_title
             company_name = self.company_name
+        current_runtime = deployment_binding.environment == CURRENT_RUNTIME_ENVIRONMENT
+        if current_runtime:
+            if (
+                type(contact_authority) is not CurrentContactProvenance
+                or self.contact_authority_bytes is not None
+            ):
+                raise ValueError("current materializer requires current contact provenance")
+            signed_contact_authority = None
+            contact_provenance = contact_authority
+        else:
+            if type(contact_authority) is not CandidateContactAuthority:
+                raise ValueError("legacy materializer requires signed contact authority")
+            signed_contact_authority = contact_authority
+            contact_provenance = None
+        contact = contact_authority.contact
         materialization = materialize_candidate_application_source(
             candidate_authority_path=candidate_path,
             deployment_binding=deployment_binding,
-            contact_authority=contact_authority,
+            contact_authority=signed_contact_authority,
             decision_receipt=decision,
             candidate_projection=projection,
             job_key=source_job_key,
@@ -353,10 +428,11 @@ class CanonicalPreparationInputMaterializer:
             source_url=source_url,
             role_title=role_title,
             company_name=company_name,
-            contact=contact_authority.contact,
+            contact=contact,
             market_decision_authority=market_authority,
             candidate_authority_bytes=self.candidate_authority_bytes,
             contact_authority_bytes=self.contact_authority_bytes,
+            contact_provenance=contact_provenance,
         )
         request = None
         cover_request = None
@@ -386,8 +462,8 @@ class CanonicalPreparationInputMaterializer:
             )
             request = build_editorial_request(
                 authority=_candidate_editorial_authority(
-                    candidate_name=contact_authority.contact.full_name,
-                    candidate_city=contact_authority.contact.city,
+                    candidate_name=contact.full_name,
+                    candidate_city=contact.city,
                     source_sha256=deployment_binding.candidate_authority_file_sha256,
                 ),
                 role_title=role_title,
@@ -450,7 +526,7 @@ def prepare_admitted_market_application_from_authorities(
     repository_root: Path,
     data_home: Path,
     candidate_authority_path: Path,
-    contact_authority_path: Path,
+    contact_authority_path: Path | None,
     input_materializer: PreparationInputMaterializer,
     environment: str,
     editorial_runtime: EditorialCompositionRuntime | None = None,
@@ -461,6 +537,8 @@ def prepare_admitted_market_application_from_authorities(
     ),
     candidate_authority_bytes: bytes | None = None,
     contact_resource_lease: CandidateContactResourceLease | None = None,
+    contact_provenance: CurrentContactProvenance | None = None,
+    current_contact_bindings: Mapping[str, object] | None = None,
     output_root_descriptor: int | None = None,
     materialization_only: bool = False,
 ) -> MarketApplicationPreparation | MarketApplicationMaterializationContext:
@@ -477,6 +555,13 @@ def prepare_admitted_market_application_from_authorities(
         raise HandoffAdmissionError(
             "preparation_environment",
             "requested preparation environment differs from admitted environment",
+        )
+    if environment == CURRENT_RUNTIME_ENVIRONMENT and (
+        not materialization_only
+        or type(input_materializer) is not CanonicalPreparationInputMaterializer
+    ):
+        raise ValueError(
+            "current runtime preparation requires canonical materialization-only inputs"
         )
     if environment == "production" and (
         contact_authority_loader is not load_candidate_contact_authority
@@ -521,14 +606,33 @@ def prepare_admitted_market_application_from_authorities(
         )
     ):
         raise ValueError("production materializer targets another candidate authority")
-    contact_path = (
-        contact_authority_path.resolve(strict=True)
-        if contact_resource_lease is None
-        else contact_authority_path
-    )
-    if not contact_path.is_absolute():
-        raise ValueError("contact authority path must be absolute")
-    for label, path in (("candidate", candidate_path), ("contact", contact_path)):
+    if environment == CURRENT_RUNTIME_ENVIRONMENT:
+        if (
+            contact_authority_path is not None
+            or contact_resource_lease is not None
+            or type(contact_provenance) is not CurrentContactProvenance
+            or type(current_contact_bindings) is not dict
+            or contact_authority_loader is not load_candidate_contact_authority
+            or input_materializer.contact_authority_bytes is not None
+        ):
+            raise ValueError("current preparation requires pinned contact provenance")
+        contact_path = None
+    else:
+        if contact_provenance is not None or current_contact_bindings is not None:
+            raise ValueError("legacy preparation rejects current contact provenance")
+        if contact_authority_path is None:
+            raise ValueError("legacy preparation requires a contact authority path")
+        contact_path = (
+            contact_authority_path.resolve(strict=True)
+            if contact_resource_lease is None
+            else contact_authority_path
+        )
+        if not contact_path.is_absolute():
+            raise ValueError("contact authority path must be absolute")
+    paths = [("candidate", candidate_path)]
+    if contact_path is not None:
+        paths.append(("contact", contact_path))
+    for label, path in paths:
         if repository == path or repository in path.parents:
             raise ValueError(f"{label} authority must be outside the repository")
     candidate_bytes = (
@@ -550,17 +654,31 @@ def prepare_admitted_market_application_from_authorities(
             "preparation_candidate_authority",
             "candidate authority differs from admitted handoff",
         )
-    contact_authority = contact_authority_loader(
-        contact_path,
-        repository_root=repository,
-        resource_lease=contact_resource_lease,
-    )
-    contact_bytes = (
-        _read_private(contact_path)
-        if contact_resource_lease is None
-        else contact_resource_lease.authority_bytes
-    )
-    contact_object_sha256 = hashlib.sha256(contact_bytes).hexdigest()
+    if environment == CURRENT_RUNTIME_ENVIRONMENT:
+        assert contact_provenance is not None
+        assert current_contact_bindings is not None
+        contact_provenance.__post_init__()
+        contact_document = contact_provenance.document()
+        if contact_document.get("bindings") != dict(current_contact_bindings):
+            raise ValueError("current contact provenance bindings differ")
+        contact_authority: CandidateContactAuthority | CurrentContactProvenance = (
+            contact_provenance
+        )
+        contact_bytes = contact_provenance.encoded_document
+        contact_object_sha256 = contact_provenance.sha256
+    else:
+        assert contact_path is not None
+        contact_authority = contact_authority_loader(
+            contact_path,
+            repository_root=repository,
+            resource_lease=contact_resource_lease,
+        )
+        contact_bytes = (
+            _read_private(contact_path)
+            if contact_resource_lease is None
+            else contact_resource_lease.authority_bytes
+        )
+        contact_object_sha256 = hashlib.sha256(contact_bytes).hexdigest()
 
     deployment_binding = build_candidate_application_deployment_binding(
         application_id=verified.application_id,
@@ -595,21 +713,38 @@ def prepare_admitted_market_application_from_authorities(
     if not isinstance(receipt, CandidateApplicationMaterializationReceipt):
         raise ValueError("preparation materialization receipt type differs")
     receipt.__post_init__()
-    if (
-        receipt.deployment_binding != deployment_binding
-        or receipt.candidate_authority_file_sha256 != candidate_sha256
-        or receipt.contact_authority_sha256 != contact_authority.authority_sha256
+    current_runtime = environment == CURRENT_RUNTIME_ENVIRONMENT
+    contact_receipt_differs = (
+        receipt.contact_provenance_sha256 != contact_authority.sha256
+        or receipt.contact_provenance_schema != "current-contact-provenance-v1"
+        or receipt.contact_source_hashes != contact_authority.source_hashes
+        or any(
+            value is not None
+            for value in (
+                receipt.contact_authority_sha256,
+                receipt.contact_envelope_sha256,
+                receipt.contact_registry_sha256,
+                receipt.contact_signer_public_key_sha256,
+            )
+        )
+    ) if current_runtime else (
+        receipt.contact_authority_sha256 != contact_authority.authority_sha256
         or receipt.contact_envelope_sha256 != contact_object_sha256
         or receipt.contact_registry_sha256 != contact_authority.registry_sha256
         or receipt.contact_signer_public_key_sha256
         != contact_authority.signer_public_key_sha256
+    )
+    if (
+        receipt.deployment_binding != deployment_binding
+        or receipt.candidate_authority_file_sha256 != candidate_sha256
+        or contact_receipt_differs
         or materialization.source != source
         or receipt.application_source_id != source.source_id
         or receipt.application_source_sha256 != source.content_sha256
     ):
         raise ValueError("materialization differs from admitted candidate authorities")
     if source.contact != contact_authority.contact:
-        raise ValueError("materialized application contact differs from operator authority")
+        raise ValueError("materialized application contact differs from admitted contact")
     if request is not None and request.authority.source_sha256 != candidate_sha256:
         raise ValueError("materialized editorial request differs from candidate authority")
     if request is not None:
@@ -637,6 +772,9 @@ def prepare_admitted_market_application_from_authorities(
             raw_listing_bytes=verified.raw_listing_bytes,
             candidate_authority_bytes=candidate_bytes,
             contact_authority_path=contact_path,
+            contact_provenance=(
+                contact_provenance if current_runtime else None
+            ),
             profile_id=verified.profile_id,
             profile_version=verified.profile_version,
             candidate_intent_sha256=verified.candidate_intent_sha256,

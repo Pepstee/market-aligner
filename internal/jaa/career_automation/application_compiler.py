@@ -169,6 +169,56 @@ GENERIC_OUTWARD_REWRITE_POLICY_SHA256 = content_hash(
         "cv_auxiliary_elision_prefixes": ["I had ", "I have "],
     }
 )
+CURRENT_RUNTIME_OUTWARD_REWRITE_POLICY_SHA256 = content_hash(
+    {
+        "schema_version": "jaa.candidate-outward-rewrite-policy.current-runtime.v1",
+        "generic_policy_sha256": GENERIC_OUTWARD_REWRITE_POLICY_SHA256,
+        "temporal_phrase_rewrite": (
+            "has/have/had not yet occurred -> has/have/had yet to occur; "
+            "preserve surrounding text"
+        ),
+    }
+)
+
+
+def _case_insensitive_ascii(word: str) -> str:
+    return "".join(f"[{character.lower()}{character.upper()}]" for character in word)
+
+
+_CURRENT_RUNTIME_TEMPORAL_PHRASE = re.compile(
+    r"\b(?P<aux>"
+    + "|".join(
+        _case_insensitive_ascii(word) for word in ("has", "have", "had")
+    )
+    + r") "
+    + _case_insensitive_ascii("not")
+    + r" "
+    + _case_insensitive_ascii("yet")
+    + r" "
+    + _case_insensitive_ascii("occurred")
+    + r"\b"
+)
+
+
+def neutral_current_temporal_text(
+    text: str,
+    *,
+    current_runtime: bool = False,
+) -> str:
+    if type(text) is not str or not text or type(current_runtime) is not bool:
+        raise ValueError("current_temporal_text_invalid")
+    if not current_runtime:
+        return text
+
+    def replace_phrase(match: re.Match[str]) -> str:
+        tail = "YET TO OCCUR" if match.group(0).isupper() else "yet to occur"
+        return f"{match.group('aux')} {tail}"
+
+    rewritten, replacement_count = _CURRENT_RUNTIME_TEMPORAL_PHRASE.subn(
+        replace_phrase,
+        text,
+    )
+    return rewritten if replacement_count else text
 
 # Operator doctrine, ratified 2026-08-07: employer-facing documents carry the
 # strongest framing the approved evidence will support. A CV and a cover letter
@@ -339,9 +389,12 @@ def approved_candidate_outward_text(
     approved_source_text: str,
     *,
     document_kind: str,
+    current_runtime: bool = False,
 ) -> str:
     """Return only wording produced by a canonical closed rewrite policy."""
     _required(candidate_evidence_id, "candidate evidence ID")
+    if type(current_runtime) is not bool:
+        raise ValueError("current_temporal_text_invalid")
     source = _safe_plain_text(approved_source_text, "approved candidate text")
     if document_kind not in {"cv", "cover_letter"}:
         raise ValueError("candidate outward document kind is unsupported")
@@ -354,13 +407,18 @@ def approved_candidate_outward_text(
         exact = EXACT_OUTWARD_PROFILE_REWRITES.get(candidate_evidence_id)
     if exact is not None:
         return exact
-    return _generic_candidate_outward_text(source, document_kind=document_kind)
+    outward = _generic_candidate_outward_text(source, document_kind=document_kind)
+    return neutral_current_temporal_text(
+        outward,
+        current_runtime=current_runtime,
+    )
 
 
 def _rewrite_policy_sha256(
     candidate_evidence_id: str,
     *,
     document_kind: str,
+    current_runtime: bool = False,
 ) -> str:
     exact = (
         candidate_evidence_id in EXACT_OUTWARD_LETTER_REWRITES
@@ -370,7 +428,11 @@ def _rewrite_policy_sha256(
     return (
         EXACT_OUTWARD_REWRITE_POLICY_SHA256
         if exact
-        else GENERIC_OUTWARD_REWRITE_POLICY_SHA256
+        else (
+            CURRENT_RUNTIME_OUTWARD_REWRITE_POLICY_SHA256
+            if current_runtime
+            else GENERIC_OUTWARD_REWRITE_POLICY_SHA256
+        )
     )
 
 
@@ -519,11 +581,13 @@ def resolve_authenticated_outward_rewrite(
     candidate_evidence_version: int = 1,
     approved_evidence_source: ApprovedEvidenceSourceContext | None = None,
     candidate_profile_hash: str | None = None,
+    current_runtime: bool = False,
 ) -> AuthenticatedOutwardRewrite:
     """Mint a receipt only for a current, policy-derived exact source span."""
     exact_policy = _rewrite_policy_sha256(
         candidate_evidence_id,
         document_kind=document_kind,
+        current_runtime=current_runtime,
     ) == EXACT_OUTWARD_REWRITE_POLICY_SHA256
     source_context: ApprovedEvidenceSourceContext | None = None
     if approved_evidence_source is None:
@@ -554,6 +618,7 @@ def resolve_authenticated_outward_rewrite(
         candidate_evidence_id,
         approved_source_text,
         document_kind=document_kind,
+        current_runtime=current_runtime,
     )
     if resolved_source != approved_source_text or expected != outward_text:
         raise ValueError("outward rewrite is not approved by current authority")
@@ -571,6 +636,7 @@ def resolve_authenticated_outward_rewrite(
         rewrite_policy_sha256=_rewrite_policy_sha256(
             candidate_evidence_id,
             document_kind=document_kind,
+            current_runtime=current_runtime,
         ),
         issuer_identity=OUTWARD_REWRITE_ISSUER_ID,
         resolution_receipt_sha256="0" * 64,
@@ -596,9 +662,14 @@ def verify_authenticated_outward_rewrite(
     candidate_profile_hash: str | None = None,
 ) -> None:
     authority.__post_init__()
+    current_runtime = (
+        authority.rewrite_policy_sha256
+        == CURRENT_RUNTIME_OUTWARD_REWRITE_POLICY_SHA256
+    )
     expected_policy = _rewrite_policy_sha256(
         candidate_evidence_id,
         document_kind=document_kind,
+        current_runtime=current_runtime,
     )
     if (
         authority.issuer_identity != OUTWARD_REWRITE_ISSUER_ID
@@ -666,6 +737,7 @@ def verify_authenticated_outward_rewrite(
             candidate_evidence_id,
             approved_source_text,
             document_kind=document_kind,
+            current_runtime=current_runtime,
         )
         != outward_text
     ):

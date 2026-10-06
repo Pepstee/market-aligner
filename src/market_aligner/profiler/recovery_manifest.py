@@ -15,6 +15,7 @@ _REQUIRED_KINDS = (
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _INVALID = "recovered_input_manifest_invalid"
+_INVALID_CVS = "recovered_cv_descriptors_invalid"
 
 
 class _InvalidJson(ValueError):
@@ -51,6 +52,41 @@ def _valid_relative_path(value: object) -> bool:
     ):
         return False
     return all(part not in {"", ".", ".."} for part in value.split("/"))
+
+
+def select_saved_cv_descriptors(files: object) -> list[dict[str, object]]:
+    """Select saved-CV metadata after the recovery manifest has been authenticated."""
+    if type(files) is not list:
+        raise ValueError(_INVALID_CVS)
+    selected: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+    for row in files:
+        if type(row) is not dict:
+            raise ValueError(_INVALID_CVS)
+        kind = row.get("kind")
+        if type(kind) is not str:
+            raise ValueError(_INVALID_CVS)
+        if kind != "saved_cv":
+            continue
+        relative_path = row.get("destination_relative")
+        digest = row.get("sha256")
+        size = row.get("bytes")
+        if (
+            not _valid_relative_path(relative_path)
+            or type(digest) is not str
+            or _SHA256.fullmatch(digest) is None
+            or type(size) is not int
+            or size <= 0
+            or relative_path in seen_paths
+        ):
+            raise ValueError(_INVALID_CVS)
+        seen_paths.add(relative_path)
+        selected.append(
+            {"relative_path": relative_path, "sha256": digest, "bytes": size}
+        )
+    if not selected:
+        raise ValueError(_INVALID_CVS)
+    return selected
 
 
 def select_recovered_input_descriptors(

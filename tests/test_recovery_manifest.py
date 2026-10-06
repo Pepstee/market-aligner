@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 
-from market_aligner.profiler.recovery_manifest import select_recovered_input_descriptors
+from market_aligner.profiler.recovery_manifest import (
+    select_recovered_input_descriptors,
+    select_saved_cv_descriptors,
+)
 
 
 _APPROVAL = "synthetic-approval-01"
@@ -151,3 +154,46 @@ def test_contract():
         assert str(exc) == "recovered_input_manifest_invalid"
     else:
         raise AssertionError("string subclass was accepted")
+
+
+def test_saved_cv_descriptors_select_only_authenticated_file_metadata():
+    files = [
+        {"kind": _PROFILE, "destination_relative": "profile.yaml", "sha256": "a" * 64, "bytes": 10},
+        {"kind": "saved_cv", "destination_relative": "cv/one.pdf", "sha256": "b" * 64, "bytes": 100},
+        {"kind": "saved_cv", "destination_relative": "cv/two.pdf", "sha256": "c" * 64, "bytes": 200},
+    ]
+    expected = [
+        {"relative_path": "cv/one.pdf", "sha256": "b" * 64, "bytes": 100},
+        {"relative_path": "cv/two.pdf", "sha256": "c" * 64, "bytes": 200},
+    ]
+    assert select_saved_cv_descriptors(files) == expected
+    assert files[1]["destination_relative"] == "cv/one.pdf"
+
+
+def test_saved_cv_descriptors_reject_invalid_metadata():
+    base = {
+        "kind": "saved_cv",
+        "destination_relative": "cv/one.pdf",
+        "sha256": "a" * 64,
+        "bytes": 10,
+    }
+    invalid_rows = []
+    for key, value in (
+        ("destination_relative", "../outside.pdf"),
+        ("destination_relative", "/absolute.pdf"),
+        ("sha256", "A" * 64),
+        ("sha256", "f" * 63),
+        ("bytes", True),
+        ("bytes", 0),
+    ):
+        invalid = dict(base)
+        invalid[key] = value
+        invalid_rows.append([invalid])
+    invalid_rows.extend(([base, dict(base)], [], {}, [None], [{"kind": 1}], [{"kind": "other"}]))
+    for files in invalid_rows:
+        try:
+            select_saved_cv_descriptors(files)
+        except ValueError as exc:
+            assert str(exc) == "recovered_cv_descriptors_invalid"
+        else:
+            raise AssertionError("invalid saved CV descriptor input was accepted")

@@ -908,8 +908,17 @@ def _verified_market_decision_references(
     provenance = vacancy["provenance"]
     fetched_at = provenance.get("fetched_at")
     candidate_intent_sha256 = payload.get("candidate_intent_sha256")
-    final = assessment.get("final") if isinstance(assessment, dict) else None
-    opportunity = assessment.get("opportunity") if isinstance(assessment, dict) else None
+    assessment_scores = payload.get("assessment")
+    final = (
+        assessment_scores.get("final")
+        if isinstance(assessment_scores, dict)
+        else None
+    )
+    opportunity = (
+        assessment_scores.get("opportunity")
+        if isinstance(assessment_scores, dict)
+        else None
+    )
     geography_rank = (
         selection.get("geography_priority_rank")
         if isinstance(selection, dict)

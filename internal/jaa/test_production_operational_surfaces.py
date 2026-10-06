@@ -10,8 +10,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from career_automation import production_preparation_runner as preparation_runner
 from career_automation import production_handoff_admission_runner as admission_runner
 from career_automation import production_handoff_runner
+from career_automation.candidate_contact_authority import CandidateContactResourceLease
 from career_automation.current_time import AuthenticatedCurrentTimeWitness
 from career_automation.handoff_admission import (
     HandoffAdmissionError,
@@ -162,6 +164,43 @@ def test_current_runtime_context_requires_exact_nonrelease_bindings() -> None:
     with pytest.raises(HandoffAdmissionError) as caught:
         _context_document(raw, strict_handoff, Authenticator(), "2026-10-06T00:00:01Z")
     assert caught.value.code == "context_environment"
+
+
+def test_preparation_scope_separates_current_runtime_from_legacy_contact_authority(
+    tmp_path: Path,
+) -> None:
+    current_deployment = SimpleNamespace(current_runtime=True)
+    assert preparation_runner._preparation_environment_and_contact_bytes(
+        current_deployment, None
+    ) == ("current_runtime", None)
+
+    lease = CandidateContactResourceLease(
+        authority_path=tmp_path / "contact.json",
+        authority_bytes=b"legacy-contact-authority",
+        public_key_path=tmp_path / "public-key.pem",
+        public_key_bytes=b"legacy-public-key",
+        registry_path=tmp_path / "registry.json",
+        registry_bytes=b"legacy-registry",
+    )
+    legacy_deployment = SimpleNamespace(current_runtime=False)
+    assert preparation_runner._preparation_environment_and_contact_bytes(
+        legacy_deployment, lease
+    ) == ("production", b"legacy-contact-authority")
+
+    with pytest.raises(
+        preparation_runner.ProductionPreparationDeploymentError,
+        match="current preparation rejects legacy contact authority",
+    ):
+        preparation_runner._preparation_environment_and_contact_bytes(
+            current_deployment, lease
+        )
+    with pytest.raises(
+        preparation_runner.ProductionPreparationDeploymentError,
+        match="legacy preparation requires pinned contact authority",
+    ):
+        preparation_runner._preparation_environment_and_contact_bytes(
+            legacy_deployment, None
+        )
 
 
 def _witness():
@@ -863,6 +902,82 @@ def test_published_selection_ignores_unpublished_temporary_receipt(monkeypatch, 
         commit_resolver=lambda *_: COMMIT,
     ) == []
     assert not deployment.admission_root.exists()
+
+
+def test_current_selection_requires_a_stored_root_before_full_validation():
+    application_id = "app_" + "1" * 64
+    root_sha256 = "2" * 64
+    producer_commit = "3" * 40
+    row = {
+        "handoff_root_sha256": root_sha256,
+        "producer_commit_sha": producer_commit,
+    }
+    document = {
+        "schema_version": admission_runner.CURRENT_RUNTIME_EXECUTION_SCHEMA,
+        "application_id": application_id,
+        "handoff_root_sha256": root_sha256,
+        "producer_commit_sha": producer_commit,
+    }
+
+    assert admission_runner._admitted_current_runtime_receipt_row(document, {}) is None
+    assert admission_runner._admitted_current_runtime_receipt_row(
+        document,
+        {
+            application_id: {
+                "handoff_root_sha256": "4" * 64,
+                "producer_commit_sha": producer_commit,
+            }
+        },
+    ) is None
+    assert admission_runner._admitted_current_runtime_receipt_row(
+        document, {application_id: row}
+    ) is row
+    changed_producer = {**document, "producer_commit_sha": "5" * 40}
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="stored admission",
+    ):
+        admission_runner._admitted_current_runtime_receipt_row(
+            changed_producer, {application_id: row}
+        )
+
+
+def test_current_selection_accepts_only_verified_ancestor_producers(
+    monkeypatch,
+):
+    calls = []
+
+    def run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(admission_runner.subprocess, "run", run)
+    assert admission_runner._producer_commit_is_ancestor(
+        17, "1" * 40, "2" * 40
+    ) is True
+    assert calls[0][0] == [
+        "git", "merge-base", "--is-ancestor", "1" * 40, "2" * 40
+    ]
+    assert calls[0][1]["pass_fds"] == (17,)
+
+    monkeypatch.setattr(
+        admission_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+    assert admission_runner._producer_commit_is_ancestor(
+        17, "1" * 40, "2" * 40
+    ) is False
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="ancestry could not be verified",
+    ):
+        monkeypatch.setattr(
+            admission_runner.subprocess,
+            "run",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=128),
+        )
+        admission_runner._producer_commit_is_ancestor(17, "1" * 40, "2" * 40)
 
 
 def test_service_selected_handoffs_uses_installed_read_boundary(monkeypatch):

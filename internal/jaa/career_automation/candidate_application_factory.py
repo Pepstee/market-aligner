@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
-from dataclasses import dataclass, fields
+import re
+from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime
 from pathlib import Path
 from typing import Mapping, Protocol, Sequence
+
+from market_aligner.llm.contracts import canonical_hash
+from market_aligner.profiler.schema import EvidenceItem
 
 from .application_compiler import (
     ApplicationSource,
@@ -35,7 +40,10 @@ from .candidate_authority import (
     CANONICAL_REQUIREMENTS_MATRIX_POLICY_SHA256,
     compile_canonical_requirements_evidence_matrix,
 )
-from .candidate_contact_authority import CandidateContactAuthority
+from .candidate_contact_authority import (
+    CandidateContactAuthority,
+    CurrentContactProvenance,
+)
 from .evidence_matching import (
     PROOF_CLASSES,
     MatchResult,
@@ -56,9 +64,11 @@ from .rendering import (
 from cv_generation.constraints import (
     CVConstraintReceipt,
     CandidateSourcePolicyReceipt,
+    PreEditorialSourceEnvelopeReceipt,
     capability_line_eligible,
     validate_candidate_source_policy,
     validate_generated_cv,
+    validate_pre_editorial_source,
 )
 
 
@@ -113,6 +123,147 @@ MINIMUM_CV_FACTS = 8
 MINIMUM_CV_WORDS = 110
 MINIMUM_LETTER_CANDIDATE_FACTS = 2
 MINIMUM_LETTER_WORDS = 90
+CURRENT_RUNTIME_ENVIRONMENT = "current_runtime"
+CURRENT_RUNTIME_DEPLOYMENT_BINDING_SCHEMA = (
+    "jaa.candidate-application-deployment-binding.current-runtime.v1"
+)
+CURRENT_RUNTIME_DECISION_AUTHORITY_SCHEMA = (
+    "jaa.market-application-decision-authority.current-runtime.v1"
+)
+CURRENT_RUNTIME_MATERIALIZATION_RECEIPT_SCHEMA = (
+    "jaa.candidate-application-materialization-receipt.current-runtime.v1"
+)
+_CURRENT_PACKET_SHA256 = re.compile(r"[0-9a-f]{64}")
+_MATCH_POLICY_BINDING_INVALID = "match_policy_binding_invalid"
+
+
+def resolve_match_policy(
+    projection: object,
+    *,
+    current_runtime: bool = False,
+    current_matrix_policy_sha256: object = None,
+) -> str:
+    """Select the existing policy identity for the active authority mode."""
+    if type(current_runtime) is not bool or type(projection) is not dict:
+        raise ValueError(_MATCH_POLICY_BINDING_INVALID)
+    if any(type(key) is not str for key in projection):
+        raise ValueError(_MATCH_POLICY_BINDING_INVALID)
+    if current_runtime:
+        selected = current_matrix_policy_sha256
+        if selected is None:
+            raise ValueError(_MATCH_POLICY_BINDING_INVALID)
+    else:
+        if current_matrix_policy_sha256 is not None:
+            raise ValueError(_MATCH_POLICY_BINDING_INVALID)
+        if "policy_sha256" not in projection:
+            raise ValueError(_MATCH_POLICY_BINDING_INVALID)
+        selected = projection["policy_sha256"]
+    if (
+        type(selected) is not str
+        or len(selected) != 64
+        or any(character not in "0123456789abcdef" for character in selected)
+    ):
+        raise ValueError(_MATCH_POLICY_BINDING_INVALID)
+    return selected
+
+
+def match_selected_packet(
+    ledger_ids: object,
+    projection_rows: object,
+    packet_rows: object,
+) -> tuple[dict[str, object], ...]:
+    invalid = "current candidate evidence packet differs from projection"
+
+    def exact_text(value: object) -> bool:
+        return type(value) is str and bool(value)
+
+    def exact_row(value: object, fields: set[str]) -> bool:
+        return (
+            type(value) is dict
+            and all(type(key) is str for key in value)
+            and set(value) == fields
+        )
+
+    if type(ledger_ids) is not list or not ledger_ids:
+        raise ValueError(invalid)
+    ledger: set[str] = set()
+    for evidence_id in ledger_ids:
+        if not exact_text(evidence_id) or evidence_id in ledger:
+            raise ValueError(invalid)
+        ledger.add(evidence_id)
+
+    if type(projection_rows) is not list or not projection_rows:
+        raise ValueError(invalid)
+    projection_by_id: dict[str, dict[str, object]] = {}
+    for row in projection_rows:
+        if not exact_row(
+            row, {"id", "kind", "proof_class", "statement_sha256"}
+        ):
+            raise ValueError(invalid)
+        evidence_id = row["id"]
+        digest = row["statement_sha256"]
+        if (
+            not exact_text(evidence_id)
+            or evidence_id in projection_by_id
+            or not exact_text(row["kind"])
+            or not exact_text(row["proof_class"])
+            or not exact_text(digest)
+            or _CURRENT_PACKET_SHA256.fullmatch(digest) is None
+        ):
+            raise ValueError(invalid)
+        projection_by_id[evidence_id] = row
+
+    if type(packet_rows) is not list or not packet_rows:
+        raise ValueError(invalid)
+    packet_by_id: dict[str, dict[str, object]] = {}
+    for row in packet_rows:
+        if not exact_row(
+            row,
+            {"id", "kind", "proof_class", "statement", "document_targets"},
+        ):
+            raise ValueError(invalid)
+        evidence_id = row["id"]
+        targets = row["document_targets"]
+        if (
+            not exact_text(evidence_id)
+            or evidence_id in packet_by_id
+            or not exact_text(row["kind"])
+            or not exact_text(row["proof_class"])
+            or not exact_text(row["statement"])
+            or type(targets) is not list
+            or not targets
+            or any(
+                type(target) is not str
+                or target not in _DOCUMENT_TARGETS
+                for target in targets
+            )
+            or len(set(targets)) != len(targets)
+        ):
+            raise ValueError(invalid)
+        packet_by_id[evidence_id] = row
+
+    if set(projection_by_id) != set(packet_by_id) or not set(packet_by_id) <= ledger:
+        raise ValueError(invalid)
+
+    selected: list[dict[str, object]] = []
+    for evidence_id, projection in projection_by_id.items():
+        packet = packet_by_id[evidence_id]
+        try:
+            statement_sha256 = hashlib.sha256(
+                packet["statement"].encode("utf-8")
+            ).hexdigest()
+        except UnicodeEncodeError:
+            raise ValueError(invalid) from None
+        if (
+            projection["kind"] != packet["kind"]
+            or projection["proof_class"] != packet["proof_class"]
+            or projection["statement_sha256"] != statement_sha256
+        ):
+            raise ValueError(invalid)
+        selected.append(copy.deepcopy(packet))
+    return tuple(selected)
+
+
 @dataclass(frozen=True)
 class CandidateApplicationPackage:
     source: ApplicationSource
@@ -132,10 +283,20 @@ class CandidateApplicationDeploymentBinding:
     schema_version: str = "jaa.candidate-application-deployment-binding.v1"
 
     def __post_init__(self) -> None:
-        if not self.application_id.startswith("app_") or self.environment not in {
-            "production",
-            "synthetic",
-        }:
+        expected_schema = (
+            CURRENT_RUNTIME_DEPLOYMENT_BINDING_SCHEMA
+            if self.environment == CURRENT_RUNTIME_ENVIRONMENT
+            else "jaa.candidate-application-deployment-binding.v1"
+        )
+        if (
+            not self.application_id.startswith("app_")
+            or self.environment not in {
+                "production",
+                "synthetic",
+                CURRENT_RUNTIME_ENVIRONMENT,
+            }
+            or self.schema_version != expected_schema
+        ):
             raise ValueError("candidate deployment binding scope is invalid")
         for value in (
             self.handoff_root_sha256,
@@ -173,6 +334,11 @@ def build_candidate_application_deployment_binding(
     current_boundary_receipt_sha256: str,
     candidate_authority_file_sha256: str,
 ) -> CandidateApplicationDeploymentBinding:
+    schema_version = (
+        CURRENT_RUNTIME_DEPLOYMENT_BINDING_SCHEMA
+        if environment == CURRENT_RUNTIME_ENVIRONMENT
+        else "jaa.candidate-application-deployment-binding.v1"
+    )
     body = {
         "admission_receipt_sha256": admission_receipt_sha256,
         "application_id": application_id,
@@ -180,7 +346,7 @@ def build_candidate_application_deployment_binding(
         "current_boundary_receipt_sha256": current_boundary_receipt_sha256,
         "environment": environment,
         "handoff_root_sha256": handoff_root_sha256,
-        "schema_version": "jaa.candidate-application-deployment-binding.v1",
+        "schema_version": schema_version,
     }
     return CandidateApplicationDeploymentBinding(
         application_id=application_id,
@@ -190,6 +356,7 @@ def build_candidate_application_deployment_binding(
         current_boundary_receipt_sha256=current_boundary_receipt_sha256,
         candidate_authority_file_sha256=candidate_authority_file_sha256,
         binding_sha256=content_hash(body),
+        schema_version=schema_version,
     )
 
 
@@ -237,7 +404,14 @@ class MarketApplicationDecisionAuthority:
     def __post_init__(self) -> None:
         if (
             not self.application_id.startswith("app_")
-            or self.environment not in {"production", "synthetic"}
+            or self.environment
+            not in {"production", "synthetic", CURRENT_RUNTIME_ENVIRONMENT}
+            or self.schema_version
+            != (
+                CURRENT_RUNTIME_DECISION_AUTHORITY_SCHEMA
+                if self.environment == CURRENT_RUNTIME_ENVIRONMENT
+                else "jaa.market-application-decision-authority.v1"
+            )
             or not self.source_job_key
             or not self.internal_job_key
             or not self.source_url
@@ -402,60 +576,102 @@ def build_market_application_decision_authority(
         or selection.get("source_job_key") != source_job_key
     ):
         raise ValueError("market application eligibility authority differs")
-    evidence_bytes = approved_evidence_path.read_bytes()
-    evidence_document = json.loads(evidence_bytes)
-    approved_statements = _approved_statements(approved_evidence_path)
     projection_sha256 = candidate_projection.get("projection_sha256")
     if not isinstance(projection_sha256, str):
         raise ValueError("market application candidate projection is malformed")
     try:
         candidate_authority_document = json.loads(candidate_authority_bytes)
-        ledger_rows = [json.loads(line) for line in evidence_ledger_bytes.splitlines()]
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("market application candidate evidence is not JSON") from exc
+        raise ValueError("market application candidate authority is not JSON") from exc
     if (
         not isinstance(candidate_authority_document, dict)
         or candidate_authority_document.get("candidate_projection")
         != dict(candidate_projection)
-        or not ledger_rows
-        or any(not isinstance(row, dict) for row in ledger_rows)
     ):
         raise ValueError("market application candidate evidence authority differs")
-    projected_rows = candidate_projection.get("approved_evidence")
-    projected = {
-        str(row["id"]): (str(row["statement_sha256"]), str(row["kind"]))
-        for row in projected_rows
-        if isinstance(row, Mapping)
-    } if isinstance(projected_rows, list) else {}
-    ledger_ids: set[str] = set()
-    ledger_order: list[str] = []
-    for row in ledger_rows:
-        evidence_id = row.get("evidence_id")
-        claim = row.get("claim")
+    current_runtime = deployment_binding.environment == CURRENT_RUNTIME_ENVIRONMENT
+    current_profile_ledger_sha256: str | None = None
+    if current_runtime:
+        profile_binding = candidate_authority_document.get("profile_binding")
         if (
-            set(row)
-            != {
-                "claim", "confidence", "content_sha256", "evidence_id", "kind",
-                "observed_at", "source_ref", "status",
-            }
-            or not isinstance(evidence_id, str)
-            or evidence_id in ledger_ids
-            or not isinstance(claim, str)
-            or _sha256(claim.encode()) != row.get("content_sha256")
-            or projected.get(evidence_id)
-            != (row.get("content_sha256"), row.get("kind"))
-            or type(row.get("confidence")) is not float
-            or row.get("confidence") != 1.0
-            or row.get("observed_at") is not None
-            or row.get("source_ref") != f"authority://approved-evidence/{evidence_id}"
-            or row.get("status") != "explicit"
+            not isinstance(profile_binding, dict)
+            or type(profile_binding.get("evidence_ledger_sha256")) is not str
+            or _CURRENT_PACKET_SHA256.fullmatch(
+                profile_binding["evidence_ledger_sha256"]
+            ) is None
         ):
-            raise ValueError("market application evidence ledger differs from candidate projection")
-        ledger_ids.add(evidence_id)
-        ledger_order.append(evidence_id)
-    ledger_evidence = tuple(
-        approved_statements[evidence_id] for evidence_id in ledger_order
+            raise ValueError("market application current profile ledger binding differs")
+        current_profile_ledger_sha256 = profile_binding["evidence_ledger_sha256"]
+    expected_evidence_sha256 = None
+    if current_runtime:
+        expected_evidence_sha256 = _projection_evidence_sha256(
+            candidate_projection,
+            {"candidate_projection_sha256": projection_sha256},
+        )
+    evidence_bytes = approved_evidence_path.read_bytes()
+    evidence_document = json.loads(evidence_bytes)
+    approved_statements = _approved_statements(
+        approved_evidence_path,
+        expected_evidence_sha256=expected_evidence_sha256,
     )
+    try:
+        ledger_rows = [json.loads(line) for line in evidence_ledger_bytes.splitlines()]
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("market application evidence ledger is not JSON") from exc
+    if not ledger_rows or any(not isinstance(row, dict) for row in ledger_rows):
+        raise ValueError("market application candidate evidence authority differs")
+    projected_rows = candidate_projection.get("approved_evidence")
+    if current_runtime:
+        try:
+            current_evidence_items = [EvidenceItem(**row) for row in ledger_rows]
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("market application current evidence ledger differs") from None
+        if (
+            canonical_hash([asdict(item) for item in current_evidence_items])
+            != current_profile_ledger_sha256
+        ):
+            raise ValueError("market application current profile ledger binding differs")
+        packet_rows = evidence_document.get("statements")
+        ledger_evidence = match_selected_packet(
+            [item.evidence_id for item in current_evidence_items],
+            projected_rows,
+            packet_rows,
+        )
+    else:
+        projected = {
+            str(row["id"]): (str(row["statement_sha256"]), str(row["kind"]))
+            for row in projected_rows
+            if isinstance(row, Mapping)
+        } if isinstance(projected_rows, list) else {}
+        ledger_ids: set[str] = set()
+        ledger_order: list[str] = []
+        for row in ledger_rows:
+            evidence_id = row.get("evidence_id")
+            claim = row.get("claim")
+            if (
+                set(row)
+                != {
+                    "claim", "confidence", "content_sha256", "evidence_id", "kind",
+                    "observed_at", "source_ref", "status",
+                }
+                or not isinstance(evidence_id, str)
+                or evidence_id in ledger_ids
+                or not isinstance(claim, str)
+                or _sha256(claim.encode()) != row.get("content_sha256")
+                or projected.get(evidence_id)
+                != (row.get("content_sha256"), row.get("kind"))
+                or type(row.get("confidence")) is not float
+                or row.get("confidence") != 1.0
+                or row.get("observed_at") is not None
+                or row.get("source_ref") != f"authority://approved-evidence/{evidence_id}"
+                or row.get("status") != "explicit"
+            ):
+                raise ValueError("market application evidence ledger differs from candidate projection")
+            ledger_ids.add(evidence_id)
+            ledger_order.append(evidence_id)
+        ledger_evidence = tuple(
+            approved_statements[evidence_id] for evidence_id in ledger_order
+        )
     compiled = compile_canonical_requirements_evidence_matrix(
         requirements_bytes, ledger_evidence
     )
@@ -487,7 +703,11 @@ def build_market_application_decision_authority(
         "release_authority": False,
         "requirements_sha256": requirements_sha256,
         "role_title": role_title,
-        "schema_version": "jaa.market-application-decision-authority.v1",
+        "schema_version": (
+            CURRENT_RUNTIME_DECISION_AUTHORITY_SCHEMA
+            if deployment_binding.environment == CURRENT_RUNTIME_ENVIRONMENT
+            else "jaa.market-application-decision-authority.v1"
+        ),
         "selection_receipt_sha256": selection_receipt_sha256,
         "source_job_key": source_job_key,
         "source_url": source_url,
@@ -522,6 +742,7 @@ def build_market_application_decision_authority(
         company_name=company_name,
         observed_at=observed_at,
         authority_sha256=content_hash(values),
+        schema_version=str(values["schema_version"]),
     )
 
 
@@ -533,10 +754,10 @@ class CandidateApplicationMaterializationReceipt:
     candidate_authority_object_sha256: str
     candidate_projection_sha256: str
     deployment_binding: CandidateApplicationDeploymentBinding
-    contact_authority_sha256: str
-    contact_envelope_sha256: str
-    contact_registry_sha256: str
-    contact_signer_public_key_sha256: str
+    contact_authority_sha256: str | None
+    contact_envelope_sha256: str | None
+    contact_registry_sha256: str | None
+    contact_signer_public_key_sha256: str | None
     cv_claim_set_sha256: str
     approved_evidence_file_sha256: str
     approved_evidence_object_sha256: str
@@ -553,20 +774,22 @@ class CandidateApplicationMaterializationReceipt:
     application_source_sha256: str
     fact_bindings: tuple[Mapping[str, object], ...]
     style_bindings: tuple[Mapping[str, object], ...]
-    source_policy_receipt: CandidateSourcePolicyReceipt
+    source_policy_receipt: CandidateSourcePolicyReceipt | PreEditorialSourceEnvelopeReceipt
     receipt_sha256: str
     schema_version: str = "jaa.candidate-application-materialization-receipt.v3"
     release_authority: bool = False
+    contact_provenance_sha256: str | None = None
+    contact_provenance_schema: str | None = None
+    contact_source_hashes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        current_runtime = (
+            self.deployment_binding.environment == CURRENT_RUNTIME_ENVIRONMENT
+        )
         for value in (
             self.candidate_authority_file_sha256,
             self.candidate_authority_object_sha256,
             self.candidate_projection_sha256,
-            self.contact_authority_sha256,
-            self.contact_envelope_sha256,
-            self.contact_registry_sha256,
-            self.contact_signer_public_key_sha256,
             self.cv_claim_set_sha256,
             self.approved_evidence_file_sha256,
             self.approved_evidence_object_sha256,
@@ -580,6 +803,48 @@ class CandidateApplicationMaterializationReceipt:
         ):
             if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
                 raise ValueError("materialization receipt identity is not SHA-256")
+        if current_runtime:
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.contact_authority_sha256,
+                        self.contact_envelope_sha256,
+                        self.contact_registry_sha256,
+                        self.contact_signer_public_key_sha256,
+                    )
+                )
+                or type(self.contact_provenance_sha256) is not str
+                or len(self.contact_provenance_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in self.contact_provenance_sha256)
+                or self.contact_provenance_schema != "current-contact-provenance-v1"
+                or not self.contact_source_hashes
+                or self.contact_source_hashes != tuple(sorted(set(self.contact_source_hashes)))
+                or any(
+                    type(value) is not str
+                    or len(value) != 64
+                    or any(c not in "0123456789abcdef" for c in value)
+                    for value in self.contact_source_hashes
+                )
+            ):
+                raise ValueError("current materialization contact provenance is malformed")
+        elif (
+            self.contact_provenance_sha256 is not None
+            or self.contact_provenance_schema is not None
+            or self.contact_source_hashes
+            or any(
+                type(value) is not str
+                or len(value) != 64
+                or any(c not in "0123456789abcdef" for c in value)
+                for value in (
+                    self.contact_authority_sha256,
+                    self.contact_envelope_sha256,
+                    self.contact_registry_sha256,
+                    self.contact_signer_public_key_sha256,
+                )
+            )
+        ):
+            raise ValueError("legacy materialization contact authority is malformed")
         if (
             not self.job_key
             or not self.role_title
@@ -588,9 +853,18 @@ class CandidateApplicationMaterializationReceipt:
             or not self.decision_authority_schema
             or not self.fact_bindings
             or self.release_authority is not False
+            or self.schema_version
+            != (
+                CURRENT_RUNTIME_MATERIALIZATION_RECEIPT_SCHEMA
+                if self.deployment_binding.environment == CURRENT_RUNTIME_ENVIRONMENT
+                else "jaa.candidate-application-materialization-receipt.v3"
+            )
         ):
             raise ValueError("materialization receipt authority is malformed")
-        if not isinstance(self.source_policy_receipt, CandidateSourcePolicyReceipt):
+        if current_runtime:
+            if type(self.source_policy_receipt) is not PreEditorialSourceEnvelopeReceipt:
+                raise ValueError("current source envelope receipt type is invalid")
+        elif not isinstance(self.source_policy_receipt, CandidateSourcePolicyReceipt):
             raise ValueError("materialization source policy receipt type is invalid")
         self.source_policy_receipt.__post_init__()
         if not isinstance(self.deployment_binding, CandidateApplicationDeploymentBinding):
@@ -643,6 +917,14 @@ class CandidateApplicationMaterializationReceipt:
             "vacancy_sha256": self.vacancy_sha256,
             "vacancy_snapshot_sha256": self.vacancy_snapshot_sha256,
         }
+        if self.deployment_binding.environment == CURRENT_RUNTIME_ENVIRONMENT:
+            value.update(
+                {
+                    "contact_provenance_sha256": self.contact_provenance_sha256,
+                    "contact_provenance_schema": self.contact_provenance_schema,
+                    "contact_source_hashes": list(self.contact_source_hashes),
+                }
+            )
         if include_identity:
             value["receipt_sha256"] = self.receipt_sha256
         return value
@@ -856,7 +1138,20 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _candidate_statement_is_outward_safe(value: str) -> bool:
+def _candidate_statement_is_outward_safe(
+    value: str,
+    *,
+    current_runtime: bool = False,
+) -> bool:
+    if (
+        type(value) is not str
+        or not value.strip()
+        or value != value.strip()
+        or type(current_runtime) is not bool
+    ):
+        return False
+    if current_runtime:
+        return True
     folded = value.casefold()
     internal_markers = (
         "ai-assisted",
@@ -876,12 +1171,14 @@ def _outward_profile_text(
     evidence: Mapping[str, object],
     *,
     document_kind: str | None = None,
+    current_runtime: bool = False,
 ) -> str:
     evidence_id = str(evidence["id"])
     return approved_candidate_outward_text(
         evidence_id,
         str(evidence["statement"]),
         document_kind=document_kind or "cv",
+        current_runtime=current_runtime,
     )
 
 
@@ -978,10 +1275,15 @@ def _profile_sentence(
     statement_sha256: str,
     document_kind: str,
     approved_evidence_source: ApprovedEvidenceSourceContext | None = None,
+    current_runtime: bool = False,
 ) -> FactualSentence:
     evidence_id = str(evidence["id"])
     approved_source_text = str(evidence["statement"])
-    text = _outward_profile_text(evidence, document_kind=document_kind)
+    text = _outward_profile_text(
+        evidence,
+        document_kind=document_kind,
+        current_runtime=current_runtime,
+    )
     rewritten = text != approved_source_text
     rewrite_authority = (
         resolve_authenticated_outward_rewrite(
@@ -992,6 +1294,7 @@ def _profile_sentence(
             document_kind=document_kind,
             approved_evidence_source=approved_evidence_source,
             candidate_profile_hash=candidate_profile_hash,
+            current_runtime=current_runtime,
         )
         if rewritten
         else None
@@ -1348,6 +1651,8 @@ def _build_candidate_application_source(
     role_title: str,
     company_name: str,
     contact: CandidateContact,
+    current_runtime: bool = False,
+    current_matrix_policy_sha256: str | None = None,
     approved_evidence_path: Path = APPROVED_EVIDENCE_PATH,
     revision_writer: GenerationRevisionWriter | None = None,
 ) -> _CandidateApplicationSourceBuild:
@@ -1421,6 +1726,11 @@ def _build_candidate_application_source(
         expected_evidence_sha256
         == APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
     )
+    match_policy_sha256 = resolve_match_policy(
+        candidate_projection,
+        current_runtime=current_runtime,
+        current_matrix_policy_sha256=current_matrix_policy_sha256,
+    )
     verified_evidence_kinds: dict[str, str] = {}
     requirements: list[Requirement] = []
     matches: list[MatchResult] = []
@@ -1438,8 +1748,14 @@ def _build_candidate_application_source(
             candidate = statements.get(candidate_id)
             if candidate is None or candidate_id in OUTWARD_PROFILE_REWRITES:
                 continue
-            outward_text = _outward_profile_text(candidate)
-            if not _candidate_statement_is_outward_safe(outward_text):
+            outward_text = _outward_profile_text(
+                candidate,
+                current_runtime=current_runtime,
+            )
+            if not _candidate_statement_is_outward_safe(
+                outward_text,
+                current_runtime=current_runtime,
+            ):
                 continue
             try:
                 for document_kind in ("cv", "cover_letter"):
@@ -1531,7 +1847,7 @@ def _build_candidate_application_source(
                 selected_evidence_ids,
                 10_000,
                 "Exact operator-approved evidence matched by candidate authority.",
-                str(candidate_projection["policy_sha256"]),
+                match_policy_sha256,
                 None,
             )
         )
@@ -1582,7 +1898,7 @@ def _build_candidate_application_source(
                 (),
                 10_000,
                 "No exact employer-safe approved evidence matched this requirement.",
-                str(candidate_projection["policy_sha256"]),
+                match_policy_sha256,
                 None,
             )
         )
@@ -1722,8 +2038,12 @@ def _build_candidate_application_source(
             outward_text = _outward_profile_text(
                 evidence,
                 document_kind=document_kind,
+                current_runtime=current_runtime,
             )
-            if not _candidate_statement_is_outward_safe(outward_text):
+            if not _candidate_statement_is_outward_safe(
+                outward_text,
+                current_runtime=current_runtime,
+            ):
                 return None
             assert_employer_facing_text(
                 outward_text,
@@ -1737,6 +2057,7 @@ def _build_candidate_application_source(
             statement_sha256=str(projected["statement_sha256"]),
             document_kind=document_kind,
             approved_evidence_source=approved_evidence_source,
+            current_runtime=current_runtime,
         )
 
     strategy_cv_by_evidence: dict[str, list[FactualSentence]] = {}
@@ -2087,19 +2408,33 @@ def _constraint_receipt(
 def _source_policy_receipt(
     source: ApplicationSource,
     editable: EditableArtifacts,
-) -> CandidateSourcePolicyReceipt:
+    *,
+    allow_missing_city: bool = False,
+    current_runtime: bool = False,
+) -> CandidateSourcePolicyReceipt | PreEditorialSourceEnvelopeReceipt:
     cv_facts = {row.sentence_id: row.text for row in source.facts}
+    sections = {
+        section.heading: tuple(cv_facts[value] for value in section.sentence_ids)
+        for section in source.cv_sections
+    }
+    if current_runtime:
+        return PreEditorialSourceEnvelopeReceipt.from_document(
+            validate_pre_editorial_source(
+                source_id=source.source_id,
+                cv_text=editable.cv_text,
+                cv_sha256=editable.cv_sha256,
+                sections=sections,
+            )
+        )
     return validate_candidate_source_policy(
         source_id=source.source_id,
         candidate_name=source.contact.full_name,
         candidate_city=source.contact.city,
         cv_text=editable.cv_text,
         cv_sha256=editable.cv_sha256,
-        sections={
-            section.heading: tuple(cv_facts[value] for value in section.sentence_ids)
-            for section in source.cv_sections
-        },
+        sections=sections,
         rendered_pages=(tuple(editable.cv_text.splitlines()),),
+        allow_missing_city=allow_missing_city,
         target_role_title=source.role_title,
     )
 
@@ -2254,7 +2589,7 @@ def materialize_candidate_application_source(
     *,
     candidate_authority_path: Path,
     deployment_binding: CandidateApplicationDeploymentBinding,
-    contact_authority: CandidateContactAuthority,
+    contact_authority: CandidateContactAuthority | None,
     decision_receipt: Mapping[str, object],
     candidate_projection: Mapping[str, object],
     job_key: str,
@@ -2268,18 +2603,55 @@ def materialize_candidate_application_source(
     market_decision_authority: MarketApplicationDecisionAuthority | None = None,
     candidate_authority_bytes: bytes | None = None,
     contact_authority_bytes: bytes | None = None,
+    contact_provenance: CurrentContactProvenance | None = None,
 ) -> CandidateApplicationMaterialization:
     """Materialize exact source authority without rendering or release authority."""
     deployment_binding.__post_init__()
-    if contact != contact_authority.contact:
-        raise ValueError("application contact differs from signed operator authority")
-    contact_bytes = (
-        contact_authority.source_path.read_bytes()
-        if contact_authority_bytes is None
-        else contact_authority_bytes
-    )
-    if _sha256(contact_bytes) != contact_authority.envelope_sha256:
-        raise ValueError("signed contact authority envelope hash differs")
+    current_runtime = deployment_binding.environment == CURRENT_RUNTIME_ENVIRONMENT
+    if not current_runtime and contact.city is None:
+        raise ValueError("legacy application contact requires an explicit city")
+    if current_runtime:
+        if (
+            contact_authority is not None
+            or type(contact_provenance) is not CurrentContactProvenance
+            or contact_authority_bytes is not None
+        ):
+            raise ValueError("current application requires current contact provenance")
+        contact_provenance.__post_init__()
+        if contact != contact_provenance.contact:
+            raise ValueError("application contact differs from current provenance")
+        contact_authority_sha256 = None
+        contact_envelope_sha256 = None
+        contact_registry_sha256 = None
+        contact_signer_public_key_sha256 = None
+        current_contact_document = contact_provenance.document()
+        current_contact_provenance_sha256 = contact_provenance.sha256
+        current_contact_provenance_schema = str(
+            current_contact_document["schema_version"]
+        )
+        current_contact_source_hashes = contact_provenance.source_hashes
+    else:
+        if (
+            type(contact_authority) is not CandidateContactAuthority
+            or contact_provenance is not None
+        ):
+            raise ValueError("legacy application requires signed contact authority")
+        if contact != contact_authority.contact:
+            raise ValueError("application contact differs from signed operator authority")
+        contact_bytes = (
+            contact_authority.source_path.read_bytes()
+            if contact_authority_bytes is None
+            else contact_authority_bytes
+        )
+        if _sha256(contact_bytes) != contact_authority.envelope_sha256:
+            raise ValueError("signed contact authority envelope hash differs")
+        contact_authority_sha256 = contact_authority.authority_sha256
+        contact_envelope_sha256 = contact_authority.envelope_sha256
+        contact_registry_sha256 = contact_authority.registry_sha256
+        contact_signer_public_key_sha256 = contact_authority.signer_public_key_sha256
+        current_contact_provenance_sha256 = None
+        current_contact_provenance_schema = None
+        current_contact_source_hashes = ()
     if market_decision_authority is not None:
         market_decision_authority.__post_init__()
         if (
@@ -2310,9 +2682,16 @@ def materialize_candidate_application_source(
         exact_bytes=candidate_authority_bytes,
     )
     evidence_bytes = approved_evidence_path.read_bytes()
-    if _sha256(evidence_bytes) != APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]:
+    expected_source_evidence_sha256 = (
+        _projection_evidence_sha256(candidate_projection, decision_receipt)
+        if current_runtime
+        else APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
+    )
+    if _sha256(evidence_bytes) != expected_source_evidence_sha256:
         raise ValueError("application factory candidate evidence hash differs")
     evidence_document = json.loads(evidence_bytes)
+    if current_runtime and type(market_decision_authority) is not MarketApplicationDecisionAuthority:
+        raise ValueError("current application requires authenticated matrix policy")
     built = _build_candidate_application_source(
         decision_receipt=decision_receipt,
         candidate_projection=candidate_projection,
@@ -2322,12 +2701,23 @@ def materialize_candidate_application_source(
         role_title=role_title,
         company_name=company_name,
         contact=contact,
+        current_runtime=current_runtime,
+        current_matrix_policy_sha256=(
+            market_decision_authority.matrix_policy_sha256
+            if current_runtime
+            else None
+        ),
         approved_evidence_path=approved_evidence_path,
         revision_writer=revision_writer,
     )
     source = built.source
     editable = render_editable_text(source)
-    source_policy = _source_policy_receipt(source, editable)
+    source_policy = _source_policy_receipt(
+        source,
+        editable,
+        allow_missing_city=current_runtime and contact.city is None,
+        current_runtime=current_runtime,
+    )
     approved_statements = {
         str(row["id"]): row
         for row in evidence_document["statements"]
@@ -2364,6 +2754,20 @@ def materialize_candidate_application_source(
         }
         for slot in source.style_slots
     )
+    contact_receipt_fields = {
+        "contact_authority_sha256": contact_authority_sha256,
+        "contact_envelope_sha256": contact_envelope_sha256,
+        "contact_registry_sha256": contact_registry_sha256,
+        "contact_signer_public_key_sha256": contact_signer_public_key_sha256,
+    }
+    if current_runtime:
+        contact_receipt_fields.update(
+            {
+                "contact_provenance_sha256": current_contact_provenance_sha256,
+                "contact_provenance_schema": current_contact_provenance_schema,
+                "contact_source_hashes": list(current_contact_source_hashes),
+            }
+        )
     body = {
         "application_source_id": source.source_id,
         "application_source_sha256": source.content_sha256,
@@ -2374,12 +2778,7 @@ def materialize_candidate_application_source(
         ),
         "candidate_authority_object_sha256": content_hash(authority),
         "candidate_projection_sha256": str(candidate_projection["projection_sha256"]),
-        "contact_authority_sha256": contact_authority.authority_sha256,
-        "contact_envelope_sha256": contact_authority.envelope_sha256,
-        "contact_registry_sha256": contact_authority.registry_sha256,
-        "contact_signer_public_key_sha256": (
-            contact_authority.signer_public_key_sha256
-        ),
+        **contact_receipt_fields,
         "cv_claim_set_sha256": cv_claim_set_sha256,
         "deployment_binding": deployment_binding.document(),
         "source_policy_receipt": source_policy.document(),
@@ -2400,7 +2799,11 @@ def materialize_candidate_application_source(
         "company_name": company_name,
         "source_url": source_url,
         "release_authority": False,
-        "schema_version": "jaa.candidate-application-materialization-receipt.v3",
+        "schema_version": (
+            CURRENT_RUNTIME_MATERIALIZATION_RECEIPT_SCHEMA
+            if deployment_binding.environment == CURRENT_RUNTIME_ENVIRONMENT
+            else "jaa.candidate-application-materialization-receipt.v3"
+        ),
         "style_bindings": [dict(row) for row in style_bindings],
         "vacancy_sha256": vacancy_sha256,
         "vacancy_snapshot_sha256": (
@@ -2416,12 +2819,10 @@ def materialize_candidate_application_source(
         candidate_authority_object_sha256=content_hash(authority),
         candidate_projection_sha256=str(candidate_projection["projection_sha256"]),
         deployment_binding=deployment_binding,
-        contact_authority_sha256=contact_authority.authority_sha256,
-        contact_envelope_sha256=contact_authority.envelope_sha256,
-        contact_registry_sha256=contact_authority.registry_sha256,
-        contact_signer_public_key_sha256=(
-            contact_authority.signer_public_key_sha256
-        ),
+        contact_authority_sha256=contact_authority_sha256,
+        contact_envelope_sha256=contact_envelope_sha256,
+        contact_registry_sha256=contact_registry_sha256,
+        contact_signer_public_key_sha256=contact_signer_public_key_sha256,
         cv_claim_set_sha256=cv_claim_set_sha256,
         approved_evidence_file_sha256=_sha256(evidence_bytes),
         approved_evidence_object_sha256=content_hash(evidence_document),
@@ -2452,6 +2853,10 @@ def materialize_candidate_application_source(
         style_bindings=style_bindings,
         source_policy_receipt=source_policy,
         receipt_sha256=content_hash(body),
+        schema_version=str(body["schema_version"]),
+        contact_provenance_sha256=current_contact_provenance_sha256,
+        contact_provenance_schema=current_contact_provenance_schema,
+        contact_source_hashes=current_contact_source_hashes,
     )
     receipt.__post_init__()
     if revision_writer is not None:
@@ -2477,5 +2882,6 @@ __all__ = [
     "build_market_application_decision_authority",
     "build_candidate_application_package",
     "build_candidate_application_deployment_binding",
+    "resolve_match_policy",
     "materialize_candidate_application_source",
 ]

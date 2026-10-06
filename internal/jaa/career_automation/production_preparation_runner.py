@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 import subprocess
@@ -35,15 +36,29 @@ from .candidate_contact_authority import (
     PUBLIC_KEY_ENV,
     REGISTRY_ENV,
     CandidateContactResourceLease,
+    CurrentContactProvenance,
+    load_current_contact_provenance,
 )
 from .current_time import installed_production_current_time_witness
-from .handoff_admission import HandoffAdmissionStore, ProtectedLocalOutbox
+from .handoff_admission import (
+    ADMISSION_KIND_CURRENT_RUNTIME,
+    CURRENT_RUNTIME_AUTHORITY_SCOPE,
+    CURRENT_RUNTIME_EMISSION_PROFILE,
+    CURRENT_RUNTIME_ENVIRONMENT,
+    CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+    CURRENT_RUNTIME_TRUST_MODE,
+    CURRENT_RUNTIME_TRUST_ROOT_ID,
+    HandoffAdmissionStore,
+    ProtectedLocalOutbox,
+    _parse_current_runtime_handoff,
+)
 from .market_aligner_preparation import (
     CanonicalPreparationInputMaterializer,
     MarketApplicationMaterializationContext,
     MarketApplicationPreparation,
     prepare_admitted_market_application_from_authorities,
 )
+from .market_aligner_handoff import HandoffContractError, decode_canonical_json
 from .production_handoff_admission_runner import (
     _PinnedProductionPaths,
     _ProductionAdmissionDeployment,
@@ -54,7 +69,10 @@ from .production_handoff_runner import (
     PRODUCTION_MARKET_OUTBOX_ROOT,
     PRODUCTION_MARKET_REPOSITORY_ROOT,
     _read_root_owned_configuration,
+    _validate_deployment_roots,
+    installed_current_runtime_handoff_deployment,
     installed_production_handoff_deployment,
+    select_runtime_deployment,
 )
 from .production_recruiter_assessor import ProductionDetachedRecruiterAssessor
 
@@ -144,19 +162,204 @@ class _ProductionPreparationDeployment:
     admission_database: Path
     outbox_root: Path
     candidate_authority_path: Path
-    contact_authority_path: Path
-    contact_public_key_path: Path
-    contact_registry_path: Path
+    contact_authority_path: Path | None
+    contact_public_key_path: Path | None
+    contact_registry_path: Path | None
     output_root: Path
     recruiter_archive_root: Path
-    codex_binary: Path
-    poppler_bin: Path
+    codex_binary: Path | None
+    poppler_bin: Path | None
     model: str
     timeout_seconds: float
+    current_runtime: bool = False
+    candidate_authority_sha256: str | None = None
+    recovery_manifest_relative_path: str | None = None
 
     @property
     def poppler_library_directory(self) -> Path:
+        if self.poppler_bin is None:
+            raise ProductionPreparationDeploymentError(
+                "current materialization does not configure Poppler"
+            )
         return self.poppler_bin.parent / "lib/x86_64-linux-gnu"
+
+
+def _load_pinned_current_contact_provenance(
+    *,
+    deployment: _ProductionPreparationDeployment,
+    verified,
+    candidate_authority_bytes: bytes,
+) -> tuple[CurrentContactProvenance, dict[str, str]]:
+    from market_aligner.profiler.current_activation import (
+        PinnedCurrentActivationArtifact,
+        PinnedRecoveryInputs,
+        compile_current_profile_projection,
+        read_current_candidate_policy_canary_for_activation,
+        read_current_profile_projection_bundle,
+    )
+    from market_aligner.service.api import MarketAlignerService
+
+    invalid = "current contact inputs differ from the admitted profile"
+    try:
+        authority = decode_canonical_json(candidate_authority_bytes)
+        selection = decode_canonical_json(verified.selection_receipt_bytes)
+        if (
+            type(authority) is not dict
+            or type(selection) is not dict
+            or hashlib.sha256(candidate_authority_bytes).hexdigest()
+            != verified.candidate_authority_sha256
+            or candidate_authority_bytes != verified.candidate_authority_bytes
+            or hashlib.sha256(verified.selection_receipt_bytes).hexdigest()
+            != verified.selection_receipt_sha256
+            or selection.get("schema_version")
+            != "market-aligner.selection-receipt.v1"
+            or selection.get("profile_id") != verified.profile_id
+            or selection.get("profile_version") != verified.profile_version
+            or selection.get("job_key") != verified.job_key
+            or type(selection.get("track")) is not str
+            or not selection["track"]
+        ):
+            raise ValueError(invalid)
+        projection = authority.get("candidate_projection")
+        profile_binding = authority.get("profile_binding")
+        activation_sha256 = authority.get("activation_sha256")
+        if (
+            type(projection) is not dict
+            or type(profile_binding) is not dict
+            or set(profile_binding)
+            != {"profile_id", "profile_sha256", "evidence_ledger_sha256"}
+            or profile_binding.get("profile_id") != verified.profile_id
+            or type(activation_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", activation_sha256) is None
+            or type(projection.get("source_hashes")) is not dict
+            or projection["source_hashes"].get("current_profile_activation")
+            != activation_sha256
+            or type(projection["source_hashes"].get("recovery_manifest"))
+            is not str
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                projection["source_hashes"]["recovery_manifest"],
+            )
+            is None
+        ):
+            raise ValueError(invalid)
+        service = MarketAlignerService(deployment.data_home)
+        snapshot = service.profiles.coherent_snapshot(
+            verified.profile_id, require_committed_generation=True
+        )
+        try:
+            if (
+                snapshot.profile.version != verified.profile_version
+                or profile_binding.get("profile_sha256")
+                != snapshot.hashes.get("profile_sha256")
+                or profile_binding.get("evidence_ledger_sha256")
+                != snapshot.hashes.get("evidence_ledger_sha256")
+            ):
+                raise ValueError(invalid)
+            current_documents, current_projection = read_current_profile_projection_bundle(
+                data_home=deployment.data_home,
+                profile_id=verified.profile_id,
+                candidate_authority_path=deployment.candidate_authority_path,
+                expected_candidate_authority_sha256=(
+                    deployment.candidate_authority_sha256
+                ),
+                profile_sha256=snapshot.hashes["profile_sha256"],
+                evidence_ledger_sha256=snapshot.hashes[
+                    "evidence_ledger_sha256"
+                ],
+            )
+            if (
+                current_documents["candidate_authority_bytes"]
+                != candidate_authority_bytes
+                or current_projection != projection
+            ):
+                raise ValueError(invalid)
+            recovery_manifest_sha256 = projection["source_hashes"][
+                "recovery_manifest"
+            ]
+            canary_bytes, _canary_sha256 = (
+                read_current_candidate_policy_canary_for_activation(
+                    data_home=deployment.data_home,
+                    profile_id=verified.profile_id,
+                    track=selection["track"],
+                    source_job_key=verified.source_job_key,
+                    activation_sha256=activation_sha256,
+                )
+            )
+            canary = decode_canonical_json(canary_bytes)
+            if (
+                type(canary) is not dict
+                or canary.get("recovery_manifest_sha256")
+                != recovery_manifest_sha256
+            ):
+                raise ValueError(invalid)
+            activation_name = canary.get("activation_name")
+            activation_file_sha256 = canary.get("activation_file_sha256")
+            with PinnedCurrentActivationArtifact(
+                data_home=deployment.data_home,
+                profile_id=verified.profile_id,
+                artifact_name=activation_name,
+                expected_sha256=activation_file_sha256,
+            ) as activation:
+                activation_document = activation.document
+                approval_id = activation_document.get("approval_id")
+                source_hashes = activation_document.get("source_hashes")
+                if (
+                    activation_document.get("profile_id") != verified.profile_id
+                    or activation_document.get("activation_sha256")
+                    != activation_sha256
+                    or type(approval_id) is not str
+                    or not approval_id
+                    or type(source_hashes) is not dict
+                    or source_hashes.get("recovery_manifest")
+                    != recovery_manifest_sha256
+                ):
+                    raise ValueError(invalid)
+                with PinnedRecoveryInputs(
+                    data_home=deployment.data_home,
+                    manifest_relative_path=(
+                        deployment.recovery_manifest_relative_path
+                    ),
+                    expected_manifest_sha256=recovery_manifest_sha256,
+                    approval_id=approval_id,
+                    include_saved_cvs=True,
+                ) as recovered:
+                    compiled_documents = compile_current_profile_projection(
+                        profile_id=verified.profile_id,
+                        activation_bytes=activation.raw_bytes,
+                        expected_activation_sha256=activation.sha256,
+                        manifest_bytes=recovered.manifest_bytes,
+                        expected_manifest_sha256=recovery_manifest_sha256,
+                        approval_id=approval_id,
+                        recovered_profile_bytes=recovered.files[
+                            "candidate_profile_and_job_preferences"
+                        ],
+                        recovered_evidence_bytes=recovered.files[
+                            "existing_profile_claims_and_provenance"
+                        ],
+                        snapshot=snapshot,
+                    )
+                    if compiled_documents != current_documents:
+                        raise ValueError(invalid)
+                    bindings = {
+                        "manifest_sha256": recovery_manifest_sha256,
+                        "activation_sha256": activation_sha256,
+                        "profile_sha256": snapshot.hashes["profile_sha256"],
+                        "approval_id": approval_id,
+                    }
+                    contact_provenance = load_current_contact_provenance(
+                        saved_cv_bytes=recovered.saved_cv_bytes,
+                        saved_cv_descriptors=recovered.saved_cv_descriptors,
+                        bindings=bindings,
+                    )
+                    activation.revalidate()
+                    recovered.revalidate()
+                    snapshot.revalidate()
+                    return contact_provenance, bindings
+        finally:
+            snapshot.close()
+    except (OSError, TypeError, ValueError, KeyError, HandoffContractError):
+        raise ProductionPreparationDeploymentError(invalid) from None
 
 
 @dataclass(frozen=True)
@@ -750,11 +953,77 @@ def installed_production_preparation_deployment() -> _ProductionPreparationDeplo
     )
 
 
+def _current_preparation_deployment(
+    handoff, recovery_manifest_relative_path: str
+) -> _ProductionPreparationDeployment:
+    if (
+        type(recovery_manifest_relative_path) is not str
+        or not recovery_manifest_relative_path.startswith("recovered-inputs/")
+        or "\\" in recovery_manifest_relative_path
+        or "//" in recovery_manifest_relative_path
+        or any(
+            part in {"", ".", ".."}
+            for part in recovery_manifest_relative_path.split("/")
+        )
+        or not recovery_manifest_relative_path.endswith("/recovery-manifest.json")
+    ):
+        raise ProductionPreparationDeploymentError(
+            "current recovery manifest locator is invalid"
+        )
+    data_home = handoff.data_home
+    return _ProductionPreparationDeployment(
+        repository_root=handoff.repository_root,
+        data_home=data_home,
+        admission_database=(
+            data_home / "state/jaa-production-admissions/admissions.sqlite3"
+        ),
+        outbox_root=handoff.output_root,
+        candidate_authority_path=handoff.candidate_authority_path,
+        contact_authority_path=None,
+        contact_public_key_path=None,
+        contact_registry_path=None,
+        output_root=data_home / "state/jaa-production-preparations",
+        recruiter_archive_root=(
+            data_home / "state/jaa-production-recruiter-diagnostics"
+        ),
+        codex_binary=None,
+        poppler_bin=None,
+        model=PRODUCTION_CODEX_MODEL,
+        timeout_seconds=PRODUCTION_CODEX_TIMEOUT_SECONDS,
+        current_runtime=True,
+        candidate_authority_sha256=handoff.candidate_authority_sha256,
+        recovery_manifest_relative_path=recovery_manifest_relative_path,
+    )
+
+
 def _source_record_for_application(
     database: Path, application_id: str
 ) -> _AdmittedSourceRecord:
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
     try:
+        current_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='current_runtime_admissions'"
+        ).fetchone()
+        current_row = (
+            connection.execute(
+                "SELECT * FROM current_runtime_admissions WHERE application_id=?",
+                (application_id,),
+            ).fetchone()
+            if current_table is not None
+            else None
+        )
+        if current_row is not None:
+            legacy_conflict = connection.execute(
+                "SELECT 1 FROM application_admissions WHERE application_id=?",
+                (application_id,),
+            ).fetchone()
+            if legacy_conflict is not None:
+                raise ProductionPreparationDeploymentError(
+                    "admission mode conflicts"
+                )
+            return _current_runtime_source_record(current_row, application_id)
         row = connection.execute(
             "SELECT admission_context_bytes, admission_context_sha256, "
             "producer_commit_sha, producer_product, environment, trust_root_id, "
@@ -792,6 +1061,186 @@ def _source_record_for_application(
         or context.get("trust_root_id") != PRODUCTION_HANDOFF_TRUST_ROOT_ID
     ):
         raise ProductionPreparationDeploymentError("sealed admission context differs")
+    return _AdmittedSourceRecord(
+        source_record_sha256=source_record,
+        producer_commit_sha=producer_commit,
+    )
+
+
+def _current_runtime_source_record(
+    row: sqlite3.Row, application_id: str
+) -> _AdmittedSourceRecord:
+    error = ProductionPreparationDeploymentError(
+        "current runtime admission differs"
+    )
+    if (
+        row["application_id"] != application_id
+        or row["admission_kind"] != ADMISSION_KIND_CURRENT_RUNTIME
+        or row["environment"] != CURRENT_RUNTIME_ENVIRONMENT
+        or row["authority_scope"] != CURRENT_RUNTIME_AUTHORITY_SCOPE
+        or row["emission_profile"] != CURRENT_RUNTIME_EMISSION_PROFILE
+        or row["trust_mode"] != CURRENT_RUNTIME_TRUST_MODE
+        or row["trust_root_id"] != CURRENT_RUNTIME_TRUST_ROOT_ID
+        or row["producer_product"] != "market-aligner"
+        or row["freshness_provenance"] != CURRENT_RUNTIME_FRESHNESS_PROVENANCE
+        or type(row["sealed"]) is not int
+        or row["sealed"] != 1
+        or type(row["reference_count"]) is not int
+        or row["reference_count"] < 1
+    ):
+        raise error
+
+    context_bytes = row["admission_context_bytes"]
+    if type(context_bytes) is not bytes:
+        raise error
+    try:
+        context = decode_canonical_json(
+            context_bytes, label="current runtime admission context"
+        )
+    except HandoffContractError:
+        raise error from None
+    context_keys = {
+        "environment",
+        "handoff_root_sha256",
+        "issued_at",
+        "producer_commit_sha",
+        "producer_product",
+        "source_record_sha256",
+        "trust_mode",
+        "trust_proof_sha256",
+        "trust_root_id",
+    }
+    if (
+        type(context) is not dict
+        or set(context) != context_keys
+        or canonical_json_bytes(context) != context_bytes
+    ):
+        raise error
+
+    source_record = context["source_record_sha256"]
+    producer_commit = context["producer_commit_sha"]
+    digest_fields = (
+        source_record,
+        row["handoff_root_sha256"],
+        row["payload_sha256"],
+        row["vacancy_snapshot_sha256"],
+        row["logical_identity_sha256"],
+        row["admission_context_sha256"],
+        row["context_authenticator_sha256"],
+        row["verification_receipt_sha256"],
+    )
+    if (
+        type(source_record) is not str
+        or any(
+            type(value) is not str
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in digest_fields
+        )
+        or type(producer_commit) is not str
+        or len(producer_commit) != 40
+        or any(character not in "0123456789abcdef" for character in producer_commit)
+        or context["environment"] != CURRENT_RUNTIME_ENVIRONMENT
+        or context["trust_mode"] != CURRENT_RUNTIME_TRUST_MODE
+        or context["trust_root_id"] != CURRENT_RUNTIME_TRUST_ROOT_ID
+        or context["producer_product"] != "market-aligner"
+        or context["producer_commit_sha"] != row["producer_commit_sha"]
+        or context["handoff_root_sha256"] != row["handoff_root_sha256"]
+        or hashlib.sha256(context_bytes).hexdigest()
+        != row["admission_context_sha256"]
+    ):
+        raise error
+    context_basis = dict(context)
+    proof = context_basis.pop("trust_proof_sha256")
+    if (
+        type(proof) is not str
+        or len(proof) != 64
+        or any(character not in "0123456789abcdef" for character in proof)
+        or hashlib.sha256(canonical_json_bytes(context_basis)).hexdigest() != proof
+    ):
+        raise error
+
+    original_bytes = row["original_bytes"]
+    receipt_bytes = row["verification_receipt_bytes"]
+    if type(original_bytes) is not bytes or type(receipt_bytes) is not bytes:
+        raise error
+    try:
+        handoff = _parse_current_runtime_handoff(original_bytes)
+        receipt = decode_canonical_json(
+            receipt_bytes, label="current runtime admission receipt"
+        )
+    except (ValueError, HandoffContractError):
+        raise error from None
+    if (
+        hashlib.sha256(original_bytes).hexdigest() != row["handoff_root_sha256"]
+        or row["original_bytes_sha256"] != row["handoff_root_sha256"]
+        or handoff.application_id != application_id
+        or handoff.emission_profile != CURRENT_RUNTIME_EMISSION_PROFILE
+        or handoff.strict_profile
+        or handoff.root_sha256 != row["handoff_root_sha256"]
+        or handoff.payload_sha256 != row["payload_sha256"]
+        or handoff.payload["profile_id"] != row["profile_id"]
+        or handoff.payload["profile_version"] != row["profile_version"]
+        or handoff.payload["job_key"] != row["job_key"]
+        or handoff.payload["producer"]["product"] != row["producer_product"]
+        or handoff.payload["producer"]["commit_sha"] != producer_commit
+        or handoff.payload["vacancy"]["vacancy_snapshot_sha256"]
+        != row["vacancy_snapshot_sha256"]
+        or row["vacancy_source_identity"] != handoff.vacancy_source_identity
+        or row["logical_identity_json"]
+        != canonical_json_bytes(handoff.logical_identity_document).decode("utf-8")
+        or row["logical_identity_sha256"] != handoff.logical_identity_sha256
+    ):
+        raise error
+
+    outbox_identity = {
+        "allowed_producer_commits": [producer_commit],
+        "source_record_sha256": source_record,
+        "trust_root_id": CURRENT_RUNTIME_TRUST_ROOT_ID,
+    }
+    authenticator_sha256 = hashlib.sha256(
+        canonical_json_bytes(
+            {"kind": "protected-local-outbox-context", **outbox_identity}
+        )
+    ).hexdigest()
+    expected_receipt = {
+        "admission_context_sha256": row["admission_context_sha256"],
+        "admission_kind": ADMISSION_KIND_CURRENT_RUNTIME,
+        "admitted_at": row["admitted_at"],
+        "authority_scope": CURRENT_RUNTIME_AUTHORITY_SCOPE,
+        "context_authenticator_sha256": authenticator_sha256,
+        "emission_profile": CURRENT_RUNTIME_EMISSION_PROFILE,
+        "environment": CURRENT_RUNTIME_ENVIRONMENT,
+        "freshness_provenance": CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+        "handoff_root_sha256": row["handoff_root_sha256"],
+        "payload_sha256": row["payload_sha256"],
+        "release_authority": False,
+        "release_token_issued": False,
+        "schema_version": "market-aligner.current-runtime-handoff-verification.v1",
+        "submission_authority": False,
+        "trust_mode": CURRENT_RUNTIME_TRUST_MODE,
+        "trust_root_id": CURRENT_RUNTIME_TRUST_ROOT_ID,
+    }
+    if (
+        hashlib.sha256(receipt_bytes).hexdigest()
+        != row["verification_receipt_sha256"]
+        or type(receipt) is not dict
+        or any(receipt.get(key) != value for key, value in expected_receipt.items())
+        or any(
+            type(receipt.get(key)) is not bool
+            for key in (
+                "release_authority",
+                "release_token_issued",
+                "submission_authority",
+            )
+        )
+        or receipt.get("current_time_receipt_sha256") is not None
+        or type(receipt.get("references")) is not list
+        or len(receipt["references"]) != row["reference_count"]
+        or context["source_record_sha256"] != source_record
+        or row["producer_commit_sha"] != producer_commit
+    ):
+        raise error
     return _AdmittedSourceRecord(
         source_record_sha256=source_record,
         producer_commit_sha=producer_commit,
@@ -1101,6 +1550,27 @@ def _verify_preparation_output(
             os.close(descriptor)
 
 
+def _preparation_environment_and_contact_bytes(
+    deployment: _ProductionPreparationDeployment,
+    contact_lease: CandidateContactResourceLease | None,
+) -> tuple[str, bytes | None]:
+    if type(deployment.current_runtime) is not bool:
+        raise ProductionPreparationDeploymentError(
+            "preparation deployment mode is invalid"
+        )
+    if deployment.current_runtime:
+        if contact_lease is not None:
+            raise ProductionPreparationDeploymentError(
+                "current preparation rejects legacy contact authority"
+            )
+        return CURRENT_RUNTIME_ENVIRONMENT, None
+    if type(contact_lease) is not CandidateContactResourceLease:
+        raise ProductionPreparationDeploymentError(
+            "legacy preparation requires pinned contact authority"
+        )
+    return "production", contact_lease.authority_bytes
+
+
 def _run_production_preparation(
     application_id: str,
     deployment: _ProductionPreparationDeployment,
@@ -1114,6 +1584,17 @@ def _run_production_preparation(
         or any(c not in "0123456789abcdef" for c in application_id[4:])
     ):
         raise ProductionPreparationDeploymentError("application ID is malformed")
+    if deployment.current_runtime and (
+        not materialization_only
+        or not deployment.recovery_manifest_relative_path
+        or deployment.candidate_authority_sha256 is None
+        or deployment.contact_authority_path is not None
+        or deployment.contact_public_key_path is not None
+        or deployment.contact_registry_path is not None
+    ):
+        raise ProductionPreparationDeploymentError(
+            "current runtime supports only pinned non-release materialization"
+        )
     resources = _PinnedPreparationResources()
     pinned: _PinnedProductionPaths | None = None
     admission_descriptor: int | None = None
@@ -1149,21 +1630,32 @@ def _run_production_preparation(
                 executable=True,
                 label="Codex",
             )
-        for path, expected in (
+        authority_files = [
             (
                 deployment.candidate_authority_path,
-                PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
-            ),
-            (deployment.contact_authority_path, PRODUCTION_CONTACT_ENVELOPE_SHA256),
-            (
-                deployment.contact_public_key_path,
-                PRODUCTION_CONTACT_PUBLIC_KEY_FILE_SHA256,
-            ),
-            (
-                deployment.contact_registry_path,
-                PRODUCTION_CONTACT_REGISTRY_FILE_SHA256,
-            ),
-        ):
+                deployment.candidate_authority_sha256
+                if deployment.current_runtime
+                else PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
+            )
+        ]
+        if not deployment.current_runtime:
+            assert deployment.contact_authority_path is not None
+            assert deployment.contact_public_key_path is not None
+            assert deployment.contact_registry_path is not None
+            authority_files.extend(
+                (
+                    (deployment.contact_authority_path, PRODUCTION_CONTACT_ENVELOPE_SHA256),
+                    (
+                        deployment.contact_public_key_path,
+                        PRODUCTION_CONTACT_PUBLIC_KEY_FILE_SHA256,
+                    ),
+                    (
+                        deployment.contact_registry_path,
+                        PRODUCTION_CONTACT_REGISTRY_FILE_SHA256,
+                    ),
+                )
+            )
+        for path, expected in authority_files:
             resources.pin_file(
                 path,
                 expected_sha256=expected,
@@ -1171,11 +1663,16 @@ def _run_production_preparation(
                 expected_uid=os.geteuid(),
                 label="authority",
             )
-        registry_chain = resources.pin_contact_registry_chain(
-            deployment.contact_registry_path
+        registry_chain = (
+            None
+            if deployment.current_runtime
+            else resources.pin_contact_registry_chain(
+                deployment.contact_registry_path
+            )
         )
         resources.pin_private_directory(deployment.output_root)
-        resources.pin_private_directory(deployment.recruiter_archive_root)
+        if not deployment.current_runtime:
+            resources.pin_private_directory(deployment.recruiter_archive_root)
         resources.pin_file(
             deployment.admission_database,
             expected_sha256=None,
@@ -1243,30 +1740,56 @@ def _run_production_preparation(
             pinned_database,
             context_authenticator=adapter,
             resolver=adapter,
-            current_time_witness=installed_production_current_time_witness(),
+            current_time_witness=(
+                None
+                if deployment.current_runtime
+                else installed_production_current_time_witness()
+            ),
         )
         pinned.verify_references()
         if after_preflight_hook is not None:
             after_preflight_hook("resources")
         resources.verify()
-        os.environ[PUBLIC_KEY_ENV] = str(deployment.contact_public_key_path)
-        os.environ[REGISTRY_ENV] = str(deployment.contact_registry_path)
+        if not deployment.current_runtime:
+            assert deployment.contact_public_key_path is not None
+            assert deployment.contact_registry_path is not None
+            os.environ[PUBLIC_KEY_ENV] = str(deployment.contact_public_key_path)
+            os.environ[REGISTRY_ENV] = str(deployment.contact_registry_path)
         if not materialization_only:
+            assert deployment.poppler_bin is not None
             os.environ["JAA_POPPLER_BIN"] = str(deployment.poppler_bin)
         candidate_bytes = resources.file_bytes(deployment.candidate_authority_path)
-        contact_lease = CandidateContactResourceLease(
-            authority_path=deployment.contact_authority_path,
-            authority_bytes=resources.file_bytes(deployment.contact_authority_path),
-            public_key_path=deployment.contact_public_key_path,
-            public_key_bytes=resources.file_bytes(deployment.contact_public_key_path),
-            registry_path=deployment.contact_registry_path,
-            registry_bytes=resources.file_bytes(deployment.contact_registry_path),
-            registry_chain=registry_chain,
-        )
+        contact_lease = None
+        contact_provenance = None
+        current_contact_bindings = None
+        if deployment.current_runtime:
+            contact_provenance, current_contact_bindings = (
+                _load_pinned_current_contact_provenance(
+                    deployment=deployment,
+                    verified=store.for_boundary(application_id, "strategy"),
+                    candidate_authority_bytes=candidate_bytes,
+                )
+            )
+        else:
+            assert deployment.contact_authority_path is not None
+            assert deployment.contact_public_key_path is not None
+            assert deployment.contact_registry_path is not None
+            assert registry_chain is not None
+            contact_lease = CandidateContactResourceLease(
+                authority_path=deployment.contact_authority_path,
+                authority_bytes=resources.file_bytes(deployment.contact_authority_path),
+                public_key_path=deployment.contact_public_key_path,
+                public_key_bytes=resources.file_bytes(deployment.contact_public_key_path),
+                registry_path=deployment.contact_registry_path,
+                registry_bytes=resources.file_bytes(deployment.contact_registry_path),
+                registry_chain=registry_chain,
+            )
         codex_descriptor = None
         poppler_runtime = None
         if not materialization_only:
+            assert deployment.codex_binary is not None
             codex_descriptor = resources.file_descriptor(deployment.codex_binary)
+            assert deployment.poppler_bin is not None
             poppler_runtime = pinned_poppler_runtime(
                 {
                     name: resources.file_descriptor(deployment.poppler_bin / name)
@@ -1328,6 +1851,11 @@ def _run_production_preparation(
                 "production_recruiter_assessor": assessor,
                 "poppler_runtime": poppler_runtime,
             }
+        preparation_environment, contact_authority_bytes = (
+            _preparation_environment_and_contact_bytes(
+                deployment, contact_lease
+            )
+        )
         result = prepare_admitted_market_application_from_authorities(
             admission_store=store,
             application_id=application_id,
@@ -1338,15 +1866,17 @@ def _run_production_preparation(
             input_materializer=CanonicalPreparationInputMaterializer(
                 candidate_authority_path=deployment.candidate_authority_path,
                 candidate_authority_bytes=candidate_bytes,
-                contact_authority_bytes=contact_lease.authority_bytes,
+                contact_authority_bytes=contact_authority_bytes,
                 materialization_only=materialization_only,
             ),
-            environment="production",
+            environment=preparation_environment,
             editorial_runtime=editorial_runtime,
             cover_letter_editorial_runtime=cover_letter_editorial_runtime,
             orchestration_extras=orchestration_extras,
             candidate_authority_bytes=candidate_bytes,
             contact_resource_lease=contact_lease,
+            contact_provenance=contact_provenance,
+            current_contact_bindings=current_contact_bindings,
             output_root_descriptor=resources.directory_descriptor(
                 deployment.output_root
             ),
@@ -1387,11 +1917,63 @@ def run_production_preparation(*, application_id: str) -> MarketApplicationPrepa
 
 
 def run_production_market_materialization(
-    *, application_id: str
+    *,
+    application_id: str,
+    current_runtime_config_path: str | Path | None = None,
+    current_runtime_config_sha256: str | None = None,
+    current_runtime_private_root: str | Path | None = None,
+    current_recovery_manifest_relative_path: str | None = None,
 ) -> MarketApplicationMaterializationContext:
+    config_path = (
+        str(current_runtime_config_path)
+        if isinstance(current_runtime_config_path, Path)
+        else current_runtime_config_path
+    )
+    private_root = (
+        str(current_runtime_private_root)
+        if isinstance(current_runtime_private_root, Path)
+        else current_runtime_private_root
+    )
+    if current_recovery_manifest_relative_path is not None and not all(
+        value is not None
+        for value in (
+            config_path,
+            current_runtime_config_sha256,
+            private_root,
+        )
+    ):
+        raise ProductionPreparationDeploymentError(
+            "current recovery manifest locator requires current runtime opt-in"
+        )
+    current_runtime, selected_deployment = select_runtime_deployment(
+        config_path=config_path,
+        config_sha256=current_runtime_config_sha256,
+        private_root=private_root,
+        legacy_loader=installed_production_preparation_deployment,
+        current_loader=lambda **options: installed_current_runtime_handoff_deployment(
+            configuration_path=Path(options["configuration_path"]),
+            configuration_sha256=options["configuration_sha256"],
+            private_root=Path(options["private_root"]),
+        ),
+    )
+    if current_runtime:
+        if current_recovery_manifest_relative_path is None:
+            raise ProductionPreparationDeploymentError(
+                "current materialization requires the approved recovery manifest"
+            )
+        _validate_deployment_roots(selected_deployment)
+        deployment = _current_preparation_deployment(
+            selected_deployment, current_recovery_manifest_relative_path
+        )
+    else:
+        if current_recovery_manifest_relative_path is not None:
+            raise ProductionPreparationDeploymentError(
+                "legacy materialization rejects a current recovery manifest"
+            )
+        deployment = selected_deployment
     result = _run_production_preparation(
         application_id,
-        installed_production_preparation_deployment(),
+        deployment,
         materialization_only=True,
     )
     if type(result) is not MarketApplicationMaterializationContext:

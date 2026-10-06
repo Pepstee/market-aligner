@@ -24,7 +24,10 @@ from market_aligner.profiler.fact_packet import (
     serialize_projection_documents,
     validate_current_profile_projection_receipt,
 )
-from market_aligner.profiler.recovery_manifest import select_recovered_input_descriptors
+from market_aligner.profiler.recovery_manifest import (
+    select_recovered_input_descriptors,
+    select_saved_cv_descriptors,
+)
 from market_aligner.profiler.store import (
     MAX_EVIDENCE_BYTES,
     MAX_PROFILE_BYTES,
@@ -43,6 +46,7 @@ _INVALID = "current_profile_activation_invalid"
 _MAX_RECOVERY_MANIFEST_BYTES = 65_536
 _MAX_PROFILE_SELECTION_CONTEXT_BYTES = 16_384
 _MAX_CURRENT_ACTIVATION_BYTES = 8_388_608
+_MAX_RECOVERED_CV_BYTES = 8_388_608
 _REQUIRED_DESCRIPTOR_KINDS = (
     _PROFILE_DESCRIPTOR_KIND,
     _EVIDENCE_DESCRIPTOR_KIND,
@@ -135,6 +139,7 @@ class PinnedRecoveryInputs:
         manifest_relative_path: str,
         expected_manifest_sha256: str,
         approval_id: str,
+        include_saved_cvs: bool = False,
     ) -> None:
         self._root_chain = None
         self._directories: list[_RetainedDirectory] = []
@@ -143,8 +148,12 @@ class PinnedRecoveryInputs:
         self.manifest_bytes = b""
         self.files: dict[str, bytes] = {}
         self.descriptors: dict[str, dict[str, object]] = {}
+        self.saved_cv_bytes: dict[str, bytes] = {}
+        self.saved_cv_descriptors: list[dict[str, object]] = []
         self.manifest_sha256 = expected_manifest_sha256
         try:
+            if type(include_saved_cvs) is not bool:
+                raise ValueError(_INVALID)
             if (
                 type(manifest_relative_path) is not str
                 or not manifest_relative_path.startswith("recovered-inputs/")
@@ -241,6 +250,51 @@ class PinnedRecoveryInputs:
                 ):
                     raise ValueError(_INVALID)
                 self.files[kind] = data
+            if include_saved_cvs:
+                saved_descriptors = select_saved_cv_descriptors(manifest["files"])
+                required_paths = {
+                    str(value["relative_path"])
+                    for value in descriptors.values()
+                }
+                for descriptor in saved_descriptors:
+                    relative_path = str(descriptor["relative_path"])
+                    if relative_path in required_paths:
+                        raise ValueError(_INVALID)
+                    relative_parts = relative_path.split("/")
+                    parent_fd = self._manifest_parent_fd
+                    assert parent_fd is not None
+                    for part in relative_parts[:-1]:
+                        directory = _RetainedDirectory(
+                            parent_fd=parent_fd,
+                            name=part,
+                            path_label="approved saved CV directory",
+                            private=True,
+                        )
+                        directory.initial_proof()
+                        self._directories.append(directory)
+                        parent_fd = directory.fd
+                    data, identity, fd = _open_verified_leaf(
+                        parent_fd,
+                        relative_parts[-1],
+                        _MAX_RECOVERED_CV_BYTES,
+                    )
+                    self._files.append(
+                        (
+                            f"saved-cv:{relative_path}",
+                            fd,
+                            identity,
+                            data,
+                            parent_fd,
+                            relative_parts[-1],
+                        )
+                    )
+                    if (
+                        len(data) != descriptor["bytes"]
+                        or _sha256(data) != descriptor["sha256"]
+                    ):
+                        raise ValueError(_INVALID)
+                    self.saved_cv_bytes[relative_path] = data
+                self.saved_cv_descriptors = saved_descriptors
             self.revalidate()
         except BaseException:
             self.close()

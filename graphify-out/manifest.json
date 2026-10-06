@@ -246,9 +246,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/application_compiler.py": {
-    "mtime": 1790880426.2896442,
-    "seen": 1790881025.5477161,
-    "ast_hash": "2a6bf9d61c42f436ef02a22bd4cc8efe",
+    "mtime": 1791317544.8223753,
+    "seen": 1791318855.7498934,
+    "ast_hash": "ddad361573d0dd547d4f74e21c988a0b",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/application_preview.py": {
@@ -306,9 +306,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/candidate_application_factory.py": {
-    "mtime": 1791248650.523916,
-    "seen": 1791249537.3224294,
-    "ast_hash": "bbe706432726add7359df51cc97e214a",
+    "mtime": 1791318650.254368,
+    "seen": 1791318855.7499106,
+    "ast_hash": "5726afa3a588a0df487c7084a1cab9c9",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/candidate_authority.py": {
@@ -318,9 +318,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/candidate_contact_authority.py": {
-    "mtime": 1788246507.263781,
-    "seen": 1790775868.5197012,
-    "ast_hash": "3e65825d0cc64ad7e56a9bfecdbe1fb0",
+    "mtime": 1791315652.2308314,
+    "seen": 1791318855.7499123,
+    "ast_hash": "6c65163173fc03cb08cb0043940bcd9f",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/candidate_generation_worker.py": {
@@ -1038,9 +1038,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/cv_generation/constraints.py": {
-    "mtime": 1790845543.402206,
-    "seen": 1790845793.5143034,
-    "ast_hash": "5b73d4fa07ae56db31c52bf93f81b5c9",
+    "mtime": 1791318753.7503655,
+    "seen": 1791318855.7500572,
+    "ast_hash": "478a802c1066da3117227dfa98ff3e1e",
     "semantic_hash": ""
   },
   "internal/jaa/cv_generation/service.py": {
@@ -1254,9 +1254,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/jaa_core/contracts.py": {
-    "mtime": 1788246507.2970645,
-    "seen": 1790775868.5199587,
-    "ast_hash": "9b758a52ac3d332342243af918d39d37",
+    "mtime": 1791314568.1388466,
+    "seen": 1791318855.7500682,
+    "ast_hash": "de5e2e9851efc73409fdff07365c9a5f",
     "semantic_hash": ""
   },
   "internal/jaa/jaa_core/module_boundaries.py": {
@@ -2298,9 +2298,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_candidate_application_factory.py": {
-    "mtime": 1791248650.563916,
-    "seen": 1791249537.3227274,
-    "ast_hash": "62671bc20c85af4fb47736b4b6197e45",
+    "mtime": 1791318767.0583653,
+    "seen": 1791318855.7502337,
+    "ast_hash": "1b155412dd5bf3cb3b4ba40115a9e010",
     "semantic_hash": ""
   },
   "internal/jaa/test_candidate_authority.py": {
@@ -2328,9 +2328,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_generation_constraints.py": {
-    "mtime": 1788246507.31071,
-    "seen": 1790775868.520128,
-    "ast_hash": "df261ba31ef36d0f1247a0dfb69b7e02",
+    "mtime": 1791318760.5983653,
+    "seen": 1791318855.750244,
+    "ast_hash": "6e48227e87dbd2a1d899a74ab5beb985",
     "semantic_hash": ""
   },
   "internal/jaa/test_discover_live_vacancies.py": {
@@ -4002,9 +4002,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/handoff_admission.py": {
-    "mtime": 1791308625.9949384,
-    "seen": 1791309470.3483007,
-    "ast_hash": "133eb67989e0d43d1a945cd64fc0e03a",
+    "mtime": 1791311207.8308964,
+    "seen": 1791318855.7499626,
+    "ast_hash": "96862ed6bcf3ae8536d6e003f352653e",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/market_aligner_handoff.py": {
@@ -4014,15 +4014,15 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/market_aligner_preparation.py": {
-    "mtime": 1791240857.9520345,
-    "seen": 1791241456.8542461,
-    "ast_hash": "986ff710c2cd64d42fddfac208405875",
+    "mtime": 1791315652.1588314,
+    "seen": 1791318855.7499852,
+    "ast_hash": "ccadc72d741a71e213d790af46b4190d",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_handoff_admission_runner.py": {
-    "mtime": 1791309349.226927,
-    "seen": 1791309470.3483412,
-    "ast_hash": "2c45c849951261dd044ca5498ebf8278",
+    "mtime": 1791314240.6628573,
+    "seen": 1791318855.7500038,
+    "ast_hash": "51c4d311f5db780a5888b584f4f7b33c",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_handoff_runner.py": {
@@ -4032,9 +4032,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_preparation_runner.py": {
-    "mtime": 1791240983.7480412,
-    "seen": 1791241456.8542643,
-    "ast_hash": "ce4fae84f608cee82fb73eb4aba84c75",
+    "mtime": 1791316423.866829,
+    "seen": 1791318855.7500055,
+    "ast_hash": "81788d9a44eab7332cc91754af1c1ca3",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_recruiter_assessor.py": {
@@ -4218,9 +4218,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_production_operational_surfaces.py": {
-    "mtime": 1791309041.1829371,
-    "seen": 1791309470.348761,
-    "ast_hash": "75304a9ee75a336b0df8966be7e37b3d",
+    "mtime": 1791316462.814821,
+    "seen": 1791318855.7503846,
+    "ast_hash": "e43ff645d091e874b0daa2b3fe7e460e",
     "semantic_hash": ""
   },
   "internal/jaa/test_production_preparation_runner.py": {
@@ -4296,9 +4296,9 @@
     "semantic_hash": ""
   },
   "tests/test_market_aligner_jaa_handoff.py": {
-    "mtime": 1791308927.6189387,
-    "seen": 1791309470.3489046,
-    "ast_hash": "e536bba19a85438f73962c8f4cd414b8",
+    "mtime": 1791318958.5983567,
+    "seen": 1791319043.4877517,
+    "ast_hash": "82d6e96e6aacaea0d0f2511d40f1270c",
     "semantic_hash": ""
   },
   "tests/test_production_handoff.py": {
@@ -4716,9 +4716,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/profiler/current_activation.py": {
-    "mtime": 1791298615.8151028,
-    "seen": 1791302696.4746668,
-    "ast_hash": "eb7a72f6c6c4a74323437cec56494dba",
+    "mtime": 1791314732.2948482,
+    "seen": 1791318855.7504723,
+    "ast_hash": "447e64c7a28a6bf231edacc95af40272",
     "semantic_hash": ""
   },
   "src/market_aligner/profiler/fact_packet.py": {
@@ -4728,15 +4728,15 @@
     "semantic_hash": ""
   },
   "src/market_aligner/profiler/recovery_manifest.py": {
-    "mtime": 1791258774.739743,
-    "seen": 1791262488.5808506,
-    "ast_hash": "486af5831b4a1a1e5a303acb78bd6fe8",
+    "mtime": 1791314480.8668528,
+    "seen": 1791318855.7504766,
+    "ast_hash": "c7838cd278f01162cf2f8427b4255f7c",
     "semantic_hash": ""
   },
   "tests/test_current_activation.py": {
-    "mtime": 1791298682.3631046,
-    "seen": 1791302696.474716,
-    "ast_hash": "d96086b0677274c8e74fc68a5a35d765",
+    "mtime": 1791314775.778845,
+    "seen": 1791318855.7505128,
+    "ast_hash": "61b0efdd079c587706e705dc7953d0c7",
     "semantic_hash": ""
   },
   "tests/test_current_fact_packet.py": {
@@ -4752,9 +4752,9 @@
     "semantic_hash": ""
   },
   "tests/test_recovery_manifest.py": {
-    "mtime": 1791258783.3477428,
-    "seen": 1791262488.5809026,
-    "ast_hash": "963925ffe6fcd591efaafead1f46154c",
+    "mtime": 1791314655.3308501,
+    "seen": 1791318855.7505322,
+    "ast_hash": "b3826a3bb106a8f40c71d3e73ceb5424",
     "semantic_hash": ""
   },
   "tests/test_candidate_policy_extraction.py": {
