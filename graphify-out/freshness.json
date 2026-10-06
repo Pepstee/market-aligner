@@ -1,11 +1,11 @@
 {
-  "community_count": 30098,
-  "edge_count": 74517,
-  "node_count": 56853,
+  "community_count": 29682,
+  "edge_count": 74782,
+  "node_count": 56899,
   "outputs": {
     ".graphify_labels.json": "06182011cc9c9cde873dc8fe8c7ccd87fe46c70a6076cd64287479d247d37bc7",
     "GRAPH_REPORT.md": "f70b05b383333bbb70e1aa9920dd39fa7573b50b4a98aeba15aa1713f343d03f",
-    "graph.json": "b8e2a5e181685e60b24dfbf12493ee4830c62c6cdc9e3ceefa2de045a8454b7a"
+    "graph.json": "0a38f8250fab8b8e6255dfc2c6912cf6351a1023389616be213f71187790f77e"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "af93e198c9bb96695f4ffd2079fd026310ba5232",
+  "source_base_commit": "0f1dc4856516f4277f87f0cc05f49a000d3c4e91",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -766,9 +766,9 @@
     "src/market_aligner/integrations/__init__.py": "c90774f2e629925d5887af80d407b002b29ac8717736f55cee9a3f02f73d16d8",
     "src/market_aligner/integrations/orchestrator.py": "19f51098196b2cb24aec4a4d3c013835b873b58b300fcf63a0a283d43ce95cfd",
     "src/market_aligner/llm/__init__.py": "2ea86f8e0e07b357c5df697ce1a76ced7825431ea98f783f97ca066be837fff6",
-    "src/market_aligner/llm/codex_gateway.py": "83dcc42ab19e507df856bb4a31b2e3be595295bc61864b83747df4813b6ded11",
-    "src/market_aligner/llm/contracts.py": "022ca4669a9440d4289ae8736abc31b96832d92d08cc11d71413a186ee8d37e9",
-    "src/market_aligner/llm/pipeline.py": "eb89428d9054e61eaa81cab1f4f63cf7ff2af42ab4193b0e24ae73c299158c7d",
+    "src/market_aligner/llm/codex_gateway.py": "4a2ab544c9c742603dc290b4b8fdac13dcfdd0b2cd71f6fe2a93b06e5d4bc30c",
+    "src/market_aligner/llm/contracts.py": "cba01af90d17c11d246027acdd3def6a9e49c21211b7d2492d36e8ba830a4e11",
+    "src/market_aligner/llm/pipeline.py": "9bb3405ede8454020ba13352314ac04abf3f6ce4403936edf6d5d06c6ee39427",
     "src/market_aligner/llm/structured.py": "9182fdfe0541ba70e7f96502cf271406d9e10978a84700e81b8119f4815f9a47",
     "src/market_aligner/normalisation/__init__.py": "b1650ff2aafbda22ea78530df3f5604b68e033c7f07ddd94e80bb642e6373878",
     "src/market_aligner/normalisation/deduplication.py": "c7ca03c2e1cce88c50f3b6c356c07cc0fea6e5ff7531304e3b58561f9cb3598a",
@@ -793,7 +793,7 @@
     "src/market_aligner/service/__init__.py": "a25a0cd38f77ecf0c33622a3468b824d7df9c62263db25270d3d44dc3f2c3e1e",
     "src/market_aligner/service/api.py": "3c5d8f8a8d4fd71aded1f3c37fdf2412ef6fb27938221487dbaf105f047f2674",
     "src/market_aligner/service/event_consumer.py": "60d3d1a5d309ecb7e64a66e48294552f6725357aa265f3475c5a1b64e37e1039",
-    "src/market_aligner/service/processing.py": "8c6c32fe6539b5f7164201211267ad4587dcf0f63bfdea6187f4c88776855fb4",
+    "src/market_aligner/service/processing.py": "ab61c1b84d8705fdd833b920647efe4b435d05f9e8edd72665a199d692003412",
     "src/market_aligner/state/__init__.py": "283f76566abd0205ca59f943c46b7851d980f69a346172864b885d3fb91dca55",
     "src/market_aligner/state/atomic_publish.py": "e84892b487151639bb09b608d60d084806bb942a830d7c048337e27ff1c82e2a",
     "src/market_aligner/state/importers.py": "cf35f9ce5780d532119ee725cc210a156c63cd9cc1c03cc7bf38a95ed3973fac",
@@ -831,7 +831,7 @@
     "tests/test_jaa_events_v1.py": "98edfd1fb21ffd9f1bacde30b027d70a360cba2d177e4197708660042f2dc2b0",
     "tests/test_legacy_import.py": "00ce475704bf5ba829683365437c43c9804cd32b1d1e812832fcc71741ba1915",
     "tests/test_lineage.py": "322e19db7cf892a373fede67fa36eb1f2c3771aacd9d7cf057c9f6de4f1ada23",
-    "tests/test_llm_pipeline.py": "9a6e2100deaa556859a929d566e62a73f96c26ad9e62315a15e6e29c06c34b2f",
+    "tests/test_llm_pipeline.py": "4b60f69632d97a383c11a9638bfc11b03b8b485a179d5ce56ddf8828587bf7d8",
     "tests/test_market_aligner_jaa_handoff.py": "f7a30b781118034766d4aae3cee6180d81ec0713765ca70e15ace8e4a4cc30b4",
     "tests/test_migration_ledger.py": "c68796958547de9caeff93c0f7ba9c169d723eb8b9826b2b96602171bb13baa2",
     "tests/test_migrations.py": "e968fa4158bd4fc6521512007f5ae2659c3b094fdefeba95fa60b0be45de900f",
@@ -846,6 +846,6 @@
     "tests/test_reporting.py": "f4ad41784913efcf702d05a5280c0ff9b7e5ab92522328ee740a486c807935a3",
     "tests/test_research_worker.py": "9dd7b6f0d3bd6d11153ca76539e30ba5633ac4b72eb01510d93b9d9b01c18586",
     "tests/test_scrapling_protocol.py": "25635da53ada976863c3304412e28ab16703cc826aac72f19ff107363e0ad466",
-    "tests/test_service.py": "62d31b10a93aae736940de2448d32553fd13805ceea6a1ed7f98cd6bbe956c68"
+    "tests/test_service.py": "02e28a2da2ac85e21e2c1b5d649622a74a5ecaa8ee0adfeb70fde6032c5ddafe"
   }
 }

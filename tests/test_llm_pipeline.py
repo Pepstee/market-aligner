@@ -3,20 +3,25 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import subprocess
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 from market_aligner.domain.contracts import RawPosting
+from market_aligner.applications.canonical import ContractValidationError
+from market_aligner.collectors.evidence import bind_public_listing
 from market_aligner.llm.codex_gateway import (
     CodexGatewayError,
     CodexSemanticGateway,
     EXTRACTION_PROMPT_VERSION,
     EXTRACTION_SCHEMA,
+    VACANCY_ELIGIBILITY_PROMPT_VERSION,
+    VACANCY_ELIGIBILITY_SCHEMA,
     SYNTHETIC_CANARY_MARKER,
     _DISABLED_CODE_MODE_HOST_NOTICE,
     _event_validation_policy_fields,
@@ -26,15 +31,27 @@ from market_aligner.llm.codex_gateway import (
 from market_aligner.llm.contracts import (
     LLMReceipt,
     SemanticVacancyExtraction,
+    VACANCY_ELIGIBILITY_FIELDS,
+    VACANCY_ELIGIBILITY_FACTS_VERSION,
+    VacancyEligibilityEvidence,
+    VacancyEligibilityFacts,
     canonical_hash,
 )
-from market_aligner.llm.pipeline import accept_alignment, accept_extraction
+from market_aligner.llm.pipeline import (
+    accept_alignment,
+    accept_extraction,
+    accept_vacancy_eligibility_facts,
+    quote_supports_eligibility,
+    verified_eligibility_capture,
+    vacancy_eligibility_input,
+)
 from market_aligner.llm.structured import (
     PROJECTION_FIELDS,
     align_approved_evidence,
     extract_structured_vacancy,
 )
 from market_aligner.profiler.schema import EvidenceItem
+from market_aligner.state.vacancies import raw_posting_content_sha256
 
 
 class FakeCodexRunner:
@@ -474,6 +491,59 @@ class LLMPipelineTests(unittest.TestCase):
                 )
             self.assertEqual(1, len(runner.calls))
 
+    def test_gateway_extracts_source_bound_vacancy_eligibility_once(self) -> None:
+        digest = hashlib.sha256(b"synthetic vacancy eligibility").hexdigest()
+        response = {
+            "source_content_sha256": digest,
+            "work_jurisdiction": None,
+            "required_residence": None,
+            "sponsorship_available": None,
+            "minimum_years_experience": 0,
+            "contract_type": None,
+            "source_evidence": [
+                {
+                    "field": "minimum_years_experience",
+                    "quote": "Minimum 0 years of experience.",
+                }
+            ],
+            "unknown_fields": [
+                "contract_type",
+                "required_residence",
+                "sponsorship_available",
+                "work_jurisdiction",
+            ],
+        }
+        inputs = {
+            "content_sha256": digest,
+            "raw_text": "Minimum 0 years of experience.",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "codex"
+            binary.write_bytes(b"synthetic codex binary")
+            runner = FakeCodexRunner([response])
+            gateway = CodexSemanticGateway(
+                model="gpt-test-explicit",
+                codex_binary=str(binary),
+                environment={"HOME": temporary, "PATH": "/usr/bin"},
+                runner=runner,
+            )
+            facts, receipt = gateway.extract_vacancy_eligibility(inputs)
+
+        self.assertEqual(0, facts.minimum_years_experience)
+        self.assertEqual("minimum_years_experience", facts.source_evidence[0].field)
+        self.assertEqual(1, len(runner.calls))
+        self.assertEqual(VACANCY_ELIGIBILITY_PROMPT_VERSION, receipt.prompt_version)
+        self.assertEqual("vacancy_eligibility_facts", receipt.task)
+        self.assertEqual(
+            VACANCY_ELIGIBILITY_SCHEMA,
+            runner.schemas[0],
+        )
+        self.assertIn("alphabetical field order", runner.calls[0][1]["input"])
+        self.assertEqual(
+            hashlib.sha256(json.dumps(response).encode("utf-8")).hexdigest(),
+            receipt.transport.response_sha256,
+        )
+
     def test_detached_codex_gateway_is_schema_and_transport_bound_without_ambient_context(
         self,
     ) -> None:
@@ -843,3 +913,430 @@ class RetainedSubjectBindingTests(unittest.TestCase):
         ):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 accept_subject_bound_alignment(changed, evidence, bind(changed), **arguments)
+
+
+class VacancyEligibilityContractTests(unittest.TestCase):
+    fields = tuple(sorted(VACANCY_ELIGIBILITY_FIELDS))
+    digest = "a" * 64
+
+    def evidence(self, field: str) -> VacancyEligibilityEvidence:
+        return VacancyEligibilityEvidence(field=field, quote="source quote")
+
+    def build(
+        self,
+        overrides: dict[str, Any] | None = None,
+        *,
+        evidence: tuple[Any, ...] | None = None,
+        digest: str = digest,
+        version: str = "market-aligner.llm.v1",
+    ) -> VacancyEligibilityFacts:
+        values = dict.fromkeys(self.fields)
+        values.update(overrides or {})
+        if evidence is None:
+            evidence = tuple(
+                self.evidence(field)
+                for field in self.fields
+                if values[field] is not None
+            )
+        return VacancyEligibilityFacts(
+            source_content_sha256=digest,
+            work_jurisdiction=values["work_jurisdiction"],
+            required_residence=values["required_residence"],
+            sponsorship_available=values["sponsorship_available"],
+            minimum_years_experience=values["minimum_years_experience"],
+            contract_type=values["contract_type"],
+            source_evidence=evidence,
+            unknown_fields=tuple(
+                field for field in self.fields if values[field] is None
+            ),
+            contract_version=version,
+        )
+
+    def test_all_unknown_and_false_zero_preserve_exact_support_sets(self) -> None:
+        empty = self.build()
+        self.assertEqual(self.fields, empty.unknown_fields)
+        self.assertEqual((), empty.source_evidence)
+
+        facts = self.build(
+            {"sponsorship_available": False, "minimum_years_experience": 0}
+        )
+        self.assertIs(facts.sponsorship_available, False)
+        self.assertEqual(0, facts.minimum_years_experience)
+        self.assertNotIsInstance(facts.minimum_years_experience, bool)
+        self.assertEqual(
+            ("minimum_years_experience", "sponsorship_available"),
+            tuple(item.field for item in facts.source_evidence),
+        )
+        self.assertEqual(
+            ("contract_type", "required_residence", "work_jurisdiction"),
+            facts.unknown_fields,
+        )
+        self.assertEqual(VACANCY_ELIGIBILITY_FACTS_VERSION, "market-aligner.vacancy-eligibility-facts.v1")
+
+    def test_malformed_years_and_sponsorship_types_refuse(self) -> None:
+        for years in (True, False, -1, -0.5, math.inf, -math.inf, math.nan, "3"):
+            with self.subTest(years=years), self.assertRaises((TypeError, ValueError)):
+                self.build({"minimum_years_experience": years})
+        for sponsorship in (0, 1, 0.0, 1.0, "true"):
+            with self.subTest(sponsorship=sponsorship), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                self.build({"sponsorship_available": sponsorship})
+
+    def test_evidence_and_contract_values_must_be_exact(self) -> None:
+        invalid_evidence = (
+            (),
+            (self.evidence("work_jurisdiction"), self.evidence("work_jurisdiction")),
+            lambda: (self.evidence("salary"),),
+            ({"field": "work_jurisdiction", "quote": "source quote"},),
+            (self.evidence("required_residence"),),
+        )
+        for value in invalid_evidence:
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                evidence = value() if callable(value) else value
+                self.build({"work_jurisdiction": "US"}, evidence=evidence)
+        for contract_type in ("Permanent", "permanent ", "unknown"):
+            with self.subTest(contract_type=contract_type), self.assertRaises(ValueError):
+                self.build({"contract_type": contract_type})
+        with self.assertRaises(ValueError):
+            VacancyEligibilityEvidence(field="salary", quote="source quote")
+
+    def test_source_digest_and_contract_version_are_bound(self) -> None:
+        for digest, version in (
+            ("A" * 64, "market-aligner.llm.v1"),
+            ("a" * 63, "market-aligner.llm.v1"),
+            ("g" * 64, "market-aligner.llm.v1"),
+            (self.digest, "market-aligner.llm.v2"),
+            (self.digest, ""),
+        ):
+            with self.subTest(digest=digest, version=version), self.assertRaises(
+                (TypeError, ValueError)
+            ):
+                self.build(digest=digest, version=version)
+
+    def test_quote_support_uses_only_anchored_positive_and_negative_forms(self) -> None:
+        cases = (
+            ("sponsorship_available", True, "Visa sponsorship is available.", True),
+            ("sponsorship_available", True, "We offer visa sponsorship.", True),
+            ("sponsorship_available", True, "We sponsor visas", True),
+            ("sponsorship_available", True, "We sponsor visas.", True),
+            ("sponsorship_available", True, "We sponsor visas!", True),
+            ("sponsorship_available", True, "We do sponsor visas", True),
+            ("sponsorship_available", True, "We do sponsor visas.", True),
+            ("sponsorship_available", True, "We do sponsor visas!", True),
+            ("sponsorship_available", False, "Visa sponsorship is not available.", True),
+            ("sponsorship_available", False, "We do not sponsor visas", True),
+            ("sponsorship_available", True, "We do not sponsor visas.", False),
+            ("sponsorship_available", True, "We may sponsor visas.", False),
+            (
+                "sponsorship_available",
+                True,
+                "We sponsor visas for some roles only.",
+                False,
+            ),
+            ("sponsorship_available", True, "We do sponsor visas?", False),
+            ("sponsorship_available", True, "We do sponsor visas!!", False),
+            ("sponsorship_available", True, "Sponsorship is available.", False),
+            ("sponsorship_available", True, "Sponsorship may be available.", False),
+            (
+                "sponsorship_available",
+                True,
+                "Visa sponsorship is available, but we do not sponsor visas.",
+                False,
+            ),
+            (
+                "minimum_years_experience",
+                5,
+                "Five is not a requirement: 5 years of experience is preferred, but no minimum experience is required.",
+                False,
+            ),
+            (
+                "minimum_years_experience",
+                5,
+                "Applicants must have at most 5 years of experience.",
+                False,
+            ),
+            (
+                "minimum_years_experience",
+                0,
+                "Minimum 0 years of experience.",
+                True,
+            ),
+            (
+                "minimum_years_experience",
+                2.5,
+                "A minimum of 2.5 years of experience is required.",
+                True,
+            ),
+            (
+                "minimum_years_experience",
+                5,
+                "At least 2 years of experience are required.",
+                False,
+            ),
+            ("minimum_years_experience", True, "Minimum 1 years of experience.", False),
+            (
+                "minimum_years_experience",
+                10**1000,
+                "Minimum 0 years of experience.",
+                False,
+            ),
+            ("contract_type", "permanent", "This is a permanent position.", True),
+            ("contract_type", "permanent", "This is not a permanent position.", False),
+            ("contract_type", "permanent", "This is a permanent role.", False),
+            ("contract_type", "full_time", "This is a full-time role.", True),
+            ("contract_type", "fixed_term", "This is a fixed-term contract.", False),
+            ("salary_expectation", 100000, "This is a permanent position.", False),
+            ("contract_type", "permanent", None, False),
+        )
+        for field, value, quote, expected in cases:
+            with self.subTest(field=field, value=value, quote=quote):
+                self.assertEqual(expected, quote_supports_eligibility(field, value, quote))
+
+    def test_acceptance_binds_fact_quote_to_exact_public_source_and_receipt(self) -> None:
+        raw, _ = LLMPipelineTests._structured_listing()
+        raw = RawPosting(
+            board=raw.board,
+            job_id=raw.job_id,
+            url=raw.url,
+            fetched_at=raw.fetched_at,
+            raw_json={
+                "description": (
+                    "This is a permanent position. "
+                    "This is not a permanent position."
+                )
+            },
+        )
+        raw = replace(raw, content_sha256=raw_posting_content_sha256(raw))
+        inputs = vacancy_eligibility_input(raw)
+        facts = VacancyEligibilityFacts(
+            source_content_sha256=str(inputs["content_sha256"]),
+            work_jurisdiction=None,
+            required_residence=None,
+            sponsorship_available=None,
+            minimum_years_experience=None,
+            contract_type="permanent",
+            source_evidence=(
+                VacancyEligibilityEvidence(
+                    field="contract_type", quote="This is a permanent position."
+                ),
+            ),
+            unknown_fields=(
+                "minimum_years_experience",
+                "required_residence",
+                "sponsorship_available",
+                "work_jurisdiction",
+            ),
+        )
+        receipt = LLMReceipt.bind(
+            receipt_id="eligibility-receipt",
+            task="vacancy_eligibility_facts",
+            model="fixture-model",
+            prompt_version="fixture-v1",
+            inputs=inputs,
+            output=facts,
+            created_at="2026-10-06T00:00:00Z",
+        )
+        self.assertEqual(
+            facts,
+            accept_vacancy_eligibility_facts(
+                raw, facts, receipt, inputs=inputs
+            ),
+        )
+        self.assertEqual(raw.content_sha256, inputs["content_sha256"])
+        self.assertEqual(64, len(inputs["public_capture_sha256"]))
+
+        unsupported = VacancyEligibilityFacts(
+            **{
+                **asdict(facts),
+                "source_evidence": (
+                    VacancyEligibilityEvidence(
+                        field="contract_type", quote="This is not a permanent position."
+                    ),
+                ),
+            }
+        )
+        unsupported_receipt = LLMReceipt.bind(
+            receipt_id="unsupported-eligibility-receipt",
+            task="vacancy_eligibility_facts",
+            model="fixture-model",
+            prompt_version="fixture-v1",
+            inputs=inputs,
+            output=unsupported,
+            created_at="2026-10-06T00:00:00Z",
+        )
+        with self.assertRaisesRegex(
+            ContractValidationError, "exact quote grammar"
+        ):
+            accept_vacancy_eligibility_facts(
+                raw, unsupported, unsupported_receipt, inputs=inputs
+            )
+
+    def test_sponsorship_quote_acceptance_requires_exact_source_membership(self) -> None:
+        quote = "We do sponsor visas!"
+
+        def bound_case(description: str) -> tuple[
+            RawPosting, VacancyEligibilityFacts, LLMReceipt, dict[str, Any]
+        ]:
+            raw, _ = LLMPipelineTests._structured_listing()
+            raw = RawPosting(
+                board=raw.board,
+                job_id=raw.job_id,
+                url=raw.url,
+                fetched_at=raw.fetched_at,
+                raw_json={"description": description},
+            )
+            raw = replace(raw, content_sha256=raw_posting_content_sha256(raw))
+            inputs = vacancy_eligibility_input(raw)
+            facts = VacancyEligibilityFacts(
+                source_content_sha256=str(inputs["content_sha256"]),
+                work_jurisdiction=None,
+                required_residence=None,
+                sponsorship_available=True,
+                minimum_years_experience=None,
+                contract_type=None,
+                source_evidence=(
+                    VacancyEligibilityEvidence(
+                        field="sponsorship_available", quote=quote
+                    ),
+                ),
+                unknown_fields=(
+                    "contract_type",
+                    "minimum_years_experience",
+                    "required_residence",
+                    "work_jurisdiction",
+                ),
+            )
+            receipt = LLMReceipt.bind(
+                receipt_id="sponsorship-eligibility-receipt",
+                task="vacancy_eligibility_facts",
+                model="fixture-model",
+                prompt_version="fixture-v1",
+                inputs=inputs,
+                output=facts,
+                created_at="2026-10-06T00:00:00Z",
+            )
+            return raw, facts, receipt, inputs
+
+        raw, facts, receipt, inputs = bound_case(
+            "Anthropic is an equal opportunity employer. " + quote
+        )
+        self.assertEqual(
+            facts,
+            accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs),
+        )
+
+        absent_raw, absent_facts, absent_receipt, absent_inputs = bound_case(
+            "Anthropic is an equal opportunity employer. We sponsor visas!"
+        )
+        with self.assertRaisesRegex(
+            ContractValidationError, "absent from exact public content"
+        ):
+            accept_vacancy_eligibility_facts(
+                absent_raw,
+                absent_facts,
+                absent_receipt,
+                inputs=absent_inputs,
+            )
+
+
+class VerifiedEligibilityCaptureTests(unittest.TestCase):
+    def _posting(self, **overrides: Any) -> RawPosting:
+        fields = dict(
+            board="example-board",
+            job_id="job-0001",
+            url="https://jobs.example.com/postings/job-0001",
+            fetched_at="2026-10-06T08:17:57Z",
+            raw_text="Frontend Engineer at Example Corp",
+            raw_json={"title": "Frontend Engineer", "company": "Example Corp"},
+            content_type="application/json",
+            http_status=200,
+        )
+        fields.update(overrides)
+        return RawPosting(**fields)
+
+    def test_collector_and_public_capture_hashes_remain_distinct(self) -> None:
+        original = self._posting()
+        collector_digest = raw_posting_content_sha256(original)
+        raw = replace(original, content_sha256=collector_digest)
+        verified_digest, exact = verified_eligibility_capture(raw)
+        inputs = vacancy_eligibility_input(raw)
+
+        self.assertEqual(collector_digest, verified_digest)
+        self.assertEqual(collector_digest, inputs["content_sha256"])
+        self.assertEqual(collector_digest, raw.content_sha256)
+        self.assertEqual(hashlib.sha256(exact).hexdigest(), inputs["public_capture_sha256"])
+        self.assertNotEqual(inputs["content_sha256"], inputs["public_capture_sha256"])
+
+        invalid_inputs = {**inputs, "public_capture_sha256": "0" * 64}
+        facts = VacancyEligibilityFacts(
+            source_content_sha256=collector_digest,
+            work_jurisdiction=None,
+            required_residence=None,
+            sponsorship_available=None,
+            minimum_years_experience=None,
+            contract_type=None,
+            source_evidence=(),
+            unknown_fields=tuple(sorted(VACANCY_ELIGIBILITY_FIELDS)),
+        )
+        receipt = LLMReceipt.bind(
+            receipt_id="wrong-public-capture",
+            task="vacancy_eligibility_facts",
+            model="fixture-model",
+            prompt_version="fixture-v1",
+            inputs=invalid_inputs,
+            output=facts,
+            created_at="2026-10-06T00:00:00Z",
+        )
+        with self.assertRaisesRegex(ContractValidationError, "input differs"):
+            accept_vacancy_eligibility_facts(
+                raw, facts, receipt, inputs=invalid_inputs
+            )
+
+    def test_mismatched_collector_digest_rejects(self) -> None:
+        raw = replace(self._posting(), content_sha256="0" * 64)
+        with self.assertRaisesRegex(ContractValidationError, "collector digest"):
+            verified_eligibility_capture(raw)
+
+    def test_mutated_capture_with_old_collector_digest_rejects(self) -> None:
+        original = self._posting()
+        stale_digest = raw_posting_content_sha256(original)
+        tampered = replace(
+            original,
+            raw_text="Senior Backend Engineer at Example Corp",
+            content_sha256=stale_digest,
+        )
+        with self.assertRaisesRegex(ContractValidationError, "collector digest"):
+            verified_eligibility_capture(tampered)
+
+    def test_base64_capture_keeps_its_existing_shared_hash_domain(self) -> None:
+        blob = b"public listing payload for job-0001\n"
+        raw = self._posting(
+            raw_text=None,
+            raw_json=None,
+            content_type="application/pdf",
+            public_content_base64=base64.b64encode(blob).decode("ascii"),
+            content_sha256=hashlib.sha256(blob).hexdigest(),
+        )
+        digest, exact = verified_eligibility_capture(raw)
+        self.assertEqual(blob, exact)
+        self.assertEqual(hashlib.sha256(blob).hexdigest(), digest)
+        self.assertEqual(digest, raw.content_sha256)
+
+    def test_missing_digest_is_computed_without_mutating_the_posting(self) -> None:
+        raw = self._posting()
+        before = replace(raw)
+        digest, exact = verified_eligibility_capture(raw)
+        self.assertEqual(before, raw)
+        self.assertIsNone(raw.content_sha256)
+        self.assertEqual(raw_posting_content_sha256(raw), digest)
+        self.assertEqual(exact, bind_public_listing(raw)[1])
+
+    def test_unicode_json_uses_the_existing_collector_serialization(self) -> None:
+        raw = self._posting(
+            raw_text=None,
+            raw_json={"title": "前端工程师", "note": "naïve café ☕"},
+        )
+        digest, exact = verified_eligibility_capture(raw)
+        self.assertEqual(raw_posting_content_sha256(raw), digest)
+        self.assertEqual(exact, bind_public_listing(raw)[1])

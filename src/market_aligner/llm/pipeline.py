@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import math
+import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
@@ -14,11 +17,21 @@ from market_aligner.applications.canonical import (
     require_pattern,
     require_sha256,
 )
+from market_aligner.collectors.evidence import public_listing_bytes
 
 from market_aligner.domain.contracts import RawPosting, Vacancy
 from market_aligner.profiler.schema import EvidenceItem
+from market_aligner.state.vacancies import raw_posting_content_sha256
 
-from .contracts import EvidenceAlignment, LLMReceipt, SemanticVacancyExtraction, canonical_hash
+from .contracts import (
+    EvidenceAlignment,
+    LLMReceipt,
+    SemanticVacancyExtraction,
+    VACANCY_ELIGIBILITY_FACTS_VERSION,
+    VACANCY_ELIGIBILITY_FACTS_TASK,
+    VacancyEligibilityFacts,
+    canonical_hash,
+)
 
 
 def accept_extraction(
@@ -85,6 +98,201 @@ def accept_subject_bound_extraction(
     if receipt.input_sha256 != canonical_hash(expected):
         raise ContractValidationError("LLM extraction receipt input identity differs")
     return accept_extraction(raw, extraction, receipt)
+
+
+def verified_eligibility_capture(raw: RawPosting) -> tuple[str, bytes]:
+    """Validate collector identity and return privacy-checked public capture bytes."""
+    exact = public_listing_bytes(raw)
+    digest = raw_posting_content_sha256(raw)
+    if raw.content_sha256 is not None and raw.content_sha256 != digest:
+        raise ContractValidationError(
+            "declared collector digest differs from the exact posting source"
+        )
+    return digest, exact
+
+
+def vacancy_eligibility_input(raw: RawPosting) -> dict[str, Any]:
+    """Bind collector identity and distinct public-capture bytes in the task input."""
+    collector_digest, exact = verified_eligibility_capture(raw)
+    return {
+        "adapter": raw.board,
+        "canonical_url": raw.url,
+        "content_sha256": collector_digest,
+        "public_capture_sha256": digest_bytes(exact),
+        "raw_json": raw.raw_json,
+        "raw_text": raw.raw_text,
+        "schema_version": VACANCY_ELIGIBILITY_FACTS_VERSION,
+        "source_job_id": raw.job_id,
+    }
+
+
+def _public_capture_text(value: object, *, key: str | None = None) -> tuple[str, ...]:
+    if key is not None and key.casefold() in {
+        "metadata",
+        "metadata_record",
+        "headers",
+        "canonical_url",
+        "content_sha256",
+        "fetched_at",
+        "job_id",
+        "source_job_id",
+    }:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, Mapping):
+        return tuple(
+            fragment
+            for child_key, child in value.items()
+            if isinstance(child_key, str)
+            for fragment in _public_capture_text(child, key=child_key)
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(
+            fragment
+            for child in value
+            for fragment in _public_capture_text(child)
+        )
+    return ()
+
+
+_SPONSORSHIP_PATTERNS = {
+    True: (
+        re.compile(r"visa sponsorship is available\.?"),
+        re.compile(r"we offer visa sponsorship\.?"),
+        re.compile(r"we sponsor visas[.!]?"),
+        re.compile(r"we do sponsor visas[.!]?"),
+    ),
+    False: (
+        re.compile(r"visa sponsorship is not available\.?"),
+        re.compile(r"we do not sponsor visas\.?"),
+    ),
+}
+_MINIMUM_YEARS_PATTERNS = (
+    re.compile(r"at least (?P<num>\d+(?:\.\d+)?) years of experience are required\.?"),
+    re.compile(r"minimum (?P<num>\d+(?:\.\d+)?) years of experience\.?"),
+    re.compile(
+        r"a minimum of (?P<num>\d+(?:\.\d+)?) years of experience is required\.?"
+    ),
+)
+_CONTRACT_QUOTE_PATTERNS = {
+    "apprenticeship": (re.compile(r"this is an apprenticeship\.?"),),
+    "contract": (re.compile(r"this is a contract position\.?"),),
+    "freelance": (re.compile(r"this is a freelance role\.?"),),
+    "full_time": (re.compile(r"this is a full-time role\.?"),),
+    "internship": (re.compile(r"this is an internship\.?"),),
+    "part_time": (re.compile(r"this is a part-time role\.?"),),
+    "permanent": (re.compile(r"this is a permanent position\.?"),),
+    "temporary": (re.compile(r"this is a temporary position\.?"),),
+}
+
+
+def quote_supports_eligibility(field: str, value: object, quote: object) -> bool:
+    """Recognize only narrow, complete source statements for sensitive facts."""
+    if not isinstance(field, str) or not isinstance(quote, str):
+        return False
+    normalized = " ".join(quote.split()).lower()
+    if field == "sponsorship_available":
+        if type(value) is not bool:
+            return False
+        return any(pattern.fullmatch(normalized) for pattern in _SPONSORSHIP_PATTERNS[value])
+    if field == "minimum_years_experience":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            if not math.isfinite(value):
+                return False
+            expected = float(value)
+        except OverflowError:
+            return False
+        if value < 0:
+            return False
+        return any(
+            match is not None and float(match.group("num")) == expected
+            for match in (
+                pattern.fullmatch(normalized)
+                for pattern in _MINIMUM_YEARS_PATTERNS
+            )
+        )
+    if field == "contract_type" and isinstance(value, str):
+        patterns = _CONTRACT_QUOTE_PATTERNS.get(value)
+        return bool(patterns and any(pattern.fullmatch(normalized) for pattern in patterns))
+    return False
+
+
+def accept_vacancy_eligibility_facts(
+    raw: RawPosting,
+    facts: VacancyEligibilityFacts,
+    receipt: LLMReceipt,
+    *,
+    inputs: Mapping[str, Any],
+) -> VacancyEligibilityFacts:
+    """Accept typed vacancy facts only with exact-source quote evidence."""
+    collector_digest, exact = verified_eligibility_capture(raw)
+    if facts.source_content_sha256 != collector_digest:
+        raise ContractValidationError(
+            "vacancy eligibility facts bind a different public capture"
+        )
+    if receipt.task != VACANCY_ELIGIBILITY_FACTS_TASK:
+        raise ContractValidationError("vacancy eligibility receipt has the wrong task")
+    expected_inputs = vacancy_eligibility_input(raw)
+    if canonical_hash(dict(inputs)) != canonical_hash(expected_inputs):
+        raise ContractValidationError("vacancy eligibility input differs from exact public source")
+    if receipt.input_sha256 != canonical_hash(expected_inputs):
+        raise ContractValidationError("vacancy eligibility receipt input differs")
+    if receipt.output_sha256 != canonical_hash(asdict(facts)):
+        raise ContractValidationError("vacancy eligibility receipt output differs")
+    try:
+        decoded = json.loads(exact.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        decoded = exact.decode("utf-8", errors="strict")
+    if isinstance(decoded, Mapping) and decoded.get("schema_version") == (
+        "market-aligner.public-listing-capture.v1"
+    ):
+        source_text = (
+            *_public_capture_text(decoded.get("raw_text")),
+            *_public_capture_text(decoded.get("raw_json")),
+        )
+    else:
+        source_text = _public_capture_text(decoded)
+    for evidence in facts.source_evidence:
+        try:
+            evidence.quote.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ContractValidationError(
+                "vacancy eligibility quote is not valid UTF-8"
+            ) from exc
+        if not any(evidence.quote in fragment for fragment in source_text):
+            raise ContractValidationError(
+                "vacancy eligibility quote is absent from exact public content"
+            )
+        folded = evidence.quote.casefold()
+        value = getattr(facts, evidence.field)
+        if evidence.field in {"work_jurisdiction", "required_residence"}:
+            if not re.search(
+                rf"(?<![A-Za-z]){re.escape(value)}(?![A-Za-z])",
+                evidence.quote,
+                flags=re.ASCII,
+            ):
+                raise ContractValidationError(
+                    "vacancy eligibility country code is absent from its quote"
+                )
+            if evidence.field == "required_residence" and not any(
+                token in folded for token in ("reside", "resident", "residency")
+            ):
+                raise ContractValidationError(
+                    "residence fact quote lacks an explicit residence term"
+                )
+        elif evidence.field in {
+            "sponsorship_available",
+            "minimum_years_experience",
+            "contract_type",
+        }:
+            if not quote_supports_eligibility(evidence.field, value, evidence.quote):
+                raise ContractValidationError(
+                    "eligibility fact is not supported by the exact quote grammar"
+                )
+    return facts
 
 
 @dataclass(frozen=True)

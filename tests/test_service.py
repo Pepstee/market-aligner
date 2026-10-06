@@ -29,6 +29,9 @@ from market_aligner.llm.contracts import (
     EvidenceMatch,
     LLMReceipt,
     SemanticVacancyExtraction,
+    VACANCY_ELIGIBILITY_FIELDS,
+    VACANCY_ELIGIBILITY_FACTS_TASK,
+    VacancyEligibilityFacts,
 )
 from market_aligner.profiler.schema import (
     CandidateProfile,
@@ -47,6 +50,7 @@ class FixtureSemanticWorker:
         self.drift_extraction_input = drift_extraction_input
         self.extractions = 0
         self.alignments = 0
+        self.eligibility_extractions = 0
 
     def extract_vacancy(
         self, raw_context: Mapping[str, Any]
@@ -83,6 +87,31 @@ class FixtureSemanticWorker:
             receipt = replace(receipt, input_sha256="f" * 64)
         return extraction, receipt
 
+    def extract_vacancy_eligibility(
+        self, raw_context: Mapping[str, Any]
+    ) -> tuple[VacancyEligibilityFacts, LLMReceipt]:
+        self.eligibility_extractions += 1
+        facts = VacancyEligibilityFacts(
+            source_content_sha256=str(raw_context["content_sha256"]),
+            work_jurisdiction=None,
+            required_residence=None,
+            sponsorship_available=None,
+            minimum_years_experience=None,
+            contract_type=None,
+            source_evidence=(),
+            unknown_fields=tuple(sorted(VACANCY_ELIGIBILITY_FIELDS)),
+        )
+        receipt = LLMReceipt.bind(
+            receipt_id=f"eligibility-{self.eligibility_extractions}",
+            task=VACANCY_ELIGIBILITY_FACTS_TASK,
+            model="fixture-semantic-v1",
+            prompt_version="eligibility-v1",
+            inputs=raw_context,
+            output=facts,
+            created_at="2026-08-20T00:00:00Z",
+        )
+        return facts, receipt
+
     def align_evidence(
         self, context: Mapping[str, Any]
     ) -> tuple[EvidenceAlignment, LLMReceipt]:
@@ -117,6 +146,12 @@ class FixtureSemanticWorker:
             created_at="2026-08-20T00:00:00Z",
         )
         return alignment, receipt
+
+
+class LegacyFixtureSemanticWorker(FixtureSemanticWorker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.extract_vacancy_eligibility = None
 
 
 def _processing_fixture(root: Path, *, jobs: int = 1) -> tuple[str, Path]:
@@ -789,6 +824,16 @@ class ServiceTests(unittest.TestCase):
                 authority_sha256=str(first["evidence_authority_sha256"]),
                 processing_config_sha256=str(first["config_sha256"]),
             )
+            eligibility_result = completed_rows[0]["vacancy_eligibility"]
+            self.assertEqual("source_bound_extraction", eligibility_result["status"])
+            self.assertEqual(
+                tuple(sorted(VACANCY_ELIGIBILITY_FIELDS)),
+                tuple(eligibility_result["facts"]["unknown_fields"]),
+            )
+            self.assertEqual(
+                VACANCY_ELIGIBILITY_FACTS_TASK,
+                eligibility_result["receipt"]["task"],
+            )
             self.assertEqual(64, len(str(completed_rows[0]["opportunity_axes"]["facts_sha256"])))
             self.assertEqual(
                 first["opportunity_policy_sha256"],
@@ -817,6 +862,63 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(0, second["shard_claimed"])
             self.assertEqual(1, second["ranked_count"])
             self.assertEqual((1, 1), (worker.extractions, worker.alignments))
+            self.assertEqual(1, worker.eligibility_extractions)
+
+    def test_processing_upgrade_reuses_semantic_cache_and_extracts_facts_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            legacy_worker = LegacyFixtureSemanticWorker()
+            legacy_service = ProcessingService(root, legacy_worker)
+            legacy = legacy_service.process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="worker-legacy",
+                job_key="fixture:1",
+            )
+            self.assertEqual(0, legacy["errors"])
+            self.assertEqual(1, legacy_worker.extractions)
+            self.assertEqual(1, legacy_worker.alignments)
+            self.assertEqual(0, legacy_worker.eligibility_extractions)
+
+            worker = FixtureSemanticWorker()
+            changed_policy = FirstJobScopePolicy(
+                senior_title_patterns=(r"\bnever-match-fixture\b",)
+            )
+            service = ProcessingService(root, worker, first_job_policy=changed_policy)
+            upgraded = service.process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="worker-upgrade",
+                job_key="fixture:1",
+            )
+            self.assertEqual(0, upgraded["errors"])
+            self.assertEqual(1, upgraded["semantic_extractions_reused"])
+            self.assertEqual(1, upgraded["evidence_alignments_reused"])
+            self.assertEqual((0, 0, 1), (
+                worker.extractions,
+                worker.alignments,
+                worker.eligibility_extractions,
+            ))
+
+            rows = service.jobs.completed_processing(
+                profile_id=profile_id,
+                track="automation",
+                authority_sha256=str(upgraded["evidence_authority_sha256"]),
+                processing_config_sha256=str(upgraded["config_sha256"]),
+            )
+            self.assertEqual("source_bound_extraction", rows[0]["vacancy_eligibility"]["status"])
+            repeated = service.process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="worker-repeat",
+                job_key="fixture:1",
+            )
+            self.assertEqual(0, repeated["shard_claimed"])
+            self.assertEqual(1, worker.eligibility_extractions)
 
     def test_process_rejects_drifted_receipt_without_partial_result_then_retries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1227,6 +1329,7 @@ class ServiceTests(unittest.TestCase):
             )
             self.assertNotEqual(stale["config_sha256"], current["config_sha256"])
             self.assertEqual((1, 1), (worker.extractions, worker.alignments))
+            self.assertEqual(1, worker.eligibility_extractions)
             self.assertEqual((1, 0, 1, 0), (
                 current["shard_claimed"], current["ranked_count"],
                 current["semantic_extractions_reused"],
