@@ -15,6 +15,8 @@ from market_aligner.domain.contracts import RawPosting
 from market_aligner.llm.codex_gateway import (
     CodexGatewayError,
     CodexSemanticGateway,
+    EXTRACTION_PROMPT_VERSION,
+    EXTRACTION_SCHEMA,
     SYNTHETIC_CANARY_MARKER,
     _DISABLED_CODE_MODE_HOST_NOTICE,
     _event_validation_policy_fields,
@@ -335,6 +337,143 @@ class LLMPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "output hash"):
             accept_extraction(raw, extraction, bad)
 
+    def test_gateway_canonicalizes_work_authorisation_and_binds_both_hashes(
+        self,
+    ) -> None:
+        digest = hashlib.sha256(b"synthetic vacancy").hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "codex"
+            binary.write_bytes(b"synthetic codex binary")
+            results = []
+            for codes in (["US", "GB", "US"], ["GB", "US"]):
+                response = _extraction_payload(digest)
+                response["work_authorisation"] = codes
+                response["unknown_fields"] = ["authorization wording is ambiguous"]
+                runner = FakeCodexRunner([response])
+                gateway = CodexSemanticGateway(
+                    model="gpt-test-explicit",
+                    codex_binary=str(binary),
+                    environment={"HOME": temporary, "PATH": "/usr/bin"},
+                    runner=runner,
+                )
+                extraction, receipt = gateway.extract_vacancy(
+                    {
+                        "board": "synthetic",
+                        "job_id": "1",
+                        "url": "https://example.invalid/1",
+                        "content_sha256": digest,
+                        "raw_text": "synthetic vacancy",
+                    }
+                )
+                self.assertEqual(("GB", "US"), extraction.work_authorisation)
+                self.assertEqual(
+                    ("authorization wording is ambiguous",), extraction.unknown_fields
+                )
+                self.assertEqual(1, len(runner.calls))
+                self.assertEqual(
+                    hashlib.sha256(json.dumps(response).encode("utf-8")).hexdigest(),
+                    receipt.transport.response_sha256,
+                )
+                self.assertIn(EXTRACTION_PROMPT_VERSION, runner.calls[0][1]["input"])
+                self.assertIn(
+                    "Never list applicant entitlements", runner.calls[0][1]["input"]
+                )
+                property_schema = runner.schemas[0]["properties"]["work_authorisation"]
+                self.assertEqual("^[A-Z]{2}$", property_schema["items"]["pattern"])
+                self.assertNotIn("uniqueItems", property_schema)
+                self.assertIn("work_authorisation", runner.schemas[0]["required"])
+                self.assertEqual(EXTRACTION_PROMPT_VERSION, receipt.prompt_version)
+                results.append(receipt)
+            self.assertEqual(results[0].output_sha256, results[1].output_sha256)
+            self.assertNotEqual(
+                results[0].transport.response_sha256,
+                results[1].transport.response_sha256,
+            )
+
+        empty_response = _extraction_payload(digest)
+        empty_response["unknown_fields"] = ["work eligibility scope is unclear"]
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "codex"
+            binary.write_bytes(b"synthetic codex binary")
+            runner = FakeCodexRunner([empty_response])
+            gateway = CodexSemanticGateway(
+                model="gpt-test-explicit",
+                codex_binary=str(binary),
+                environment={"HOME": temporary, "PATH": "/usr/bin"},
+                runner=runner,
+            )
+            extraction, _ = gateway.extract_vacancy(
+                {"content_sha256": digest, "raw_text": "synthetic vacancy"}
+            )
+            self.assertEqual((), extraction.work_authorisation)
+            self.assertEqual(
+                ("work eligibility scope is unclear",), extraction.unknown_fields
+            )
+
+    def test_gateway_rejects_malformed_work_authorisation_without_retry_or_echo(
+        self,
+    ) -> None:
+        digest = hashlib.sha256(b"synthetic vacancy").hexdigest()
+        malformed_values = (
+            None,
+            "US",
+            "US,GB",
+            {},
+            True,
+            0,
+            ["US", None],
+            ["US", 1],
+            ["us"],
+            ["Us"],
+            ["USA"],
+            [" US"],
+            ["US "],
+            ["United States"],
+            ["ＵＳ"],
+            ["applicant must hold work rights in Germany"],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "codex"
+            binary.write_bytes(b"synthetic codex binary")
+            for malformed in malformed_values:
+                response = _extraction_payload(digest)
+                response["work_authorisation"] = malformed
+                runner = FakeCodexRunner([response])
+                gateway = CodexSemanticGateway(
+                    model="gpt-test-explicit",
+                    codex_binary=str(binary),
+                    environment={"HOME": temporary, "PATH": "/usr/bin"},
+                    runner=runner,
+                )
+                with self.subTest(malformed=malformed):
+                    with self.assertRaisesRegex(
+                        CodexGatewayError,
+                        "work_authorisation must be sorted unique uppercase two-letter country codes",
+                    ) as raised:
+                        gateway.extract_vacancy(
+                            {"content_sha256": digest, "raw_text": "synthetic vacancy"}
+                        )
+                    self.assertNotIn(repr(malformed), str(raised.exception))
+                    self.assertEqual(1, len(runner.calls))
+
+            response = _extraction_payload(digest)
+            del response["work_authorisation"]
+            runner = FakeCodexRunner([response])
+            gateway = CodexSemanticGateway(
+                model="gpt-test-explicit",
+                codex_binary=str(binary),
+                environment={"HOME": temporary, "PATH": "/usr/bin"},
+                runner=runner,
+            )
+            with self.assertRaisesRegex(
+                CodexGatewayError,
+                "work_authorisation must be sorted unique uppercase two-letter country codes",
+            ):
+                gateway.extract_vacancy(
+                    {"content_sha256": digest, "raw_text": "synthetic vacancy"}
+                )
+            self.assertEqual(1, len(runner.calls))
+
     def test_detached_codex_gateway_is_schema_and_transport_bound_without_ambient_context(
         self,
     ) -> None:
@@ -640,6 +779,7 @@ class RetainedContractValidationTests(unittest.TestCase):
             {'source_content_sha256': 'Z' * 64},
             {'required_skills': ['Python']},
             {'work_authorisation': ('gb',)},
+            {'work_authorisation': ('GB', 'GB')},
         ):
             with self.subTest(changes=changes), self.assertRaises((TypeError, ValueError)):
                 replace(value, **changes)
