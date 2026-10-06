@@ -918,6 +918,7 @@ class RetainedSubjectBindingTests(unittest.TestCase):
 class VacancyEligibilityContractTests(unittest.TestCase):
     fields = tuple(sorted(VACANCY_ELIGIBILITY_FIELDS))
     digest = "a" * 64
+    _default_offices = object()
 
     def evidence(self, field: str) -> VacancyEligibilityEvidence:
         return VacancyEligibilityEvidence(field=field, quote="source quote")
@@ -1238,6 +1239,134 @@ class VacancyEligibilityContractTests(unittest.TestCase):
                 absent_receipt,
                 inputs=absent_inputs,
             )
+
+    def _bound_jurisdiction_case(
+        self,
+        *,
+        code: str,
+        quote: str,
+        description: str = "",
+        location_name: str = "London, United Kingdom",
+        office_name: str = "London",
+        office_location: str = "London, United Kingdom",
+        offices: object = _default_offices,
+        field: str = "work_jurisdiction",
+    ) -> tuple[RawPosting, VacancyEligibilityFacts, LLMReceipt, dict[str, Any]]:
+        raw, _ = LLMPipelineTests._structured_listing()
+        raw = RawPosting(
+            board=raw.board,
+            job_id=raw.job_id,
+            url=raw.url,
+            fetched_at=raw.fetched_at,
+            raw_json={
+                "description": description,
+                "location": {"name": location_name},
+                "offices": (
+                    [{"name": office_name, "location": office_location}]
+                    if offices is self._default_offices
+                    else offices
+                ),
+            },
+        )
+        raw = replace(raw, content_sha256=raw_posting_content_sha256(raw))
+        inputs = vacancy_eligibility_input(raw)
+        values = dict.fromkeys(self.fields)
+        values[field] = code
+        facts = VacancyEligibilityFacts(
+            source_content_sha256=str(inputs["content_sha256"]),
+            work_jurisdiction=values["work_jurisdiction"],
+            required_residence=values["required_residence"],
+            sponsorship_available=values["sponsorship_available"],
+            minimum_years_experience=values["minimum_years_experience"],
+            contract_type=values["contract_type"],
+            source_evidence=(VacancyEligibilityEvidence(field=field, quote=quote),),
+            unknown_fields=tuple(name for name in self.fields if name != field),
+        )
+        receipt = LLMReceipt.bind(
+            receipt_id="structured-office-eligibility-receipt",
+            task="vacancy_eligibility_facts",
+            model="fixture-model",
+            prompt_version="fixture-v1",
+            inputs=inputs,
+            output=facts,
+            created_at="2026-10-06T00:00:00Z",
+        )
+        return raw, facts, receipt, inputs
+
+    def test_work_jurisdiction_accepts_only_structured_gb_uk_office_binding(self) -> None:
+        for code, quote in (
+            ("GB", "London, United Kingdom"),
+            ("GB", "United Kingdom"),
+            ("UK", "London, United Kingdom"),
+            ("UK", "United Kingdom"),
+        ):
+            with self.subTest(code=code, quote=quote):
+                raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+                    code=code, quote=quote
+                )
+                self.assertEqual(
+                    facts,
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    ),
+                )
+
+    def test_work_jurisdiction_rejects_negated_and_multicountry_quotes(self) -> None:
+        for quote in (
+            "outside, United Kingdom",
+            "not in, United Kingdom",
+            "if located in, United Kingdom",
+            "London or Dublin, United Kingdom",
+            "France, United Kingdom",
+            "Germany, United Kingdom",
+            "Do not apply here, United Kingdom",
+            "US, United Kingdom",
+        ):
+            with self.subTest(quote=quote):
+                raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+                    code="GB", quote=quote, description=quote
+                )
+                with self.assertRaisesRegex(
+                    ContractValidationError, "country code is absent"
+                ):
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    )
+
+    def test_work_jurisdiction_requires_matching_office_location(self) -> None:
+        raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+            code="GB",
+            quote="London, United Kingdom",
+            office_location="Paris, France",
+        )
+        with self.assertRaisesRegex(
+            ContractValidationError, "country code is absent"
+        ):
+            accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs)
+
+    def test_work_jurisdiction_rejects_missing_or_malformed_offices(self) -> None:
+        for offices in (None, "London", {"name": "London"}, 42, []):
+            with self.subTest(offices=offices):
+                raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+                    code="GB",
+                    quote="London, United Kingdom",
+                    offices=offices,
+                )
+                with self.assertRaisesRegex(
+                    ContractValidationError, "country code is absent"
+                ):
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    )
+
+    def test_office_country_alias_does_not_establish_required_residence(self) -> None:
+        raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+            code="GB", quote="London, United Kingdom", field="required_residence"
+        )
+        with self.assertRaisesRegex(
+            ContractValidationError, "country code is absent"
+        ):
+            accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs)
 
 
 class VerifiedEligibilityCaptureTests(unittest.TestCase):

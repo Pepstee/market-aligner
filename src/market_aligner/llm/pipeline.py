@@ -220,6 +220,56 @@ def quote_supports_eligibility(field: str, value: object, quote: object) -> bool
     return False
 
 
+def _structured_work_country_quote_supports(
+    code: object, quote: object, source_listing: object
+) -> bool:
+    """Bind extracted work-country facts only to verified source location fields.
+
+    Code and quote are the original extracted facts. Only ``location.name``
+    and ``offices`` are read from the same verified raw public posting.
+    """
+    if type(code) is not str or code not in {"GB", "UK"}:
+        return False
+    if not isinstance(quote, str) or not quote.strip():
+        return False
+    if not isinstance(source_listing, Mapping):
+        return False
+    location = source_listing.get("location")
+    if not isinstance(location, Mapping):
+        return False
+    location_name = location.get("name")
+    offices = source_listing.get("offices")
+    if not isinstance(location_name, str) or not location_name.strip():
+        return False
+    if not isinstance(offices, (list, tuple)):
+        return False
+
+    def normalize(text: str) -> str:
+        return " ".join(text.split()).casefold()
+
+    normalized_quote = normalize(quote)
+    normalized_location = normalize(location_name)
+    for office in offices:
+        if not isinstance(office, Mapping):
+            continue
+        name = office.get("name")
+        office_location = office.get("location")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(office_location, str) or not office_location.strip():
+            continue
+        if normalize(office_location) != normalized_location:
+            continue
+        normalized_name = normalize(name)
+        for label in ("GB", "UK", "United Kingdom"):
+            normalized_label = normalize(label)
+            if normalized_location == f"{normalized_name}, {normalized_label}":
+                if normalized_quote in (normalized_location, normalized_label):
+                    return True
+                break
+    return False
+
+
 def accept_vacancy_eligibility_facts(
     raw: RawPosting,
     facts: VacancyEligibilityFacts,
@@ -249,11 +299,13 @@ def accept_vacancy_eligibility_facts(
     if isinstance(decoded, Mapping) and decoded.get("schema_version") == (
         "market-aligner.public-listing-capture.v1"
     ):
+        source_listing = decoded.get("raw_json")
         source_text = (
             *_public_capture_text(decoded.get("raw_text")),
-            *_public_capture_text(decoded.get("raw_json")),
+            *_public_capture_text(source_listing),
         )
     else:
+        source_listing = decoded
         source_text = _public_capture_text(decoded)
     for evidence in facts.source_evidence:
         try:
@@ -273,6 +325,11 @@ def accept_vacancy_eligibility_facts(
                 rf"(?<![A-Za-z]){re.escape(value)}(?![A-Za-z])",
                 evidence.quote,
                 flags=re.ASCII,
+            ) and not (
+                evidence.field == "work_jurisdiction"
+                and _structured_work_country_quote_supports(
+                    value, evidence.quote, source_listing
+                )
             ):
                 raise ContractValidationError(
                     "vacancy eligibility country code is absent from its quote"
