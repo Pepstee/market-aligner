@@ -240,6 +240,75 @@ def category_for_source_heading(
     }[heading]
 
 
+CV_CLAIM_ASSIGNMENT_INSTRUCTIONS = (
+    "Assign every required claim ID exactly once globally, in its sole assigned section heading per the policy map; never repeat an approved claim in another section.",
+    "Copy claim facts verbatim into the assigned section only; invent nothing, omit no required claim, and do not add a second copy in a summary or any other section.",
+)
+
+
+def build_cv_claim_assignment_contract(
+    claims: object,
+    categories_by_heading: object,
+    primary_category_by_heading: object,
+) -> dict[str, object]:
+    def checked_string(value: object) -> str:
+        if type(value) is not str or not value or value != value.strip():
+            raise ValueError("invalid CV claim assignment")
+        return value
+
+    if (
+        type(claims) not in (list, tuple)
+        or not claims
+        or type(categories_by_heading) is not dict
+        or not categories_by_heading
+        or type(primary_category_by_heading) is not dict
+        or primary_category_by_heading.keys() != categories_by_heading.keys()
+    ):
+        raise ValueError("invalid CV claim assignment")
+
+    normalized_claims: list[tuple[str, str]] = []
+    seen_claim_ids: set[str] = set()
+    for claim in claims:
+        if type(claim) is not dict or set(claim) != {"claim_id", "category"}:
+            raise ValueError("invalid CV claim assignment")
+        claim_id = checked_string(claim["claim_id"])
+        category = checked_string(claim["category"])
+        if claim_id in seen_claim_ids:
+            raise ValueError("invalid CV claim assignment")
+        seen_claim_ids.add(claim_id)
+        normalized_claims.append((claim_id, category))
+
+    for heading, categories in categories_by_heading.items():
+        checked_string(heading)
+        if type(categories) is not frozenset or not categories:
+            raise ValueError("invalid CV claim assignment")
+        for category in categories:
+            checked_string(category)
+
+    heading_by_primary_category: dict[str, str] = {}
+    for heading, primary_category in primary_category_by_heading.items():
+        heading = checked_string(heading)
+        primary_category = checked_string(primary_category)
+        if (
+            primary_category not in categories_by_heading[heading]
+            or primary_category in heading_by_primary_category
+        ):
+            raise ValueError("invalid CV claim assignment")
+        heading_by_primary_category[primary_category] = heading
+
+    claim_section_policy: dict[str, list[str]] = {}
+    for claim_id, category in normalized_claims:
+        primary_heading = heading_by_primary_category.get(category)
+        if primary_heading is None:
+            raise ValueError("invalid CV claim assignment")
+        claim_section_policy[claim_id] = [primary_heading]
+
+    return {
+        "claim_section_policy": claim_section_policy,
+        "required_claim_ids": [claim_id for claim_id, _ in normalized_claims],
+    }
+
+
 def validate_editorial_layout(
     headings: object, *, current_runtime: bool = False
 ) -> None:
@@ -994,6 +1063,21 @@ def validate_editorial_draft(
         claim.claim_id: claim for claim in request.approved_claims
     }
     section_policy = editorial_section_policy(current_runtime=current_runtime)
+    current_assignment = None
+    if current_runtime:
+        current_assignment = build_cv_claim_assignment_contract(
+            [
+                {"claim_id": claim.claim_id, "category": claim.category}
+                for claim in request.approved_claims
+            ],
+            section_policy,
+            {
+                heading: category_for_source_heading(
+                    heading, current_runtime=True
+                )
+                for heading in section_policy
+            },
+        )
     used_claims: list[str] = []
     for section in draft.sections:
         section_claim_count = 0
@@ -1022,6 +1106,14 @@ def validate_editorial_draft(
                     f"claim_id={claim.claim_id}, category={claim.category}, "
                     f"heading={section.heading}"
                 )
+            if (
+                current_assignment is not None
+                and current_assignment["claim_section_policy"][claim.claim_id]
+                != [section.heading]
+            ):
+                raise EditorialCompositionError(
+                    "current approved claim is outside its assigned CV section"
+                )
             if section.heading == "Core Capabilities" and _FORMAT_OR_DATASTORE.search(
                 atom.text
             ):
@@ -1034,6 +1126,10 @@ def validate_editorial_draft(
             raise EditorialCompositionError("CV sections require approved factual claims")
     if len(set(used_claims)) != len(used_claims):
         raise EditorialCompositionError("editorial draft repeats an approved claim")
+    if current_runtime and set(used_claims) != set(approved):
+        raise EditorialCompositionError(
+            "current editorial draft must use every approved claim exactly once"
+        )
 
     outward = _outward_text(draft)
     _validate_global_outward_policy(outward, document_kind="CV")
@@ -2562,31 +2658,59 @@ def run_editorial_composition_runtime(
     if runtime.writer.available() is not True or runtime.humanizer.available() is not True:
         raise EditorialCompositionError("editorial runtime adapter is unavailable")
     section_policy = editorial_section_policy(current_runtime=current_runtime)
-    writer_request = canonical_json(
-        {
-            "claim_section_policy": {
-                claim.claim_id: sorted(
-                    heading
-                    for heading, categories in section_policy.items()
-                    if claim.category in categories
-                )
+    current_assignment = None
+    if current_runtime:
+        current_assignment = build_cv_claim_assignment_contract(
+            [
+                {"claim_id": claim.claim_id, "category": claim.category}
                 for claim in request.approved_claims
-            },
-            "editorial_request": request.document(),
-            "instructions": [
-                "Return only one canonical JSON object matching the supplied response schema.",
-                "Use approved_claim atoms verbatim; never paraphrase, split, or invent facts.",
-                "Place every approved_claim atom only in a section listed for its claim ID in claim_section_policy.",
-                "Omit connective atoms or select them only from the supplied finite rhetorical catalog.",
-                "Do not add Curriculum Vitae/CV labels, work-rights text, or unsupported capabilities.",
-                "Do not add AI-authorship disclosure or em/en dashes, including inside approved facts.",
-                "Keep formats and datastores out of Core Capabilities.",
             ],
+            section_policy,
+            {
+                heading: category_for_source_heading(
+                    heading, current_runtime=True
+                )
+                for heading in section_policy
+            },
+        )
+        claim_section_policy = current_assignment["claim_section_policy"]
+    else:
+        claim_section_policy = {
+            claim.claim_id: sorted(
+                heading
+                for heading, categories in section_policy.items()
+                if claim.category in categories
+            )
+            for claim in request.approved_claims
+        }
+    instructions = [
+        "Return only one canonical JSON object matching the supplied response schema.",
+        "Use approved_claim atoms verbatim; never paraphrase, split, or invent facts.",
+        "Place every approved_claim atom only in a section listed for its claim ID in claim_section_policy.",
+        "Omit connective atoms or select them only from the supplied finite rhetorical catalog.",
+        "Do not add Curriculum Vitae/CV labels, work-rights text, or unsupported capabilities.",
+        "Do not add AI-authorship disclosure or em/en dashes, including inside approved facts.",
+        "Keep formats and datastores out of Core Capabilities.",
+    ]
+    if current_runtime:
+        instructions.extend(CV_CLAIM_ASSIGNMENT_INSTRUCTIONS)
+    writer_request_document: dict[str, object] = {
+        "claim_section_policy": claim_section_policy,
+    }
+    if current_assignment is not None:
+        writer_request_document["required_claim_ids"] = current_assignment[
+            "required_claim_ids"
+        ]
+    writer_request_document.update(
+        {
+            "editorial_request": request.document(),
+            "instructions": instructions,
             "rhetorical_catalog": sorted(_CV_RHETORICAL_CONNECTIVES),
             "schema_version": "jaa.cv-writer-runtime-request.v3",
             "stage": "resume_writer",
         }
-    ).encode()
+    )
+    writer_request = canonical_json(writer_request_document).encode()
     writer_invocation = secrets.token_hex(32)
     writer_session = runtime.writer.open_fresh_session(
         invocation_id=writer_invocation

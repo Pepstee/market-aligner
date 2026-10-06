@@ -162,6 +162,122 @@ def test_current_highlight_draft_round_trips_without_legacy_required_sections() 
         validate_editorial_draft(request, response, current_runtime=False)
 
 
+def test_current_claim_assignment_uses_unique_primary_headings() -> None:
+    categories_by_heading = editorial_module.editorial_section_policy(
+        current_runtime=True
+    )
+    primary_category_by_heading = {
+        heading: editorial_module.category_for_source_heading(
+            heading, current_runtime=True
+        )
+        for heading in categories_by_heading
+    }
+    claims = [
+        {"claim_id": "project-claim", "category": "project"},
+        {"claim_id": "summary-claim", "category": "summary"},
+    ]
+
+    assignment = editorial_module.build_cv_claim_assignment_contract(
+        claims, categories_by_heading, primary_category_by_heading
+    )
+
+    assert assignment == {
+        "claim_section_policy": {
+            "project-claim": ["Projects"],
+            "summary-claim": ["Professional Summary"],
+        },
+        "required_claim_ids": ["project-claim", "summary-claim"],
+    }
+    assert "project" in categories_by_heading["Professional Summary"]
+
+    class _HeadingKey(str):
+        pass
+
+    subclass_heading_map = {
+        _HeadingKey(heading): category
+        for heading, category in primary_category_by_heading.items()
+    }
+    with pytest.raises(ValueError, match="invalid CV claim assignment"):
+        editorial_module.build_cv_claim_assignment_contract(
+            claims, categories_by_heading, subclass_heading_map
+        )
+
+
+def test_current_cv_draft_requires_each_bound_claim_once_in_its_primary_section() -> None:
+    request, draft = _current_fixture()
+    validate_editorial_draft(request, draft, current_runtime=True)
+    highlight_claim, project_claim = request.approved_claims
+
+    omitted = build_editorial_draft(
+        candidate_name=request.authority.candidate_name,
+        candidate_city=request.authority.candidate_city,
+        sections=(
+            CVSection(
+                "Highlights",
+                (
+                    EditorialAtom(
+                        "approved_claim", highlight_claim.text, highlight_claim.claim_id
+                    ),
+                ),
+            ),
+        ),
+        current_runtime=True,
+    )
+    with pytest.raises(
+        EditorialCompositionError, match="must use every approved claim exactly once"
+    ):
+        validate_editorial_draft(request, omitted, current_runtime=True)
+
+    repeated = build_editorial_draft(
+        candidate_name=request.authority.candidate_name,
+        candidate_city=request.authority.candidate_city,
+        sections=(
+            CVSection(
+                "Highlights",
+                (
+                    EditorialAtom(
+                        "approved_claim", highlight_claim.text, highlight_claim.claim_id
+                    ),
+                ),
+            ),
+            CVSection(
+                "Projects",
+                (
+                    EditorialAtom(
+                        "approved_claim", project_claim.text, project_claim.claim_id
+                    ),
+                    EditorialAtom(
+                        "approved_claim", project_claim.text, project_claim.claim_id
+                    ),
+                ),
+            ),
+        ),
+        current_runtime=True,
+    )
+    with pytest.raises(EditorialCompositionError, match="repeats an approved claim"):
+        validate_editorial_draft(request, repeated, current_runtime=True)
+
+    wrong_primary_section = build_editorial_draft(
+        candidate_name=request.authority.candidate_name,
+        candidate_city=request.authority.candidate_city,
+        sections=(
+            CVSection(
+                "Professional Summary",
+                (
+                    EditorialAtom(
+                        "approved_claim", project_claim.text, project_claim.claim_id
+                    ),
+                ),
+            ),
+        ),
+        current_runtime=True,
+    )
+    with pytest.raises(
+        EditorialCompositionError, match="outside its assigned CV section"
+    ):
+        validate_editorial_draft(request, wrong_primary_section, current_runtime=True)
+
+
 def _claim(claim_id: str, text: str, category: str) -> ApprovedCVClaim:
     return ApprovedCVClaim(
         claim_id=claim_id,
@@ -245,6 +361,44 @@ def _fixture():
         sections=sections,
     )
     return request, writer, final
+
+
+def _current_fixture():
+    authority = CandidateEditorialAuthority(
+        candidate_name="Synthetic Candidate",
+        candidate_city="Example City, United Kingdom",
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="c" * 64,
+        current_runtime=True,
+    )
+    claims = (
+        _claim("highlight", "Delivered a structured workflow improvement.", "highlight"),
+        _claim("project", "Built a synthetic planning workflow.", "project"),
+    )
+    request = build_editorial_request(
+        authority=authority,
+        role_title="Synthetic Engineer",
+        company_name="Example Employer",
+        vacancy_sha256="d" * 64,
+        approved_claims=claims,
+    )
+    draft = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        sections=(
+            CVSection(
+                "Highlights",
+                (EditorialAtom("approved_claim", claims[0].text, claims[0].claim_id),),
+            ),
+            CVSection(
+                "Projects",
+                (EditorialAtom("approved_claim", claims[1].text, claims[1].claim_id),),
+            ),
+        ),
+        current_runtime=True,
+    )
+    return request, draft
 
 
 def _stage_evidence(request, writer, final):
@@ -337,6 +491,43 @@ def test_runtime_invokes_explicit_writer_and_humanizer_then_admits_outputs() -> 
         "project": ["Professional Summary", "Projects"],
         "summary": ["Professional Summary"],
     }
+    assert "required_claim_ids" not in writer_request
+    assert not any(
+        "exactly once globally" in instruction
+        for instruction in writer_request["instructions"]
+    )
+
+
+def test_current_runtime_writer_request_assigns_all_claims_once() -> None:
+    request, draft = _current_fixture()
+    writer_adapter = _ScriptedStageAdapter(
+        "fixture-current-writer", "writer-v2", draft
+    )
+    humanizer_adapter = _ScriptedStageAdapter(
+        "fixture-current-humanizer", "humanizer-v2", draft
+    )
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+    )
+
+    run_editorial_composition_runtime(request, runtime=runtime)
+
+    writer_request = json.loads(writer_adapter.calls[0][0])
+    assert writer_request["claim_section_policy"] == {
+        "highlight": ["Highlights"],
+        "project": ["Projects"],
+    }
+    assert writer_request["required_claim_ids"] == ["highlight", "project"]
+    assert any(
+        "exactly once globally" in instruction
+        for instruction in writer_request["instructions"]
+    )
+    assert any(
+        "second copy" in instruction
+        for instruction in writer_request["instructions"]
+    )
 
 
 def test_production_runtime_requires_exact_source_materialization() -> None:
