@@ -713,6 +713,7 @@ def validate_generated_cv(
     rendered_pages: Iterable[Sequence[str]],
     policy: CVPolicy | None = None,
     target_role_title: str | None = None,
+    section_policy: Mapping[str, frozenset[str]] | None = None,
     _source_policy_only: bool = False,
     allow_missing_city: bool = False,
 ) -> CVConstraintReceipt | CandidateSourcePolicyReceipt:
@@ -740,14 +741,37 @@ def validate_generated_cv(
     if _GENERIC_FILLER.search(_section_text(sections, "Professional Summary")):
         raise CVConstraintError("generic professional-summary filler is forbidden")
 
+    if section_policy is None:
+        allowed_headings = _STANDARD_HEADINGS
+    else:
+        if (
+            not _source_policy_only
+            or type(section_policy) is not dict
+            or not section_policy
+            or any(
+                type(heading) is not str
+                or not heading
+                or type(categories) is not frozenset
+                or not categories
+                or any(type(category) is not str or not category for category in categories)
+                for heading, categories in section_policy.items()
+            )
+        ):
+            raise CVConstraintError("source policy section map is invalid")
+        allowed_headings = tuple(section_policy)
+
     headings = tuple(sections)
     if not headings or headings[0] != "Professional Summary":
         raise CVConstraintError("CV hierarchy must start with Professional Summary")
-    if any(heading not in _STANDARD_HEADINGS for heading in headings):
+    if any(heading not in allowed_headings for heading in headings):
         raise CVConstraintError("CV uses a non-standard ATS section heading")
-    if "Core Capabilities" not in headings:
+    if section_policy is None and "Core Capabilities" not in headings:
         raise CVConstraintError("capability-led skills are required")
-    if "Projects" in headings and headings.index("Core Capabilities") > headings.index("Projects"):
+    if (
+        "Projects" in headings
+        and "Core Capabilities" in headings
+        and headings.index("Core Capabilities") > headings.index("Projects")
+    ):
         raise CVConstraintError("Core Capabilities must precede Projects")
 
     if target_role_title is not None:

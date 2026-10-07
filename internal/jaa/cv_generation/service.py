@@ -353,6 +353,7 @@ def _validate_artifact_cv(
             rendered_pages=artifacts.cv_pdf.rendered_lines,
             policy=BASE_CV_POLICY,
             target_role_title=request.role_title,
+            section_policy=editorial_section_policy(current_runtime=True),
             _source_policy_only=True,
             allow_missing_city=request.authority.allow_missing_city,
         )

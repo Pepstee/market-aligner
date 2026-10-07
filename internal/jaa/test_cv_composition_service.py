@@ -35,7 +35,12 @@ from career_automation.testing_adversarial_recruiter import (
 from career_automation.candidate_contact_authority import CandidateContactAuthority
 from career_automation.evidence_matching import content_hash
 from cv_generation.adversarial_rebuild import bind_recruiter_improvement
-from cv_generation.constraints import CVConstraintReceipt
+from cv_generation.constraints import (
+    CVConstraintError,
+    CVConstraintReceipt,
+    CandidateSourcePolicyReceipt,
+    validate_generated_cv,
+)
 from cv_generation.benchmark_learning import (
     CVBenchmarkEntry,
     CVBenchmarkFeatures,
@@ -54,7 +59,9 @@ from cv_generation.editorial_composition import (
     humanizer_request_sha256,
 )
 from cv_generation.service import (
+    BASE_CV_POLICY,
     CVCompositionServiceError,
+    _validate_artifact_cv,
     _reidentify_source,
     _source_for_editorial_draft,
     run_cv_composition_orchestration,
@@ -450,6 +457,154 @@ def test_current_renderer_projects_and_renders_policy_headings(heading) -> None:
     artifacts = render_pdf_artifacts(projected)
     assert f"\n{heading}\n" in artifacts.editable.cv_text
     assert any(heading in page for page in artifacts.cv_pdf.rendered_lines)
+
+
+def _current_artifact_validation_case(heading: str):
+    base_source, _ = _source()
+    cv_fact = next(row for row in base_source.facts if row.document_kind == "cv")
+    summary_text = "Synthetic summary evidence supports reliable delivery."
+    section_text = "Synthetic section evidence records validated results."
+    summary_fact = replace(
+        cv_fact,
+        sentence_id=content_hash(
+            {"fixture": "current-summary-validation", "text": summary_text}
+        ),
+        text=summary_text,
+        approved_source_text=summary_text,
+    )
+    section_fact = replace(
+        cv_fact,
+        sentence_id=content_hash(
+            {"fixture": f"current-{heading.casefold()}-validation", "text": section_text}
+        ),
+        text=section_text,
+        approved_source_text=section_text,
+    )
+    base_source = _reidentify_source(
+        replace(base_source, facts=(*base_source.facts, summary_fact, section_fact))
+    )
+    authority = CandidateEditorialAuthority(
+        candidate_name=base_source.contact.full_name,
+        candidate_city=base_source.contact.city,
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+        current_runtime=True,
+    )
+    section_category = next(iter(editorial_section_policy(current_runtime=True)[heading]))
+    claims = (
+        ApprovedCVClaim(
+            claim_id="synthetic-summary-validation",
+            text=summary_text,
+            text_sha256=hashlib.sha256(summary_text.encode()).hexdigest(),
+            evidence_ids=("evidence:synthetic-summary-validation",),
+            category="summary",
+        ),
+        ApprovedCVClaim(
+            claim_id=f"synthetic-{heading.casefold()}-validation",
+            text=section_text,
+            text_sha256=hashlib.sha256(section_text.encode()).hexdigest(),
+            evidence_ids=(f"evidence:{heading.casefold()}-validation",),
+            category=section_category,
+        ),
+    )
+    request = build_editorial_request(
+        authority=authority,
+        role_title=base_source.role_title,
+        company_name=base_source.company_name,
+        vacancy_sha256=hashlib.sha256(
+            b"Synthetic role description for current validator."
+        ).hexdigest(),
+        approved_claims=claims,
+    )
+    draft = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        current_runtime=True,
+        sections=(
+            CVSection(
+                "Professional Summary",
+                (
+                    EditorialAtom(
+                        "approved_claim", summary_text, "synthetic-summary-validation"
+                    ),
+                ),
+            ),
+            CVSection(
+                heading,
+                (
+                    EditorialAtom(
+                        "approved_claim",
+                        section_text,
+                        f"synthetic-{heading.casefold()}-validation",
+                    ),
+                ),
+            ),
+        ),
+    )
+    source = _source_for_editorial_draft(
+        base_source=base_source, request=request, draft=draft
+    )
+    artifacts = render_pdf_artifacts(source)
+    return request, draft, source, artifacts
+
+
+@pytest.mark.parametrize("heading", ("Skills", "Highlights", "Results", "Outcomes"))
+def test_current_pre_review_cv_validator_uses_current_section_policy(heading) -> None:
+    request, draft, source, artifacts = _current_artifact_validation_case(heading)
+
+    receipt = _validate_artifact_cv(
+        request=request,
+        draft=draft,
+        source=source,
+        artifacts=artifacts,
+    )
+
+    assert type(receipt) is CandidateSourcePolicyReceipt
+    assert receipt.release_authority is False
+
+
+@pytest.mark.parametrize("heading", ("Skills", "Highlights", "Results", "Outcomes"))
+def test_legacy_cv_validator_keeps_current_headings_refused(heading) -> None:
+    section_text = "Synthetic section evidence records validated results."
+    cv_text = "Synthetic summary evidence.\nSynthetic capability evidence.\n" + section_text
+    sections = {
+        "Professional Summary": ("Synthetic summary evidence.",),
+        "Core Capabilities": ("Synthetic capability evidence.",),
+        heading: (section_text,),
+    }
+
+    with pytest.raises(CVConstraintError, match="non-standard ATS section heading"):
+        validate_generated_cv(
+            source_id="a" * 64,
+            candidate_name="Synthetic Candidate",
+            candidate_city=None,
+            cv_text=cv_text,
+            cv_sha256=hashlib.sha256(cv_text.encode()).hexdigest(),
+            sections=sections,
+            rendered_pages=(("Synthetic Candidate",),),
+            policy=BASE_CV_POLICY,
+        )
+
+
+def test_current_cv_validator_rejects_unregistered_heading() -> None:
+    cv_text = "Synthetic summary evidence.\nSynthetic unknown section evidence."
+    with pytest.raises(CVConstraintError, match="non-standard ATS section heading"):
+        validate_generated_cv(
+            source_id="a" * 64,
+            candidate_name="Synthetic Candidate",
+            candidate_city=None,
+            cv_text=cv_text,
+            cv_sha256=hashlib.sha256(cv_text.encode()).hexdigest(),
+            sections={
+                "Professional Summary": ("Synthetic summary evidence.",),
+                "Unregistered": ("Synthetic unknown section evidence.",),
+            },
+            rendered_pages=(("Synthetic Candidate",),),
+            policy=BASE_CV_POLICY,
+            section_policy=editorial_section_policy(current_runtime=True),
+            _source_policy_only=True,
+        )
 
 
 def test_current_renderer_headings_do_not_expand_legacy_or_unknown_policy() -> None:

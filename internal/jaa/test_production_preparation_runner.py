@@ -17,6 +17,15 @@ from career_automation import production_preparation_runner as runner
 from career_automation.market_aligner_preparation import MarketApplicationPreparation
 
 
+def _cv_binding_row(sentence_id: str, text: str, document_kind: str = "cv") -> dict[str, str]:
+    return {
+        "document_kind": document_kind,
+        "sentence_id": sentence_id,
+        "text": text,
+        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
 def test_current_contact_json_codecs_keep_artifact_and_wire_formats_separate() -> None:
     artifact_bytes = b'{"value":1}\n'
     wire_bytes = b'{"value":1}'
@@ -67,6 +76,135 @@ def test_current_evidence_archive_is_exact_and_content_addressed() -> None:
 
     assert references == {"materialization": digest, "duplicate": digest}
     assert objects == {digest: encoded}
+
+
+def test_cv_binding_partition_excludes_whole_rejected_rows_and_preserves_order() -> None:
+    first = _cv_binding_row("cv-1", "Synthetic first supported statement.")
+    cover = _cv_binding_row(
+        "cover-1", "Synthetic internal review cover detail.", "cover_letter"
+    )
+    excluded_text = "Synthetic positive claim with an internal review qualification."
+    excluded = _cv_binding_row("cv-2", excluded_text)
+    last = _cv_binding_row("cv-3", "Synthetic final supported statement.")
+    rows = [first, cover, excluded, last]
+    seen: list[str] = []
+
+    def prohibited_text(text: str) -> bool:
+        seen.append(text)
+        return "internal review" in text
+
+    accepted, exclusions = preparation.partition_cv_claim_bindings(
+        rows, prohibited_text=prohibited_text
+    )
+
+    assert accepted == (first, last)
+    assert accepted[0] is first
+    assert accepted[1] is last
+    assert seen == [first["text"], excluded_text, last["text"]]
+    assert exclusions == (
+        {
+            "sentence_id": "cv-2",
+            "text_sha256": excluded["text_sha256"],
+            "reason": "internal_evidence_only",
+        },
+    )
+    assert "text" not in exclusions[0]
+    assert excluded_text not in str(exclusions)
+    assert excluded["text"] == excluded_text
+
+
+def test_cv_binding_partition_refuses_empty_or_all_excluded_cv_sets() -> None:
+    with pytest.raises(ValueError, match="no accepted CV rows"):
+        preparation.partition_cv_claim_bindings([], prohibited_text=lambda text: False)
+    with pytest.raises(ValueError, match="no accepted CV rows"):
+        preparation.partition_cv_claim_bindings(
+            [_cv_binding_row("cv-1", "Synthetic internal review only.")],
+            prohibited_text=lambda text: True,
+        )
+
+
+def test_cv_binding_partition_rejects_duplicate_ids_across_document_kinds() -> None:
+    rows = [
+        _cv_binding_row("same-id", "Synthetic CV statement."),
+        _cv_binding_row("same-id", "Synthetic cover statement.", "cover_letter"),
+    ]
+
+    with pytest.raises(ValueError, match="duplicate sentence_id"):
+        preparation.partition_cv_claim_bindings(rows, prohibited_text=lambda text: False)
+
+
+def test_cv_binding_partition_rejects_malformed_rows_and_hashes() -> None:
+    invalid_id = _cv_binding_row("cv-1", "Synthetic statement.")
+    invalid_id["sentence_id"] = ""
+    invalid_kind = _cv_binding_row("cv-2", "Synthetic statement.")
+    invalid_kind["document_kind"] = "report"
+    invalid_text = _cv_binding_row("cv-3", "Synthetic statement.")
+    invalid_text["text"] = ""
+    invalid_hash_type = _cv_binding_row("cv-4", "Synthetic statement.")
+    invalid_hash_type["text_sha256"] = 7
+    invalid_hash = _cv_binding_row("cv-5", "Synthetic statement.")
+    invalid_hash["text_sha256"] = "0" * 64
+    uppercase_hash = _cv_binding_row("cv-6", "Synthetic statement.")
+    uppercase_hash["text_sha256"] = uppercase_hash["text_sha256"].upper()
+    cases = (
+        "not-a-row-list",
+        ["not-a-dict"],
+        [{"document_kind": "cv"}],
+        [invalid_id],
+        [invalid_kind],
+        [invalid_text],
+        [invalid_hash_type],
+        [invalid_hash],
+        [uppercase_hash],
+    )
+
+    for rows in cases:
+        with pytest.raises(ValueError):
+            preparation.partition_cv_claim_bindings(
+                rows, prohibited_text=lambda text: False
+            )
+
+
+def test_cv_binding_partition_rejects_invalid_predicates_and_results() -> None:
+    rows = [
+        _cv_binding_row("cv-1", "Synthetic first statement."),
+        _cv_binding_row("cv-2", "Synthetic second statement."),
+    ]
+    with pytest.raises(ValueError, match="prohibited_text must be callable"):
+        preparation.partition_cv_claim_bindings(rows, prohibited_text="not-callable")
+    with pytest.raises(ValueError, match="callback returned non-bool"):
+        preparation.partition_cv_claim_bindings(rows, prohibited_text=lambda text: 1)
+
+    calls = 0
+
+    def non_bool_on_second(text: str) -> object:
+        nonlocal calls
+        calls += 1
+        return False if calls == 1 else "not-bool"
+
+    with pytest.raises(ValueError, match="callback returned non-bool"):
+        preparation.partition_cv_claim_bindings(rows, prohibited_text=non_bool_on_second)
+
+
+def test_current_cv_binding_partition_uses_existing_rejection_predicate() -> None:
+    safe = _cv_binding_row("cv-safe", "Synthetic supported project result.")
+    qualified_text = "Synthetic supported work with an internal review qualification."
+    qualified = _cv_binding_row("cv-qualified", qualified_text)
+    rows = [safe, qualified]
+    snapshot = [dict(row) for row in rows]
+
+    accepted, exclusions = preparation._partition_current_cv_claim_bindings(rows)
+
+    assert accepted == (safe,)
+    assert exclusions == (
+        {
+            "sentence_id": "cv-qualified",
+            "text_sha256": qualified["text_sha256"],
+            "reason": "internal_evidence_only",
+        },
+    )
+    assert rows == snapshot
+    assert qualified["text"] == qualified_text
 
 
 def test_current_preparation_uses_luna_and_legacy_model_is_unchanged(
