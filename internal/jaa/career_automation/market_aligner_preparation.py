@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
-from cv_generation.constraints import policy_for_candidate
+from cv_generation.constraints import CandidateSourcePolicyReceipt, policy_for_candidate
 from cv_generation.service import (
     CVCompositionOrchestrationResult,
     CurrentRuntimeDraftCompositionResult,
@@ -38,6 +38,7 @@ from .candidate_application_factory import (
     CURRENT_RUNTIME_MATERIALIZATION_RECEIPT_SCHEMA,
     CandidateApplicationMaterialization,
     CandidateApplicationMaterializationReceipt,
+    CandidateApplicationPackage,
     CandidateApplicationDeploymentBinding,
     MarketApplicationDecisionAuthority,
     build_candidate_application_deployment_binding,
@@ -221,6 +222,8 @@ class MarketApplicationPreparation:
     recruiter_archive_manifest_relative_path: str | None = None
     release_authority: bool = False
     review_status: str | None = None
+    package: CandidateApplicationPackage | None = field(default=None, repr=False)
+    initial_constraint_receipt: CandidateSourcePolicyReceipt | None = None
 
 
 def _valid_materialization_geography_rank(
@@ -1034,19 +1037,27 @@ def _persist_current_runtime_drafts(
         raise ValueError("current preparation returned an invalid pre-review result")
     result.__post_init__()
     materialization_receipt = orchestration_arguments.get("materialization_receipt")
+    materialization = orchestration_arguments.get("materialization")
     request = orchestration_arguments.get("request")
     cover_request = orchestration_arguments.get("cover_letter_request")
     base_source = orchestration_arguments.get("base_source")
     if (
         type(materialization_receipt) is not CandidateApplicationMaterializationReceipt
+        or type(materialization) is not CandidateApplicationMaterialization
         or request is None
         or cover_request is None
         or base_source is None
+        or materialization.source != base_source
+        or materialization.receipt != materialization_receipt
+        or result.initial_source.contact != base_source.contact
+        or result.initial_source.job_key != base_source.job_key
+        or result.initial_source.vacancy_sha256 != base_source.vacancy_sha256
         or result.release_authority is not False
     ):
         raise ValueError("current draft persistence inputs are incomplete")
     evidence_values = {
         "base_source": base_source,
+        "initial_source": result.initial_source,
         "materialization": orchestration_arguments.get("materialization"),
         "materialization_receipt": materialization_receipt,
         "candidate_projection": orchestration_arguments.get("candidate_projection"),
@@ -1175,6 +1186,13 @@ def _persist_current_runtime_drafts(
         except BaseException:
             shutil.rmtree(temporary, ignore_errors=True)
             raise
+    package = CandidateApplicationPackage(
+        source=result.initial_source,
+        artifacts=result.initial_artifacts,
+        vacancy_requirements=materialization.vacancy_requirements,
+        materialized_source=base_source,
+        source_policy_receipt=result.initial_constraint_receipt,
+    )
     return MarketApplicationPreparation(
         preparation_id=preparation_id,
         path=canonical_destination,
@@ -1182,6 +1200,8 @@ def _persist_current_runtime_drafts(
         orchestration_sha256=result.orchestration_sha256,
         release_authority=False,
         review_status="not_performed",
+        package=package,
+        initial_constraint_receipt=result.initial_constraint_receipt,
     )
 
 

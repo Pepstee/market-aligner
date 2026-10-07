@@ -41,6 +41,7 @@ from career_automation.rendering import (
     CV_SECTION_HEADINGS,
     ApplicationArtifacts,
     render_pdf_artifacts,
+    render_editable_text,
     verify_application_artifacts,
 )
 
@@ -604,6 +605,7 @@ class CurrentRuntimeDraftCompositionResult:
     editorial_receipt: EditorialCompositionReceipt
     cover_letter_editorial_receipt: CoverLetterEditorialCompositionReceipt
     initial_constraint_receipt: CandidateSourcePolicyReceipt
+    initial_source: ApplicationSource
     initial_artifacts: ApplicationArtifacts
     initial_quality_receipt: DocumentQualityReceipt
     initial_benchmark_receipt: CVBenchmarkDiagnosticReceipt | None
@@ -637,12 +639,22 @@ class CurrentRuntimeDraftCompositionResult:
         self.cover_letter_editorial_receipt.__post_init__()
         self.initial_constraint_receipt.__post_init__()
         self.initial_quality_receipt.__post_init__()
+        if type(self.initial_source) is not ApplicationSource:
+            raise CVCompositionServiceError(
+                "current pre-review result lacks its typed prepared source"
+            )
+        verify_application_source(self.initial_source)
         verify_application_artifacts(self.initial_artifacts)
         if (
-            self.initial_constraint_receipt.source_id
-            != self.initial_artifacts.source_id
+            self.initial_artifacts.source_id != self.initial_source.source_id
+            or render_editable_text(self.initial_source) != self.initial_artifacts.editable
+            or self.initial_constraint_receipt.source_id
+            != self.initial_source.source_id
             or self.initial_constraint_receipt.cv_sha256
             != self.initial_artifacts.editable.cv_sha256
+            or
+            self.initial_constraint_receipt.source_id
+            != self.initial_artifacts.source_id
             or self.initial_quality_receipt.artifact_set_sha256
             != self.initial_artifacts.artifact_set_sha256
         ):
@@ -677,6 +689,7 @@ class CurrentRuntimeDraftCompositionResult:
             "initial_constraint_receipt_sha256": (
                 self.initial_constraint_receipt.receipt_sha256
             ),
+            "initial_source_sha256": self.initial_source.content_sha256,
             "initial_quality_receipt_sha256": (
                 self.initial_quality_receipt.receipt_sha256
             ),
@@ -957,6 +970,7 @@ def run_cv_composition_orchestration(
                 else None
             ),
             "initial_constraint_receipt_sha256": initial_constraint.receipt_sha256,
+            "initial_source_sha256": initial_source.content_sha256,
             "initial_quality_receipt_sha256": initial_quality.receipt_sha256,
             "release_authority": False,
             "review_status": "not_performed",
@@ -966,6 +980,7 @@ def run_cv_composition_orchestration(
             editorial_receipt=editorial_receipt,
             cover_letter_editorial_receipt=cover_letter_editorial_receipt,
             initial_constraint_receipt=initial_constraint,
+            initial_source=initial_source,
             initial_artifacts=initial_artifacts,
             initial_quality_receipt=initial_quality,
             initial_benchmark_receipt=initial_benchmark,

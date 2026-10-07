@@ -2353,6 +2353,7 @@ def test_prepare_application_uses_current_contact_provenance_without_legacy_path
     revalidations = []
 
     class CurrentContext:
+        application_id = "app_" + "e" * 64
         contact_authority_path = None
         contact_provenance = provenance
         market_decision_authority = SimpleNamespace(
@@ -2370,6 +2371,14 @@ def test_prepare_application_uses_current_contact_provenance_without_legacy_path
     session.archive_root = tmp_path
     session.repository_root = Path(__file__).resolve().parents[2]
     session.market_context_by_key = {vacancy.job_key: context}
+    session.current_runtime_pre_review_kwargs_by_key = {
+        vacancy.job_key: {
+            "current_runtime_config_path": str(tmp_path / "runtime.json"),
+            "current_runtime_config_sha256": "f" * 64,
+            "current_runtime_private_root": str(tmp_path / "private"),
+            "current_recovery_manifest_relative_path": "recovered/manifest.json",
+        }
+    }
     session.complete_vacancy_by_key = {vacancy.job_key: vacancy_body}
     session.decision_by_key = {vacancy.job_key: {"receipt": {"synthetic": True}}}
     session.candidate_projection = {"synthetic": True}
@@ -2424,6 +2433,11 @@ def test_prepare_application_uses_current_contact_provenance_without_legacy_path
         session._prepare_application(item, Recorder(), Page(), Sink(), review_only=True)
 
     assert captured["contact"] is candidate_contact
+    assert captured["current_runtime_application_id"] == context.application_id
+    assert captured["current_runtime_pre_review_kwargs"] == (
+        session.current_runtime_pre_review_kwargs_by_key[vacancy.job_key]
+    )
+    assert "approved_evidence_path" not in captured
     assert revalidations == ["current"]
     assert provenance.sha256 != candidate_contact.provenance_sha256
     assert session_module._contact_authority_provenance_sha256(

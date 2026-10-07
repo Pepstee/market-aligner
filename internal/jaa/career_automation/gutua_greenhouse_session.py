@@ -828,6 +828,11 @@ class GutuaGreenhouseSession:
             }
         }
         self.market_context_by_key = {job_key: context}
+        self.current_runtime_pre_review_kwargs_by_key = (
+            {job_key: dict(runtime_options["materialization_kwargs"])}
+            if runtime_options["current_runtime"]
+            else {}
+        )
         self.candidates = (candidate,)
         self.complete_vacancy_by_key = {job_key: context.raw_listing_bytes}
         self._start_browser(arguments)
@@ -1531,24 +1536,61 @@ class GutuaGreenhouseSession:
             else decision_row["receipt"]
         )
 
-        product = sink.generate_candidate_application(
-            decision_receipt=decision,
-            candidate_projection=self.candidate_projection,
-            approved_evidence_path=self.approved_evidence_path,
-            job_key=vacancy.job_key,
-            vacancy_sha256=vacancy.vacancy_sha256,
-            source_url=vacancy.source_url,
-            role_title=vacancy.role_title,
-            company_name=vacancy.company_name,
-            contact=contact_authority.contact,
-        )
+        generation_arguments = {
+            "decision_receipt": decision,
+            "candidate_projection": self.candidate_projection,
+            "job_key": vacancy.job_key,
+            "vacancy_sha256": vacancy.vacancy_sha256,
+            "source_url": vacancy.source_url,
+            "role_title": vacancy.role_title,
+            "company_name": vacancy.company_name,
+            "contact": contact_authority.contact,
+        }
+        if current_runtime:
+            pre_review_kwargs = getattr(
+                self, "current_runtime_pre_review_kwargs_by_key", {}
+            ).get(vacancy.job_key)
+            if market_context is None or type(pre_review_kwargs) is not dict:
+                raise ValueError("current pre-review generation context is absent")
+            generation_arguments.update(
+                current_runtime_application_id=market_context.application_id,
+                current_runtime_pre_review_kwargs=pre_review_kwargs,
+            )
+        else:
+            generation_arguments["approved_evidence_path"] = self.approved_evidence_path
+        product = sink.generate_candidate_application(**generation_arguments)
         if type(product) is not CandidateApplicationPackage:
             raise TypeError("owned candidate generator returned an invalid package")
         package = product
-        if market_context is not None and package.source != market_context.materialization.source:
-            raise ValueError(
-                "owned candidate generator differs from admitted Market materialization"
-            )
+        if market_context is not None:
+            if current_runtime:
+                package_source = package.source
+                base_source = market_context.materialization.source
+                constraint_receipt = package.source_policy_receipt
+                if (
+                    package.materialized_source != base_source
+                    or package_source.job_key != vacancy.job_key
+                    or package_source.vacancy_sha256 != vacancy.vacancy_sha256
+                    or package_source.vacancy_source_identity
+                    != base_source.vacancy_source_identity
+                    or package_source.role_title != vacancy.role_title
+                    or package_source.company_name != vacancy.company_name
+                    or package_source.contact != contact_authority.contact
+                    or package.vacancy_requirements
+                    != market_context.materialization.vacancy_requirements
+                    or package.artifacts.source_id != package_source.source_id
+                    or constraint_receipt is None
+                    or constraint_receipt.source_id != package_source.source_id
+                    or constraint_receipt.cv_sha256
+                    != package.artifacts.editable.cv_sha256
+                ):
+                    raise ValueError(
+                        "current prepared package differs from admitted Market materialization"
+                    )
+            elif package.source != market_context.materialization.source:
+                raise ValueError(
+                    "owned candidate generator differs from admitted Market materialization"
+                )
         generation_authority = sink.seal()
         artifact_root = self.archive_root / "production-artifacts"
         publication = publish_application_artifacts(

@@ -6,6 +6,7 @@ import os
 import pickle
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,15 +17,22 @@ import career_automation.production_runner as runner_module
 from career_automation.application_archive import VacancyArchiveIdentity
 from career_automation.application_compiler import CandidateContact
 from career_automation.candidate_application_factory import CandidateApplicationPackage
+from career_automation.evidence_matching import canonical_json
+from career_automation.market_aligner_preparation import MarketApplicationPreparation
 from career_automation.production_queue import LiveVacancy
 from career_automation.production_attempt import GreenhouseAttemptRecorder
 from career_automation.production_ats_executor import ProductionSubmissionReceipt
+from career_automation.rendering import render_pdf_artifacts
 from career_automation.production_runner import (
     GeneratedRevisionSink,
     GreenhouseProductionRunner,
     ProductionRunCandidate,
     ReviewOnlyCompletion,
 )
+from cv_generation.constraints import BASE_CV_POLICY, validate_generated_cv
+from cv_generation.editorial_composition import editorial_section_policy
+from cv_generation.service import _reidentify_source
+from test_jaa07_independent_acceptance import _source
 
 
 ROOT = Path(__file__).resolve().parent
@@ -1487,6 +1495,153 @@ raise SystemExit(worker.main())
     finally:
         for descriptor in observed.values():
             os.close(descriptor)
+
+
+def test_current_pre_review_worker_archives_typed_package_and_exact_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    import subprocess
+
+    source, _strategy = _source()
+    artifacts = render_pdf_artifacts(source)
+    facts = {row.sentence_id: row.text for row in source.facts}
+    constraint_receipt = validate_generated_cv(
+        source_id=source.source_id,
+        candidate_name=source.contact.full_name,
+        candidate_city=source.contact.city,
+        cv_text=artifacts.editable.cv_text,
+        cv_sha256=artifacts.editable.cv_sha256,
+        sections={
+            section.heading: tuple(facts[value] for value in section.sentence_ids)
+            for section in source.cv_sections
+        },
+        rendered_pages=artifacts.cv_pdf.rendered_lines,
+        policy=BASE_CV_POLICY,
+        target_role_title=source.role_title,
+        section_policy=editorial_section_policy(current_runtime=True),
+        _source_policy_only=True,
+        allow_missing_city=source.contact.city is None,
+    )
+    package = CandidateApplicationPackage(
+        source=source,
+        artifacts=artifacts,
+        vacancy_requirements=("synthetic requirement",),
+        materialized_source=source,
+        source_policy_receipt=constraint_receipt,
+    )
+    preparation = MarketApplicationPreparation(
+        preparation_id="1" * 64,
+        path=tmp_path,
+        receipt_sha256="2" * 64,
+        orchestration_sha256="3" * 64,
+        review_status="not_performed",
+        release_authority=False,
+        package=package,
+        initial_constraint_receipt=constraint_receipt,
+    )
+    preparation_path = tmp_path / "synthetic-preparation.pkl"
+    preparation_path.write_bytes(pickle.dumps(preparation, protocol=5))
+    sink, _recorder = _durable_sink(tmp_path)
+    monkeypatch.setattr(
+        sink,
+        "_generator_source_identity",
+        lambda **_kwargs: ("a" * 40, ()),
+    )
+    original_popen = subprocess.Popen
+    observed: dict[str, int] = {}
+    application_id = "app_" + "b" * 64
+    pre_review_kwargs = {
+        "current_runtime_config_path": str(tmp_path / "runtime.json"),
+        "current_runtime_config_sha256": "c" * 64,
+        "current_runtime_private_root": str(tmp_path / "private"),
+        "current_recovery_manifest_relative_path": "recovered/manifest.json",
+    }
+    script = f'''\
+import os
+import pickle
+from career_automation import production_preparation_runner
+expected = {{"application_id": {application_id!r}, **{pre_review_kwargs!r}}}
+def run_pre_review(**kwargs):
+    if kwargs != expected:
+        raise AssertionError("current pre-review bindings differ")
+    with open(os.environ["JAA_TEST_PREPARATION_PICKLE"], "rb") as handle:
+        return pickle.load(handle)
+production_preparation_runner.run_production_market_pre_review = run_pre_review
+from career_automation import candidate_generation_worker
+candidate_generation_worker.build_candidate_application_package = lambda **_: (_ for _ in ()).throw(AssertionError("legacy builder used"))
+raise SystemExit(candidate_generation_worker.main())
+'''
+
+    def launch(command, **kwargs):
+        if command == [sys.executable, "-m", "career_automation.candidate_generation_worker"]:
+            kwargs["env"]["PYTHONPATH"] = os.pathsep.join(
+                [str(ROOT), str(ROOT.parents[1] / "src")]
+            )
+            kwargs["env"]["JAA_TEST_PREPARATION_PICKLE"] = str(preparation_path)
+            observed["stdout"] = os.dup(kwargs["stdout"].fileno())
+            observed["stderr"] = os.dup(kwargs["stderr"].fileno())
+            return original_popen([sys.executable, "-c", script], **kwargs)
+        return original_popen(command, **kwargs)
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", launch)
+    arguments = {
+        "decision_receipt": {},
+        "candidate_projection": {},
+        "job_key": source.job_key,
+        "vacancy_sha256": source.vacancy_sha256,
+        "source_url": "https://example.test/current-job",
+        "role_title": source.role_title,
+        "company_name": source.company_name,
+        "contact": source.contact,
+        "current_runtime_application_id": application_id,
+        "current_runtime_pre_review_kwargs": pre_review_kwargs,
+    }
+    with pytest.raises(ValueError, match="current pre-review generation bindings"):
+        sink.generate_candidate_application(
+            **{**arguments, "current_runtime_pre_review_kwargs": None}
+        )
+    generated = sink.generate_candidate_application(**arguments)
+    assert type(generated) is CandidateApplicationPackage
+    assert generated.materialized_source == source
+    assert generated.source_policy_receipt == constraint_receipt
+    assert sink._current_runtime_generation is True
+    authority = sink.seal()
+    assert authority.repository_head == "a" * 40
+
+    revisions = {row.role: row for row in sink._verified_durable_revisions()}
+    assert set(revisions) == {
+        "generation.inputs",
+        "document.source_inputs",
+        "document.cv.constraints",
+        "document.cv.source",
+        "document.cv.final_pdf",
+        "document.cover_letter.source",
+        "document.cover_letter.final_pdf",
+        "form.answers",
+        "generation.package_pickle",
+    }
+    assert revisions["document.source_inputs"].value == (
+        canonical_json(source.document()) + "\n"
+    ).encode()
+    assert json.loads(revisions["document.cv.constraints"].value) == (
+        constraint_receipt.document()
+    )
+    input_document = json.loads(revisions["generation.inputs"].value)
+    assert input_document["application_id"] == application_id
+    assert input_document["preparation_receipt_sha256"] == preparation.receipt_sha256
+    assert input_document["materialized_source_sha256"] == source.content_sha256
+    assert input_document["release_authority"] is False
+    assert input_document["review_status"] == "not_performed"
+    restored = pickle.loads(revisions["generation.package_pickle"].value)
+    assert type(restored) is CandidateApplicationPackage
+    assert restored.materialized_source == source
+    assert restored.artifacts == artifacts
+    assert restored.source_policy_receipt == constraint_receipt
+    assert len(observed) == 2
+    for descriptor in observed.values():
+        os.close(descriptor)
 
 
 def test_private_worker_diagnostic_is_hash_only_when_archive_safety_rejects(

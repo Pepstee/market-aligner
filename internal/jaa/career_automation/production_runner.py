@@ -82,6 +82,18 @@ _GENERATOR_SOURCE_PATHS = (
     "career_automation/models.py",
     "career_automation/rendering.py",
 )
+_CURRENT_RUNTIME_GENERATOR_SOURCE_PATHS = (
+    "career_automation/candidate_contact_authority.py",
+    "career_automation/current_time.py",
+    "career_automation/handoff_admission.py",
+    "career_automation/market_aligner_preparation.py",
+    "career_automation/production_handoff_admission_runner.py",
+    "career_automation/production_handoff_runner.py",
+    "career_automation/production_preparation_runner.py",
+    "cv_generation/benchmark_learning.py",
+    "cv_generation/document_quality.py",
+    "cv_generation/editorial_composition.py",
+)
 MAX_PRIVATE_GENERATOR_DIAGNOSTIC_BYTES = 1_048_576
 _BROWSER_RUNTIME_FLAGS = (
     ("current_runtime_config_path", "--current-runtime-config"),
@@ -238,6 +250,7 @@ class GeneratedRevisionSink:
         self._authority: SinkBoundGenerationAuthority | None = None
         self._owned_generation_active = False
         self._archive_event_sha256s: list[str] = []
+        self._current_runtime_generation = False
 
     @property
     def revisions(self) -> tuple[GeneratedApplicationRevision, ...]:
@@ -296,6 +309,8 @@ class GeneratedRevisionSink:
         company_name: str,
         contact: CandidateContact,
         approved_evidence_path: Path | None = None,
+        current_runtime_application_id: str | None = None,
+        current_runtime_pre_review_kwargs: Mapping[str, str] | None = None,
     ) -> object:
         """Generate and archive the concrete package without a caller callback.
 
@@ -307,7 +322,39 @@ class GeneratedRevisionSink:
             raise ValueError("owned generation requires a pristine archive sink")
         if type(self._recorder) is not GreenhouseAttemptRecorder:
             raise ValueError("owned generation requires the durable attempt recorder")
-        repository_head, source_sha256s = self._generator_source_identity()
+        current_runtime = (
+            current_runtime_application_id is not None
+            or current_runtime_pre_review_kwargs is not None
+        )
+        expected_pre_review_keys = {
+            "current_runtime_config_path",
+            "current_runtime_config_sha256",
+            "current_runtime_private_root",
+            "current_recovery_manifest_relative_path",
+        }
+        if current_runtime:
+            if (
+                type(current_runtime_application_id) is not str
+                or len(current_runtime_application_id) != 68
+                or not current_runtime_application_id.startswith("app_")
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in current_runtime_application_id[4:]
+                )
+                or type(current_runtime_pre_review_kwargs) is not dict
+                or set(current_runtime_pre_review_kwargs) != expected_pre_review_keys
+                or any(
+                    type(value) is not str or not value
+                    for value in current_runtime_pre_review_kwargs.values()
+                )
+                or approved_evidence_path is not None
+            ):
+                raise ValueError("current pre-review generation bindings are incomplete")
+            repository_head, source_sha256s = self._generator_source_identity(
+                current_runtime=True
+            )
+        else:
+            repository_head, source_sha256s = self._generator_source_identity()
         arguments: dict[str, object] = {
             "decision_receipt": decision_receipt,
             "candidate_projection": candidate_projection,
@@ -328,6 +375,11 @@ class GeneratedRevisionSink:
         }
         if approved_evidence_path is not None:
             arguments["approved_evidence_path"] = str(approved_evidence_path)
+        if current_runtime:
+            arguments["current_runtime_application_id"] = current_runtime_application_id
+            arguments["current_runtime_pre_review_kwargs"] = dict(
+                current_runtime_pre_review_kwargs
+            )
         self._owned_generation_active = True
         try:
             repository = self._recorder.attempt.archive.repository_root
@@ -417,6 +469,174 @@ class GeneratedRevisionSink:
             self._owned_generation_active = False
         if type(package) is not CandidateApplicationPackage:
             raise TypeError("owned candidate generator returned an invalid package")
+        if current_runtime:
+            from cv_generation.constraints import CandidateSourcePolicyReceipt
+            from .application_compiler import ApplicationSource, verify_application_source
+            from .rendering import render_editable_text, verify_application_artifacts
+
+            if (
+                type(package.source) is not ApplicationSource
+                or type(package.materialized_source) is not ApplicationSource
+                or type(package.source_policy_receipt) is not CandidateSourcePolicyReceipt
+                or package.source_policy_receipt.release_authority is not False
+                or package.source_policy_receipt.passed is not True
+                or package.source_policy_receipt.source_id != package.source.source_id
+                or package.source_policy_receipt.cv_sha256
+                != package.artifacts.editable.cv_sha256
+                or package.artifacts.source_id != package.source.source_id
+                or package.materialized_source.job_key != package.source.job_key
+                or package.materialized_source.vacancy_sha256
+                != package.source.vacancy_sha256
+                or package.materialized_source.vacancy_source_identity
+                != package.source.vacancy_source_identity
+                or package.materialized_source.role_title != package.source.role_title
+                or package.materialized_source.company_name != package.source.company_name
+                or package.materialized_source.contact != package.source.contact
+                or package.source.job_key != job_key
+                or package.source.vacancy_sha256 != vacancy_sha256
+                or package.source.role_title != role_title
+                or package.source.company_name != company_name
+                or package.source.contact != contact
+                or type(package.vacancy_requirements) is not tuple
+                or any(type(value) is not str for value in package.vacancy_requirements)
+            ):
+                raise ValueError("current pre-review package binding differs")
+            package.source_policy_receipt.__post_init__()
+            verify_application_source(package.materialized_source)
+            verify_application_source(package.source)
+            verify_application_artifacts(package.artifacts)
+            if render_editable_text(package.source) != package.artifacts.editable:
+                raise ValueError("current pre-review artifacts differ from prepared source")
+            current_durable = self._verified_durable_revisions()
+            current_rows = {row.role: row for row in current_durable}
+            if len(current_rows) != 9 or len(current_durable) != 9:
+                raise ValueError("current pre-review revision inventory is ambiguous")
+            expected_values = {
+                "document.source_inputs": (
+                    (canonical_json(package.source.document()) + "\n").encode(),
+                    "application/json",
+                ),
+                "document.cv.constraints": (
+                    (
+                        canonical_json(package.source_policy_receipt.document())
+                        + "\n"
+                    ).encode(),
+                    "application/json",
+                ),
+                "document.cv.source": (
+                    package.artifacts.editable.cv_text.encode(),
+                    "text/plain",
+                ),
+                "document.cv.final_pdf": (
+                    package.artifacts.cv_pdf.pdf_bytes,
+                    "application/pdf",
+                ),
+                "document.cover_letter.source": (
+                    package.artifacts.editable.cover_letter_text.encode(),
+                    "text/plain",
+                ),
+                "document.cover_letter.final_pdf": (
+                    package.artifacts.cover_letter_pdf.pdf_bytes,
+                    "application/pdf",
+                ),
+                "form.answers": (
+                    package.artifacts.editable.answers_text.encode(),
+                    "text/plain",
+                ),
+            }
+            if any(
+                current_rows[role].value != expected_value
+                or current_rows[role].media_type != expected_media_type
+                for role, (expected_value, expected_media_type)
+                in expected_values.items()
+            ):
+                raise ValueError("current pre-review revisions differ from package")
+            generation_inputs = current_rows["generation.inputs"].value
+            try:
+                generation_document = json.loads(generation_inputs)
+            except (ValueError, UnicodeDecodeError):
+                raise ValueError("current generation input receipt is malformed") from None
+            if (
+                type(generation_document) is not dict
+                or set(generation_document)
+                != {
+                    "application_id",
+                    "company_name",
+                    "current_recovery_manifest_relative_path",
+                    "current_runtime_config_sha256",
+                    "environment",
+                    "job_key",
+                    "materialized_source_id",
+                    "materialized_source_sha256",
+                    "preparation_id",
+                    "preparation_orchestration_sha256",
+                    "preparation_receipt_sha256",
+                    "release_authority",
+                    "review_status",
+                    "role_title",
+                    "schema_version",
+                    "source_sha256",
+                    "source_url",
+                    "vacancy_source_identity",
+                    "vacancy_sha256",
+                }
+                or canonical_json(generation_document).encode() + b"\n"
+                != generation_inputs
+                or generation_document.get("application_id")
+                != current_runtime_application_id
+                or generation_document.get("company_name") != package.source.company_name
+                or generation_document.get("environment") != "current_runtime"
+                or generation_document.get("job_key") != job_key
+                or generation_document.get("role_title") != package.source.role_title
+                or generation_document.get("source_url") != source_url
+                or generation_document.get("vacancy_source_identity")
+                != package.source.vacancy_source_identity
+                or generation_document.get("vacancy_sha256") != vacancy_sha256
+                or generation_document.get("source_sha256")
+                != package.source.content_sha256
+                or generation_document.get("materialized_source_id")
+                != package.materialized_source.source_id
+                or generation_document.get("materialized_source_sha256")
+                != package.materialized_source.content_sha256
+                or generation_document.get("release_authority") is not False
+                or generation_document.get("review_status") != "not_performed"
+                or generation_document.get("schema_version")
+                != "jaa.current-runtime-generation-inputs.v1"
+                or type(generation_document.get("preparation_id")) is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["preparation_id"]
+                ) is None
+                or type(generation_document.get("preparation_receipt_sha256"))
+                is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["preparation_receipt_sha256"]
+                ) is None
+                or type(
+                    generation_document.get("preparation_orchestration_sha256")
+                )
+                is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["preparation_orchestration_sha256"]
+                )
+                is None
+                or generation_document.get("current_runtime_config_sha256")
+                != current_runtime_pre_review_kwargs[
+                    "current_runtime_config_sha256"
+                ]
+                or type(generation_document.get("current_runtime_config_sha256"))
+                is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["current_runtime_config_sha256"]
+                ) is None
+                or generation_document.get(
+                    "current_recovery_manifest_relative_path"
+                )
+                != current_runtime_pre_review_kwargs[
+                    "current_recovery_manifest_relative_path"
+                ]
+            ):
+                raise ValueError("current generation input receipt binding differs")
+            self._current_runtime_generation = True
         required = {
             "generation.inputs",
             "document.source_inputs",
@@ -530,7 +750,9 @@ class GeneratedRevisionSink:
         self._revisions.append(revision)
         return revision
 
-    def _generator_source_identity(self) -> tuple[str, tuple[tuple[str, str], ...]]:
+    def _generator_source_identity(
+        self, *, current_runtime: bool = False
+    ) -> tuple[str, tuple[tuple[str, str], ...]]:
         repository = Path(self._recorder.attempt.archive.repository_root)
         head = exact_clean_head(repository)
 
@@ -562,7 +784,13 @@ class GeneratedRevisionSink:
         if prefix and not prefix.endswith("/"):
             raise ValueError("repository prefix is not canonical")
         identities: list[tuple[str, str]] = []
-        for relative in _GENERATOR_SOURCE_PATHS:
+        source_paths = _GENERATOR_SOURCE_PATHS
+        if current_runtime:
+            source_paths = (
+                *_GENERATOR_SOURCE_PATHS,
+                *_CURRENT_RUNTIME_GENERATOR_SOURCE_PATHS,
+            )
+        for relative in source_paths:
             committed_path = f"{prefix}{relative}"
             completed = subprocess.run(
                 ["git", "-C", str(repository), "show", f"{head}:{committed_path}"],
@@ -633,7 +861,12 @@ class GeneratedRevisionSink:
         if self._authority is None:
             raise ValueError("only completed owned generation can be sealed")
         durable = self._verified_durable_revisions()
-        repository_head, source_sha256s = self._generator_source_identity()
+        if self._current_runtime_generation:
+            repository_head, source_sha256s = self._generator_source_identity(
+                current_runtime=True
+            )
+        else:
+            repository_head, source_sha256s = self._generator_source_identity()
         if (
             self._authority._sink_marker is not self._marker
             or self._authority.revisions != durable
@@ -783,7 +1016,12 @@ class GreenhouseProductionRunner:
     ) -> None:
         authority = prepared.generation_authority
         durable = sink._verified_durable_revisions()
-        repository_head, source_sha256s = sink._generator_source_identity()
+        if sink._current_runtime_generation:
+            repository_head, source_sha256s = sink._generator_source_identity(
+                current_runtime=True
+            )
+        else:
+            repository_head, source_sha256s = sink._generator_source_identity()
         if (
             authority is not sink.authority
             or authority._sink_marker is not sink._marker

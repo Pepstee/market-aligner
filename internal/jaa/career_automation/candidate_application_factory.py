@@ -304,6 +304,8 @@ class CandidateApplicationPackage:
     source: ApplicationSource
     artifacts: ApplicationArtifacts
     vacancy_requirements: tuple[str, ...]
+    materialized_source: ApplicationSource | None = None
+    source_policy_receipt: CandidateSourcePolicyReceipt | None = None
 
 
 @dataclass(frozen=True)
