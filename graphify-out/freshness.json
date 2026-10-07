@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "bb0bd30f3033d720afccb41535b3858b0ce443c0",
+  "source_base_commit": "16ccc0eb98ce62761c9523234417de855df6a4e3",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -512,6 +512,7 @@
     "internal/jaa/test_candidate_contact_enrollment.py": "86d7afacc8f6fcec19c539840cb3c2740d5bbb6e279320407714d411bf3a2e2e",
     "internal/jaa/test_candidate_evidence_proposals.py": "e6dc222ff32c2e84ac52c3c3168584032496a5ed3aa924e02e3c8ebf03ef10b6",
     "internal/jaa/test_candidate_release_gate.py": "b8b21b6302cc047f6d42d4a2c11a9b0845fe024dac7d516f1eb1d02301412ca2",
+    "internal/jaa/test_cover_letter_closing_rendering.py": "df18f856c1ced6c2f08be24a16a410bb0694d7d286971f81b8df83ea10d26407",
     "internal/jaa/test_cover_letter_editorial_parity.py": "b2f68ef03f330ade1034e47422c097ee4b73181ec98566f47cd48fd5e0bd4fad",
     "internal/jaa/test_current_greenhouse_navigation.py": "8c2a102490220a8a713c63c07a9c24905ace4e6c6bc19da574fb520da2f79749",
     "internal/jaa/test_cv_adversarial_rebuild.py": "cba481c39629d15c0c52f712c66300efd9729d71bbbb5740aa115d0b70d59a93",
