@@ -45,6 +45,117 @@ def test_cli_help_bootstraps_from_unrelated_working_directory(tmp_path: Path) ->
     assert completed.returncode == 0, completed.stderr
     assert "--execute-live" in completed.stdout
     assert "--review-only" in completed.stdout
+    assert "--current-runtime-config" in completed.stdout
+    assert "--current-runtime-config-sha256" in completed.stdout
+    assert "--current-runtime-private-root" in completed.stdout
+    assert "--current-recovery-manifest-relative-path" in completed.stdout
+
+
+def test_browser_runtime_cli_options_are_explicit_and_separated(tmp_path: Path) -> None:
+    parser = runner_module._build_parser()
+    common = [
+        "--repository-root", str(tmp_path),
+        "--archive-root", str(tmp_path),
+        "--review-only",
+    ]
+    legacy = runner_module.browser_runtime_options(parser.parse_args(common))
+    assert legacy["current_runtime"] is False
+    assert legacy["admission_kwargs"] == {}
+    assert legacy["materialization_kwargs"] == {}
+    assert legacy["selection_kwargs"] == {}
+    assert legacy["admission_kwargs"] is not legacy["selection_kwargs"]
+
+    values = {
+        "--current-runtime-config": str(tmp_path / "runtime.json"),
+        "--current-runtime-config-sha256": "a" * 64,
+        "--current-runtime-private-root": str(tmp_path / "private"),
+        "--current-recovery-manifest-relative-path": "recovered/manifest.json",
+    }
+    argv = [
+        *common,
+        "--market-execution-receipt",
+        str(tmp_path / "execution.json"),
+    ]
+    for flag, value in values.items():
+        argv.extend((flag, value))
+    options = runner_module.browser_runtime_options(parser.parse_args(argv))
+    shared = {
+        "current_runtime_config_path": values["--current-runtime-config"],
+        "current_runtime_config_sha256": values["--current-runtime-config-sha256"],
+        "current_runtime_private_root": values["--current-runtime-private-root"],
+    }
+    assert options["current_runtime"] is True
+    assert options["admission_kwargs"] == shared
+    assert options["selection_kwargs"] == shared
+    assert options["materialization_kwargs"] == {
+        **shared,
+        "current_recovery_manifest_relative_path": "recovered/manifest.json",
+    }
+
+
+def test_browser_runtime_cli_options_reject_partial_or_invalid_bindings(
+    tmp_path: Path,
+) -> None:
+    import itertools
+
+    parser = runner_module._build_parser()
+    common = [
+        "--repository-root", str(tmp_path),
+        "--archive-root", str(tmp_path),
+        "--review-only",
+    ]
+    flags = {
+        "current_runtime_config_path": "--current-runtime-config",
+        "current_runtime_config_sha256": "--current-runtime-config-sha256",
+        "current_runtime_private_root": "--current-runtime-private-root",
+        "current_recovery_manifest_relative_path": (
+            "--current-recovery-manifest-relative-path"
+        ),
+    }
+    values = {
+        "current_runtime_config_path": str(tmp_path / "runtime.json"),
+        "current_runtime_config_sha256": "a" * 64,
+        "current_runtime_private_root": str(tmp_path / "private"),
+        "current_recovery_manifest_relative_path": "recovered/manifest.json",
+    }
+    for count in (1, 2, 3):
+        for names in itertools.combinations(flags, count):
+            argv = list(common)
+            for name in names:
+                argv.extend((flags[name], values[name]))
+            parsed = parser.parse_args(argv)
+            with pytest.raises(ValueError, match="all four"):
+                runner_module.browser_runtime_options(parsed)
+
+    complete = [
+        *common,
+        "--market-execution-receipt",
+        str(tmp_path / "execution.json"),
+    ]
+    for name, flag in flags.items():
+        complete.extend((flag, values[name]))
+    parsed = parser.parse_args(complete)
+
+    class StringSubclass(str):
+        pass
+
+    parsed.current_runtime_config_path = StringSubclass(
+        parsed.current_runtime_config_path
+    )
+    with pytest.raises(ValueError, match="must be a string"):
+        runner_module.browser_runtime_options(parsed)
+    parsed.current_runtime_config_path = values["current_runtime_config_path"]
+    parsed.current_runtime_config_sha256 = "A" * 64
+    with pytest.raises(ValueError, match="lowercase hex"):
+        runner_module.browser_runtime_options(parsed)
+    parsed.current_runtime_config_sha256 = "a" * 64
+    parsed.current_recovery_manifest_relative_path = "../manifest.json"
+    with pytest.raises(ValueError, match="confined relative path"):
+        runner_module.browser_runtime_options(parsed)
+    parsed.current_recovery_manifest_relative_path = "recovered/manifest.json"
+    parsed.market_execution_receipt = None
+    with pytest.raises(ValueError, match="market_execution_receipt"):
+        runner_module.browser_runtime_options(parsed)
 
 
 @pytest.mark.parametrize("terminal_pending", [False, "event", "summary"])

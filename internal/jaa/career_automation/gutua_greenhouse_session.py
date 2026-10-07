@@ -79,6 +79,7 @@ from .production_runner import (
     PreparedGreenhouseRelease,
     PreparedGreenhouseReview,
     ProductionRunCandidate,
+    browser_runtime_options,
 )
 from .market_aligner_preparation import MarketApplicationMaterializationContext
 from .production_handoff_admission_runner import (
@@ -432,6 +433,7 @@ def _required_file(environment_name: str) -> Path:
 
 class GutuaGreenhouseSession:
     def __init__(self, arguments) -> None:
+        browser_runtime_options(arguments)
         self.approved_evidence_path = getattr(
             arguments, "approved_evidence_path", None
         )
@@ -661,19 +663,25 @@ class GutuaGreenhouseSession:
             or not execution_receipt.is_file()
         ):
             raise ValueError("Market execution receipt must be an absolute regular file")
+        runtime_options = browser_runtime_options(arguments)
         admission = run_production_handoff_admission(
-            execution_receipt_path=execution_receipt
+            execution_receipt_path=execution_receipt,
+            **runtime_options["admission_kwargs"],
         )
         admission_document = admission.document()
+        expected_environment = (
+            "current_runtime" if runtime_options["current_runtime"] else "production"
+        )
         if (
             admission.operation not in {"created", "replay"}
-            or admission.environment != "production"
+            or admission.environment != expected_environment
             or admission_document.get("release_token_issued") is not False
             or admission_document.get("submission_authority") is not False
         ):
             raise ValueError("Market handoff admission did not retain the no-release boundary")
         context = run_production_market_materialization(
-            application_id=admission.application_id
+            application_id=admission.application_id,
+            **runtime_options["materialization_kwargs"],
         )
         if type(context) is not MarketApplicationMaterializationContext:
             raise TypeError("production Market materializer returned an invalid context")
@@ -704,6 +712,7 @@ class GutuaGreenhouseSession:
             context.profile_id,
             profile_version=context.profile_version,
             candidate_intent_sha256=context.candidate_intent_sha256,
+            **runtime_options["selection_kwargs"],
         )
         selected = _require_lowest_ranked_market_handoff(context, selected_rows)
 

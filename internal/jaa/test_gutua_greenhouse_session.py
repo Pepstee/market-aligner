@@ -376,8 +376,11 @@ def test_market_canary_must_be_lowest_ranked_before_browser_start(
         GutuaGreenhouseSession(arguments)
 
 
+@pytest.mark.parametrize("current_runtime", [False, True])
 def test_market_canary_admits_lowest_ranked_handoff_before_browser_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    current_runtime: bool,
 ) -> None:
     receipt_path = tmp_path / "execution-receipt.json"
     receipt_path.write_text("{}")
@@ -386,7 +389,7 @@ def test_market_canary_admits_lowest_ranked_handoff_before_browser_start(
     archive.mkdir()
     admission = SimpleNamespace(
         operation="created",
-        environment="production",
+        environment="current_runtime" if current_runtime else "production",
         application_id="app_" + "e" * 64,
         handoff_root_sha256="f" * 64,
         operation_receipt_sha256="1" * 64,
@@ -398,11 +401,13 @@ def test_market_canary_admits_lowest_ranked_handoff_before_browser_start(
             "submission_authority": False,
         },
     )
-    monkeypatch.setattr(
-        session_module,
-        "run_production_handoff_admission",
-        lambda **_kwargs: admission,
-    )
+    admission_calls = []
+
+    def admit(**kwargs):
+        admission_calls.append(kwargs)
+        return admission
+
+    monkeypatch.setattr(session_module, "run_production_handoff_admission", admit)
     context = object.__new__(MarketApplicationMaterializationContext)
     object.__setattr__(context, "application_id", admission.application_id)
     object.__setattr__(
@@ -439,15 +444,17 @@ def test_market_canary_admits_lowest_ranked_handoff_before_browser_start(
     object.__setattr__(context, "geography_priority_rank", 5)
     object.__setattr__(context, "final_score", 20.0)
     object.__setattr__(context, "opportunity_score", 0.1)
-    monkeypatch.setattr(
-        session_module,
-        "run_production_market_materialization",
-        lambda **_kwargs: context,
-    )
-    monkeypatch.setattr(
-        session_module,
-        "selected_published_handoffs",
-        lambda *_args, **_kwargs: [
+    materialization_calls = []
+
+    def materialize(**kwargs):
+        materialization_calls.append(kwargs)
+        return context
+
+    selection_calls = []
+
+    def select(*_args, **kwargs):
+        selection_calls.append(kwargs)
+        return [
             {
                 "application_id": "app_" + "a" * 64,
                 "candidate_intent_sha256": "d" * 64,
@@ -470,8 +477,10 @@ def test_market_canary_admits_lowest_ranked_handoff_before_browser_start(
                 "release_authority": False,
                 "submission_authority": False,
             },
-        ],
-    )
+        ]
+
+    monkeypatch.setattr(session_module, "run_production_market_materialization", materialize)
+    monkeypatch.setattr(session_module, "selected_published_handoffs", select)
     browser_started = []
 
     def start_browser(session, _arguments):
@@ -479,21 +488,76 @@ def test_market_canary_admits_lowest_ranked_handoff_before_browser_start(
         session.page = object()
 
     monkeypatch.setattr(GutuaGreenhouseSession, "_start_browser", start_browser)
-    session = GutuaGreenhouseSession(
-        SimpleNamespace(
-            archive_root=archive,
-            repository_root=repository,
-            market_execution_receipt=receipt_path,
-        )
-    )
+    arguments = {
+        "archive_root": archive,
+        "repository_root": repository,
+        "market_execution_receipt": receipt_path,
+    }
+    shared_options = {
+        "current_runtime_config_path": str(tmp_path / "runtime.json"),
+        "current_runtime_config_sha256": "a" * 64,
+        "current_runtime_private_root": str(tmp_path / "private"),
+    }
+    recovery_manifest = "recovered/manifest.json"
+    if current_runtime:
+        arguments.update(shared_options)
+        arguments["current_recovery_manifest_relative_path"] = recovery_manifest
+    session = GutuaGreenhouseSession(SimpleNamespace(**arguments))
 
     assert browser_started == [True]
+    expected_shared_options = shared_options if current_runtime else {}
+    assert admission_calls == [
+        {"execution_receipt_path": receipt_path, **expected_shared_options}
+    ]
+    assert selection_calls == [
+        {
+            "profile_version": context.profile_version,
+            "candidate_intent_sha256": context.candidate_intent_sha256,
+            **expected_shared_options,
+        }
+    ]
+    assert materialization_calls == [
+        {
+            **expected_shared_options,
+            **(
+                {"current_recovery_manifest_relative_path": recovery_manifest}
+                if current_runtime
+                else {}
+            ),
+            "application_id": admission.application_id,
+        }
+    ]
     assert len(session.candidates) == 1
     assert session.candidates[0].vacancy.vacancy.job_key == "greenhouse:example:456"
     assert (
         session.candidates[0].structured_vacancy["selected_handoff"]["application_id"]
         == admission.application_id
     )
+
+
+def test_direct_factory_rejects_current_options_before_legacy_file_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    def legacy_file_access(name):
+        calls.append(name)
+        raise AssertionError("legacy discovery file access must not occur")
+
+    monkeypatch.setattr(session_module, "_required_file", legacy_file_access)
+    partial = SimpleNamespace(current_runtime_config_path=str(tmp_path / "runtime.json"))
+    with pytest.raises(ValueError, match="all four current-runtime options"):
+        GutuaGreenhouseSession(partial)
+
+    complete_without_receipt = SimpleNamespace(
+        current_runtime_config_path=str(tmp_path / "runtime.json"),
+        current_runtime_config_sha256="a" * 64,
+        current_runtime_private_root=str(tmp_path / "private"),
+        current_recovery_manifest_relative_path="recovered/manifest.json",
+    )
+    with pytest.raises(ValueError, match="market_execution_receipt"):
+        GutuaGreenhouseSession(complete_without_receipt)
+    assert calls == []
 
 
 def test_session_requires_explicit_external_authority_paths(

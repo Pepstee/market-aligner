@@ -66,6 +66,16 @@ def _json_bytes(value: object) -> bytes:
     return (canonical_json(value) + "\n").encode()
 
 
+def _contact_authority_provenance_sha256(
+    contact_authority: CandidateContactAuthority | CurrentContactProvenance,
+    *,
+    current_runtime: bool,
+) -> str:
+    if current_runtime:
+        return contact_authority.contact.provenance_sha256
+    return contact_authority.authority_sha256
+
+
 def _candidate_editorial_authority(
     *,
     candidate_name: str,
@@ -903,7 +913,10 @@ def prepare_admitted_market_application_from_authorities(
         candidate_authority_bytes=candidate_bytes,
         candidate_authority_sha256=candidate_sha256,
         contact_authority_bytes=contact_bytes,
-        contact_authority_sha256=contact_authority.authority_sha256,
+        contact_authority_sha256=_contact_authority_provenance_sha256(
+            contact_authority,
+            current_runtime=environment == CURRENT_RUNTIME_ENVIRONMENT,
+        ),
         contact_object_sha256=contact_object_sha256,
         orchestration_arguments=arguments,
         environment=environment,

@@ -83,6 +83,96 @@ _GENERATOR_SOURCE_PATHS = (
     "career_automation/rendering.py",
 )
 MAX_PRIVATE_GENERATOR_DIAGNOSTIC_BYTES = 1_048_576
+_BROWSER_RUNTIME_FLAGS = (
+    ("current_runtime_config_path", "--current-runtime-config"),
+    ("current_runtime_config_sha256", "--current-runtime-config-sha256"),
+    ("current_runtime_private_root", "--current-runtime-private-root"),
+    (
+        "current_recovery_manifest_relative_path",
+        "--current-recovery-manifest-relative-path",
+    ),
+)
+_LOWERCASE_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _clean_browser_runtime_string(value: object, flag: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{flag} must be a string")
+    if (
+        not value
+        or value != value.strip()
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise ValueError(f"{flag} must be a nonempty clean string")
+    return value
+
+
+def browser_runtime_options(arguments) -> dict[str, object]:
+    values = {name: getattr(arguments, name, None) for name, _ in _BROWSER_RUNTIME_FLAGS}
+    present = [name for name, _ in _BROWSER_RUNTIME_FLAGS if values[name] is not None]
+    if not present:
+        return {
+            "current_runtime": False,
+            "admission_kwargs": {},
+            "materialization_kwargs": {},
+            "selection_kwargs": {},
+        }
+    if len(present) != len(_BROWSER_RUNTIME_FLAGS):
+        missing = ", ".join(
+            flag for name, flag in _BROWSER_RUNTIME_FLAGS if values[name] is None
+        )
+        raise ValueError(
+            "all four current-runtime options are required together; missing: "
+            + missing
+        )
+    if getattr(arguments, "market_execution_receipt", None) is None:
+        raise ValueError(
+            "current-runtime options require market_execution_receipt"
+        )
+
+    config_path = _clean_browser_runtime_string(
+        values["current_runtime_config_path"], "--current-runtime-config"
+    )
+    config_sha256 = _clean_browser_runtime_string(
+        values["current_runtime_config_sha256"],
+        "--current-runtime-config-sha256",
+    )
+    private_root = _clean_browser_runtime_string(
+        values["current_runtime_private_root"], "--current-runtime-private-root"
+    )
+    manifest_path = _clean_browser_runtime_string(
+        values["current_recovery_manifest_relative_path"],
+        "--current-recovery-manifest-relative-path",
+    )
+    if not config_path.startswith("/") or not private_root.startswith("/"):
+        raise ValueError("current-runtime configuration and private root must be absolute")
+    if _LOWERCASE_SHA256.fullmatch(config_sha256) is None:
+        raise ValueError(
+            "--current-runtime-config-sha256 must be 64 lowercase hex characters"
+        )
+    if (
+        manifest_path.startswith("/")
+        or "\\" in manifest_path
+        or any(part in {"", ".", ".."} for part in manifest_path.split("/"))
+    ):
+        raise ValueError(
+            "--current-recovery-manifest-relative-path must be a confined relative path"
+        )
+
+    shared = {
+        "current_runtime_config_path": config_path,
+        "current_runtime_config_sha256": config_sha256,
+        "current_runtime_private_root": private_root,
+    }
+    return {
+        "current_runtime": True,
+        "admission_kwargs": dict(shared),
+        "materialization_kwargs": dict(
+            shared,
+            current_recovery_manifest_relative_path=manifest_path,
+        ),
+        "selection_kwargs": dict(shared),
+    }
 
 
 @dataclass(frozen=True)
@@ -996,6 +1086,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "Greenhouse flow"
         ),
     )
+    parser.add_argument("--current-runtime-config", dest="current_runtime_config_path")
+    parser.add_argument(
+        "--current-runtime-config-sha256", dest="current_runtime_config_sha256"
+    )
+    parser.add_argument(
+        "--current-runtime-private-root", dest="current_runtime_private_root"
+    )
+    parser.add_argument(
+        "--current-recovery-manifest-relative-path",
+        dest="current_recovery_manifest_relative_path",
+    )
     parser.add_argument("--factory", default=PRODUCTION_FACTORY_REFERENCE)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--review-only", action="store_true", help="prepare one review-only terminal attempt without release or submission")
@@ -1023,6 +1124,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     arguments = parser.parse_args(argv)
+    try:
+        browser_runtime_options(arguments)
+    except ValueError as exc:
+        parser.error(str(exc))
     if arguments.review_only and arguments.max_terminal_attempts not in (None, 1):
         parser.error("--review-only permits at most one terminal outcome")
     if arguments.execute_live and arguments.max_terminal_attempts != 1:

@@ -3122,6 +3122,15 @@ def test_current_contact_loader_uses_agreed_pinned_cv_fields_and_no_city(
         for field in ("full_name", "email", "phone")
         for source in document["field_sources"][field]
     )
+    assert result.sha256 == hashlib.sha256(result.encoded_document).hexdigest()
+    assert result.contact.provenance_sha256 != result.sha256
+    assert market_aligner_preparation._contact_authority_provenance_sha256(
+        result, current_runtime=True
+    ) == result.contact.provenance_sha256
+    legacy_authority = SimpleNamespace(authority_sha256="d" * 64)
+    assert market_aligner_preparation._contact_authority_provenance_sha256(
+        legacy_authority, current_runtime=False
+    ) == legacy_authority.authority_sha256
 
 
 def test_current_contact_loader_refuses_disagreement_or_unpinned_cv_bytes(
