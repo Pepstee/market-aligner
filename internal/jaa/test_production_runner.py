@@ -565,6 +565,229 @@ def _durable_sink(
     return GeneratedRevisionSink(recorder), recorder
 
 
+def _generator_source_identity_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    package_relative: str = "internal/jaa",
+    package_root_override: Path | None = None,
+    package_git_root: Path | None = None,
+    prefix: str = "internal/jaa/",
+    disk_mismatch: str | None = None,
+    missing_git_path: str | None = None,
+) -> tuple[
+    GeneratedRevisionSink,
+    dict[str, bytes],
+    list[str],
+    list[tuple[str, ...]],
+]:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+    package_root = (
+        repository_root / package_relative
+        if package_root_override is None
+        else package_root_override
+    )
+    package_root.mkdir(parents=True, exist_ok=True)
+    effective_package_git_root = package_git_root or repository_root
+    effective_package_git_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        runner_module,
+        "__file__",
+        str(package_root / "career_automation" / "production_runner.py"),
+    )
+
+    head = "a" * 40
+    source_bytes = {
+        relative: f"synthetic source: {relative}".encode()
+        for relative in runner_module._GENERATOR_SOURCE_PATHS
+    }
+    disk_bytes = dict(source_bytes)
+    if disk_mismatch is not None:
+        disk_bytes[disk_mismatch] = b"synthetic disk mismatch"
+    local_paths = {
+        (package_root / relative).resolve(): relative
+        for relative in runner_module._GENERATOR_SOURCE_PATHS
+    }
+    read_paths: list[str] = []
+    original_read_bytes = Path.read_bytes
+
+    def read_bytes(path: Path) -> bytes:
+        relative = local_paths.get(path.resolve())
+        if relative is None:
+            return original_read_bytes(path)
+        read_paths.append(relative)
+        return disk_bytes[relative]
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    git_commands: list[tuple[str, ...]] = []
+
+    def run_git(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        git_commands.append(tuple(arguments))
+        if arguments[:2] != ["git", "-C"]:
+            raise AssertionError("unexpected subprocess command")
+        directory = Path(arguments[2]).resolve()
+        operation = arguments[3:]
+        if operation == ["rev-parse", "--show-toplevel"]:
+            if directory == repository_root.resolve():
+                output = f"{repository_root.resolve()}\n"
+            elif directory == package_root.resolve():
+                output = f"{effective_package_git_root.resolve()}\n"
+            else:
+                raise AssertionError("unexpected git top-level query")
+        elif operation == ["rev-parse", "--show-prefix"]:
+            if directory != package_root.resolve():
+                raise AssertionError("prefix must come from the running package root")
+            output = f"{prefix}\n"
+        elif operation and operation[0] == "show":
+            requested_head, separator, committed_path = operation[1].partition(":")
+            if not separator or requested_head != head:
+                raise AssertionError("unexpected committed source request")
+            expected_paths = {
+                f"{prefix}{relative}": relative
+                for relative in runner_module._GENERATOR_SOURCE_PATHS
+            }
+            relative = expected_paths.get(committed_path)
+            if relative is None or relative == missing_git_path:
+                raise subprocess.CalledProcessError(
+                    128, arguments, stderr=b"synthetic missing Git path"
+                )
+            output = source_bytes[relative]
+        else:
+            raise AssertionError("unexpected git operation")
+        if kwargs.get("text"):
+            return subprocess.CompletedProcess(arguments, 0, stdout=output, stderr="")
+        return subprocess.CompletedProcess(arguments, 0, stdout=output, stderr=b"")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", run_git)
+    monkeypatch.setattr(runner_module, "exact_clean_head", lambda _root: head)
+    sink = object.__new__(GeneratedRevisionSink)
+    sink._recorder = SimpleNamespace(
+        attempt=SimpleNamespace(
+            archive=SimpleNamespace(repository_root=repository_root)
+        )
+    )
+    return sink, source_bytes, read_paths, git_commands
+
+
+@pytest.mark.parametrize(
+    ("package_relative", "prefix"),
+    (("internal/jaa", "internal/jaa/"), ("", "")),
+)
+def test_generator_source_identity_uses_running_package_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    package_relative: str,
+    prefix: str,
+) -> None:
+    sink, source_bytes, read_paths, git_commands = _generator_source_identity_fixture(
+        tmp_path, monkeypatch, package_relative=package_relative, prefix=prefix
+    )
+
+    head, identities = sink._generator_source_identity()
+
+    assert head == "a" * 40
+    assert identities == tuple(
+        (relative, hashlib.sha256(source_bytes[relative]).hexdigest())
+        for relative in runner_module._GENERATOR_SOURCE_PATHS
+    )
+    assert read_paths == list(runner_module._GENERATOR_SOURCE_PATHS)
+    requested = [
+        command[4].split(":", 1)[1]
+        for command in git_commands
+        if len(command) > 4 and command[3] == "show"
+    ]
+    assert requested == [
+        f"{prefix}{relative}" for relative in runner_module._GENERATOR_SOURCE_PATHS
+    ]
+
+
+def test_generator_source_identity_rejects_a_different_git_root_before_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unrelated_root = tmp_path / "unrelated"
+    package_root = unrelated_root / "internal" / "jaa"
+    sink, _source_bytes, read_paths, git_commands = _generator_source_identity_fixture(
+        tmp_path,
+        monkeypatch,
+        package_root_override=package_root,
+        package_git_root=unrelated_root,
+    )
+
+    with pytest.raises(ValueError, match="outside the recorder Git repository"):
+        sink._generator_source_identity()
+
+    assert read_paths == []
+    assert all(command[3:5] == ("rev-parse", "--show-toplevel") for command in git_commands)
+
+
+def test_generator_source_identity_rejects_noncanonical_package_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink, _source_bytes, read_paths, git_commands = _generator_source_identity_fixture(
+        tmp_path, monkeypatch, prefix="internal/jaa"
+    )
+
+    with pytest.raises(ValueError, match="repository prefix is not canonical"):
+        sink._generator_source_identity()
+
+    assert read_paths == []
+    assert all(command[3] != "show" for command in git_commands)
+
+
+def test_generator_source_identity_rejects_running_byte_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relative = runner_module._GENERATOR_SOURCE_PATHS[0]
+    sink, _source_bytes, read_paths, _git_commands = _generator_source_identity_fixture(
+        tmp_path, monkeypatch, disk_mismatch=relative
+    )
+
+    with pytest.raises(
+        ValueError, match="running candidate generator differs from exact clean HEAD"
+    ):
+        sink._generator_source_identity()
+
+    assert read_paths == [relative]
+
+
+def test_generator_source_identity_propagates_missing_committed_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relative = runner_module._GENERATOR_SOURCE_PATHS[0]
+    sink, _source_bytes, read_paths, _git_commands = _generator_source_identity_fixture(
+        tmp_path, monkeypatch, missing_git_path=relative
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        sink._generator_source_identity()
+
+    assert read_paths == []
+
+
+def test_generator_source_identity_propagates_exact_clean_head_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink, _source_bytes, read_paths, git_commands = _generator_source_identity_fixture(
+        tmp_path, monkeypatch
+    )
+
+    def reject_dirty_head(_repository: Path) -> str:
+        raise ValueError("synthetic exact-clean-head refusal")
+
+    monkeypatch.setattr(runner_module, "exact_clean_head", reject_dirty_head)
+    with pytest.raises(ValueError, match="synthetic exact-clean-head refusal"):
+        sink._generator_source_identity()
+
+    assert git_commands == []
+    assert read_paths == []
+
+
 def test_runner_wires_queue_recorder_release_authority_and_executor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

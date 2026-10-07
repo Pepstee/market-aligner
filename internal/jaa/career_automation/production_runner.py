@@ -531,10 +531,30 @@ class GeneratedRevisionSink:
         return revision
 
     def _generator_source_identity(self) -> tuple[str, tuple[tuple[str, str], ...]]:
-        repository = self._recorder.attempt.archive.repository_root
+        repository = Path(self._recorder.attempt.archive.repository_root)
         head = exact_clean_head(repository)
+
+        repository_root = repository.resolve(strict=True)
+        package_root = Path(__file__).resolve().parents[1]
+
+        def git_top_level(directory: Path) -> Path:
+            completed = subprocess.run(
+                ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            value = completed.stdout.strip()
+            if not value:
+                raise ValueError("Git repository root is missing")
+            return Path(value).resolve(strict=True)
+
+        if git_top_level(package_root) != git_top_level(repository_root):
+            raise ValueError(
+                "running candidate generator is outside the recorder Git repository"
+            )
         prefix = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "--show-prefix"],
+            ["git", "-C", str(package_root), "rev-parse", "--show-prefix"],
             check=True,
             capture_output=True,
             text=True,
@@ -550,7 +570,7 @@ class GeneratedRevisionSink:
                 capture_output=True,
             )
             committed = completed.stdout
-            if committed != (repository / relative).read_bytes():
+            if committed != (package_root / relative).read_bytes():
                 raise ValueError(
                     "running candidate generator differs from exact clean HEAD"
                 )
