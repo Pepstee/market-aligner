@@ -7,6 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from career_automation import candidate_application_factory as candidate_factory
 from career_automation import market_aligner_preparation as preparation
 from career_automation import production_preparation_runner as runner
 from career_automation.market_aligner_preparation import MarketApplicationPreparation
+from career_automation.rendering import EditableArtifacts
 
 
 def _cv_binding_row(sentence_id: str, text: str, document_kind: str = "cv") -> dict[str, str]:
@@ -77,6 +79,71 @@ def test_current_evidence_archive_is_exact_and_content_addressed() -> None:
 
     assert references == {"materialization": digest, "duplicate": digest}
     assert objects == {digest: encoded}
+
+
+def test_current_evidence_archive_projects_materialization_without_mutation() -> None:
+    class Projection:
+        def __init__(self, payload: dict[str, str]) -> None:
+            self.payload = payload
+
+        def document(self) -> dict[str, str]:
+            return dict(self.payload)
+
+    source = Projection({"source_id": "synthetic-source"})
+    receipt = Projection({"receipt_id": "synthetic-receipt"})
+    editable = EditableArtifacts(
+        cv_text="synthetic cv",
+        cover_letter_text="synthetic cover letter",
+        answers_text="synthetic answers",
+        cv_sha256="a" * 64,
+        cover_letter_sha256="b" * 64,
+        answers_sha256="c" * 64,
+        form_answers=(("question-1", "answer-1", "d" * 64),),
+    )
+    materialization = candidate_factory.CandidateApplicationMaterialization(
+        source=source,
+        editable=editable,
+        vacancy_requirements=("requirement-1", "requirement-2"),
+        receipt=receipt,
+    )
+
+    legacy_document = preparation._input_document(materialization)
+    assert legacy_document["source"] is source
+    assert legacy_document["editable"] is editable
+    assert legacy_document["receipt"] is receipt
+
+    expected = {
+        "source": {"source_id": "synthetic-source"},
+        "editable": asdict(editable),
+        "vacancy_requirements": ("requirement-1", "requirement-2"),
+        "receipt": {"receipt_id": "synthetic-receipt"},
+    }
+    document = preparation._current_evidence_document(materialization)
+    assert document == expected
+    assert document["editable"]["form_answers"] == (
+        ("question-1", "answer-1", "d" * 64),
+    )
+    assert preparation._current_evidence_document("synthetic primitive") == (
+        preparation._input_document("synthetic primitive")
+    )
+
+    references, objects = preparation._current_evidence_archive(
+        {
+            "materialization": materialization,
+            "same-document": Projection(expected),
+            "absent": None,
+        }
+    )
+    encoded = preparation._json_bytes(expected)
+    digest = hashlib.sha256(encoded).hexdigest()
+    assert references == {"materialization": digest, "same-document": digest}
+    assert objects == {digest: encoded}
+    assert source.payload == {"source_id": "synthetic-source"}
+    assert receipt.payload == {"receipt_id": "synthetic-receipt"}
+    assert materialization.vacancy_requirements == (
+        "requirement-1",
+        "requirement-2",
+    )
 
 
 def test_cv_binding_partition_excludes_whole_rejected_rows_and_preserves_order() -> None:

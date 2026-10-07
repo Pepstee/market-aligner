@@ -172,6 +172,17 @@ def _input_document(value: object) -> object:
     return value
 
 
+def _current_evidence_document(value: object) -> object:
+    if type(value) is CandidateApplicationMaterialization:
+        return {
+            "source": value.source.document(),
+            "editable": asdict(value.editable),
+            "vacancy_requirements": value.vacancy_requirements,
+            "receipt": value.receipt.document(),
+        }
+    return _input_document(value)
+
+
 def _current_evidence_archive(
     values: Mapping[str, object],
 ) -> tuple[dict[str, str], dict[str, bytes]]:
@@ -180,7 +191,7 @@ def _current_evidence_archive(
     for name, value in values.items():
         if value is None:
             continue
-        encoded = _json_bytes(_input_document(value))
+        encoded = _json_bytes(_current_evidence_document(value))
         digest = hashlib.sha256(encoded).hexdigest()
         references[name] = digest
         objects.setdefault(digest, encoded)
