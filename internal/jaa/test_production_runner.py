@@ -2009,6 +2009,198 @@ def test_private_worker_diagnostic_is_hash_only_when_archive_safety_rejects(
     assert diagnostic.decode() not in json.dumps(receipt)
 
 
+def test_review_only_worker_diagnostics_append_to_unique_roles_on_retry(
+    tmp_path: Path,
+) -> None:
+    import io
+
+    from test_application_archive import _queue_base_recorder
+
+    recorder = _queue_base_recorder(tmp_path)
+    recorder.begin_review_only()
+    original = recorder.attempt.add_artifact(
+        "generation.worker.stderr",
+        b"earlier worker diagnostic",
+        media_type="text/plain",
+        disposition="observed",
+        metadata={"exit_code": 1, "phase": "candidate_generation"},
+    )
+    original_bytes = recorder.attempt.read_artifact(original)
+    resumed_recorder = GreenhouseAttemptRecorder.resume(
+        archive_root=recorder.attempt.archive.root,
+        repository_root=recorder.attempt.archive.repository_root,
+        attempt_id=recorder.attempt.attempt_id,
+    )
+    resumed_recorder.begin_review_only()
+    resumed_sink = GeneratedRevisionSink(resumed_recorder)
+
+    resumed_sink._archive_worker_diagnostics(
+        io.BytesIO(b"second worker diagnostic"), exit_code=2
+    )
+    resumed_sink._archive_worker_diagnostics(
+        io.BytesIO(b"third worker diagnostic"), exit_code=3
+    )
+
+    rows = resumed_recorder.attempt._objects(resumed_recorder.attempt._events())
+    diagnostic_rows = [row for row in rows if row.role.startswith("generation.worker.stderr")]
+    assert [row.role for row in diagnostic_rows] == [
+        "generation.worker.stderr",
+        "generation.worker.stderr.0001",
+        "generation.worker.stderr.0002",
+    ]
+    assert resumed_recorder.attempt.read_artifact(original) == original_bytes
+    assert resumed_recorder.attempt.read_artifact(original) == b"earlier worker diagnostic"
+    assert [resumed_recorder.attempt.read_artifact(row) for row in diagnostic_rows[1:]] == [
+        b"second worker diagnostic",
+        b"third worker diagnostic",
+    ]
+
+
+@pytest.mark.parametrize("content_state", ["withheld_secret_like", "withheld_size_limit"])
+def test_review_only_diagnostic_retry_keeps_hash_only_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content_state: str,
+) -> None:
+    import io
+
+    from career_automation.application_archive import ApplicationArchiveError
+
+    from test_application_archive import _queue_base_recorder
+
+    recorder = _queue_base_recorder(tmp_path)
+    recorder.begin_review_only()
+    original = recorder.attempt.add_artifact(
+        "generation.worker.stderr_receipt",
+        b'{"earlier":"receipt"}',
+        media_type="application/json",
+        disposition="observed",
+        metadata={"phase": "candidate_generation"},
+    )
+    original_bytes = recorder.attempt.read_artifact(original)
+    resumed_recorder = GreenhouseAttemptRecorder.resume(
+        archive_root=recorder.attempt.archive.root,
+        repository_root=recorder.attempt.archive.repository_root,
+        attempt_id=recorder.attempt.attempt_id,
+    )
+    resumed_recorder.begin_review_only()
+    resumed_sink = GeneratedRevisionSink(resumed_recorder)
+    diagnostic = b"private synthetic diagnostic beyond the archive threshold"
+    if content_state == "withheld_secret_like":
+        def reject_private(_value: bytes, _media_type: str) -> None:
+            raise ApplicationArchiveError("synthetic safety rejection")
+
+        monkeypatch.setattr(runner_module, "_scan_secret_bytes", reject_private)
+    else:
+        monkeypatch.setattr(runner_module, "MAX_PRIVATE_GENERATOR_DIAGNOSTIC_BYTES", 8)
+
+    resumed_sink._archive_worker_diagnostics(io.BytesIO(diagnostic), exit_code=7)
+
+    rows = resumed_recorder.attempt._objects(resumed_recorder.attempt._events())
+    receipt_rows = [
+        row for row in rows if row.role.startswith("generation.worker.stderr_receipt")
+    ]
+    assert [row.role for row in receipt_rows] == [
+        "generation.worker.stderr_receipt",
+        "generation.worker.stderr_receipt.0001",
+    ]
+    receipt_bytes = resumed_recorder.attempt.read_artifact(receipt_rows[1])
+    receipt = json.loads(receipt_bytes)
+    assert receipt["content_state"] == content_state
+    assert receipt["byte_length"] == len(diagnostic)
+    assert receipt["content_sha256"] == hashlib.sha256(diagnostic).hexdigest()
+    assert diagnostic not in receipt_bytes
+    assert resumed_recorder.attempt.read_artifact(original) == original_bytes
+
+
+def test_current_review_finalizer_reuses_exact_carried_package_and_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    import career_automation.production_attempt as attempt_module
+    from career_automation.production_runner import PreparedGreenhouseReview
+    from test_application_archive import _queue_base_recorder
+    from test_application_sanity_review import current_review_package
+
+    package = current_review_package(monkeypatch)
+    source = SimpleNamespace(
+        source_id=package.application_source_identity,
+        job_key=package.intended_vacancy.job_key,
+        vacancy_sha256=package.intended_vacancy.vacancy_sha256,
+        role_title=package.intended_vacancy.role_title,
+        company_name=package.intended_vacancy.company_name,
+        facts=(SimpleNamespace(pending_current_outward_draft=object()),),
+    )
+    package = replace(package, _current_emitted_source=source)
+    current_bindings = (
+        package._current_runtime_context,
+        package._current_child_materialization,
+        package._current_child_decision_authority,
+    )
+    prepared = PreparedGreenhouseReview(
+        source=source,
+        artifacts=SimpleNamespace(
+            cv_pdf=SimpleNamespace(pdf_bytes=package.cv_pdf_bytes),
+            cover_letter_pdf=SimpleNamespace(
+                pdf_bytes=package.cover_letter_pdf_bytes
+            ),
+            artifact_set_sha256="a" * 64,
+        ),
+        document_assurance_receipts=(),
+        sanity_review_receipt=object(),
+        production_identity=object(),
+        generation_authority=object(),
+        vacancy_review_material=package.vacancy_review_material,
+        vacancy_requirements=package.vacancy_requirements,
+        forensic_root=tmp_path,
+        forensic_receipt=object(),
+        sanity_package=package,
+        current_runtime_context=current_bindings[0],
+        current_runtime_materialization=current_bindings[1],
+        current_runtime_decision_authority=current_bindings[2],
+    )
+    recorder = _queue_base_recorder(tmp_path)
+    recorder.begin_review_only()
+    monkeypatch.setattr(recorder, "ensure_review_network_boundary", lambda: None)
+    monkeypatch.setattr(recorder, "recover_review_only_completion", lambda: None)
+    package_builds = []
+
+    def build_package(**kwargs):
+        package_builds.append(kwargs)
+        return package
+
+    monkeypatch.setattr(attempt_module, "package_from_application", build_package)
+
+    class StopAtReceiptValidation(Exception):
+        pass
+
+    verified_packages = []
+
+    def verify_receipt(receipt, exact_package):
+        assert receipt is prepared.sanity_review_receipt
+        verified_packages.append(exact_package)
+        raise StopAtReceiptValidation
+
+    monkeypatch.setattr(
+        attempt_module, "verify_sanity_review_receipt", verify_receipt
+    )
+    with pytest.raises(StopAtReceiptValidation):
+        recorder.finalize_review_only(prepared)
+
+    assert len(package_builds) == 1
+    assert package_builds[0]["current_runtime_context"] is current_bindings[0]
+    assert package_builds[0]["current_runtime_materialization"] is current_bindings[1]
+    assert package_builds[0]["current_runtime_decision_authority"] is current_bindings[2]
+    assert verified_packages == [package]
+
+    mismatched = replace(prepared, current_runtime_context=object())
+    with pytest.raises(ValueError, match="prepared sanity package differs"):
+        recorder.finalize_review_only(mismatched)
+    assert len(verified_packages) == 1
+
+
 @pytest.mark.parametrize("binding", [None, "1", "invalid", "9" * 5000])
 def test_private_worker_rejects_absent_or_invalid_channel_without_traceback(binding) -> None:
     import os

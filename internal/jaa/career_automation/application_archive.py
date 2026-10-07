@@ -169,7 +169,23 @@ REVIEW_REQUIRED_ROLES = frozenset({
     "assurance.cv.receipt", "assurance.cover_letter.receipt", "assurance.semantic.receipt",
     "production.identities", "browser.prefill_snapshot",
 })
-REVIEW_REPLAY_APPEND_ONLY_ROLES = frozenset({"vacancy.destination_reverification"})
+REVIEW_REPLAY_GENERATION_APPEND_ONLY_ROLES = frozenset(
+    {
+        "generation.inputs",
+        "document.source_inputs",
+        "document.cv.constraints",
+        "document.cv.source",
+        "document.cv.final_pdf",
+        "document.cover_letter.source",
+        "document.cover_letter.final_pdf",
+        "form.answers",
+        "generation.package_pickle",
+    }
+)
+REVIEW_REPLAY_APPEND_ONLY_ROLES = (
+    frozenset({"vacancy.destination_reverification"})
+    | REVIEW_REPLAY_GENERATION_APPEND_ONLY_ROLES
+)
 REVIEW_REPLAY_SEMANTIC_FENCE_ROLES = frozenset({
     "review.semantic_intent",
     "assurance.semantic.receipt",
@@ -230,6 +246,8 @@ def _review_event_allowed(event_type: str, payload: Mapping[str, object]) -> Non
             raise ApplicationArchiveError("review-only interaction counts must be zero")
     else:
         raise ApplicationArchiveError("unsupported review-only event")
+
+
 NETWORK_UNAVAILABLE_VALUES = frozenset(
     {
         "not_preserved_in_legacy_record",

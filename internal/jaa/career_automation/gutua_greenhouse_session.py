@@ -1873,6 +1873,20 @@ class GutuaGreenhouseSession:
                 form_field_authorities=form_plan.form_field_authorities,
                 form_inventory_sha256=inventory_sha256,
                 form_inventory=form_inventory,
+                sanity_package=sanity_package,
+                current_runtime_context=(
+                    market_context if current_runtime else None
+                ),
+                current_runtime_materialization=(
+                    package.current_runtime_materialization
+                    if current_runtime
+                    else None
+                ),
+                current_runtime_decision_authority=(
+                    package.current_runtime_decision_authority
+                    if current_runtime
+                    else None
+                ),
                 forensic_root=forensic_root,
                 forensic_receipt=forensic_receipt,
             )

@@ -127,6 +127,29 @@ def _add_destination_reverification(recorder, value):
     )
 
 
+REVIEW_GENERATION_ROLES = (
+    "generation.inputs",
+    "document.source_inputs",
+    "document.cv.constraints",
+    "document.cv.source",
+    "document.cv.final_pdf",
+    "document.cover_letter.source",
+    "document.cover_letter.final_pdf",
+    "form.answers",
+    "generation.package_pickle",
+)
+
+
+def _add_review_generation_revision(recorder, role, value, *, prior_sha256=None):
+    return recorder.add_revision(
+        role=role,
+        value=value,
+        media_type="application/octet-stream",
+        prior_sha256=prior_sha256,
+        approved=True,
+    )
+
+
 def _queue_base_recorder(tmp_path):
     from career_automation.production_attempt import GreenhouseAttemptRecorder
 
@@ -189,6 +212,81 @@ def test_review_only_destination_reverification_keeps_non_target_roles_immutable
     with pytest.raises(ApplicationArchiveError, match="replay evidence differs"):
         resumed._add("vacancy.review_material", b'{"material":"B"}\n', "application/json")
     assert resumed.attempt._events() == before
+
+
+@pytest.mark.parametrize("role", REVIEW_GENERATION_ROLES)
+def test_review_only_generation_roles_append_exact_replay_and_select_latest(
+    tmp_path, role
+):
+    recorder = _queue_base_recorder(tmp_path)
+    recorder.begin_review_only()
+    first = _add_review_generation_revision(recorder, role, b"generation A")
+    original_events = recorder.attempt._events()
+    original_bytes = recorder.attempt.read_artifact(first)
+
+    resumed = _resume_review_recorder(recorder)
+    resumed.begin_review_only()
+    before_update = resumed.attempt._events()
+    second = _add_review_generation_revision(resumed, role, b"generation B")
+    after_update = resumed.attempt._events()
+
+    assert after_update[: len(before_update)] == before_update
+    assert after_update[: len(original_events)] == original_events
+    assert recorder.attempt.read_artifact(first) == original_bytes == b"generation A"
+    assert resumed._selected()[role] == second.sha256
+
+    repeated = _add_review_generation_revision(resumed, role, b"generation B")
+    assert repeated == second
+    assert resumed.attempt._events() == after_update
+    with pytest.raises(ApplicationArchiveError, match="evidence is stale"):
+        _add_review_generation_revision(resumed, role, b"generation A")
+    assert resumed.attempt._events() == after_update
+
+
+@pytest.mark.parametrize("role", REVIEW_GENERATION_ROLES)
+def test_review_only_generation_roles_keep_metadata_and_semantic_fences(
+    tmp_path, role
+):
+    recorder = _queue_base_recorder(tmp_path)
+    recorder.begin_review_only()
+    _add_review_generation_revision(recorder, role, b"generation A")
+
+    resumed = _resume_review_recorder(recorder)
+    resumed.begin_review_only()
+    before = resumed.attempt._events()
+    with pytest.raises(ApplicationArchiveError, match="replay evidence differs"):
+        _add_review_generation_revision(
+            resumed, role, b"generation B", prior_sha256="a" * 64
+        )
+    assert resumed.attempt._events() == before
+
+    resumed._add("review.semantic_intent", b"{}", "application/json")
+    fenced = resumed.attempt._events()
+    with pytest.raises(ApplicationArchiveError, match="semantic review fence"):
+        _add_review_generation_revision(resumed, role, b"generation B")
+    assert resumed.attempt._events() == fenced
+
+
+def test_review_only_diagnostic_suffix_is_observed_and_not_selected_after_intent(
+    tmp_path,
+):
+    recorder = _queue_base_recorder(tmp_path)
+    recorder.begin_review_only()
+    resumed = _resume_review_recorder(recorder)
+    resumed.begin_review_only()
+    resumed._add("review.semantic_intent", b"{}", "application/json")
+    before = resumed.attempt._events()
+    row = resumed.attempt.add_artifact(
+        "generation.worker.stderr.0001",
+        b"diagnostic",
+        media_type="text/plain",
+        disposition="observed",
+        metadata={"exit_code": 1, "phase": "candidate_generation"},
+    )
+    after = resumed.attempt._events()
+    assert after[: len(before)] == before
+    assert resumed.attempt.read_artifact(row) == b"diagnostic"
+    assert "generation.worker.stderr.0001" not in resumed._selected()
 
 
 @pytest.mark.parametrize(

@@ -956,7 +956,17 @@ class GreenhouseAttemptRecorder:
         recovered = self.recover_review_only_completion()
         if recovered is not None:
             return recovered
-        package = package_from_application(
+        current_runtime_values = (
+            prepared.current_runtime_context,
+            prepared.current_runtime_materialization,
+            prepared.current_runtime_decision_authority,
+        )
+        has_current_runtime = any(value is not None for value in current_runtime_values)
+        if has_current_runtime and any(
+            value is None for value in current_runtime_values
+        ):
+            raise ValueError("current review carrier is incomplete")
+        expected_package = package_from_application(
             source=prepared.source,
             artifacts=prepared.artifacts,
             questions=prepared.questions,
@@ -970,7 +980,36 @@ class GreenhouseAttemptRecorder:
             planned_form_fields=prepared.review_form_fields,
             form_field_authorities=prepared.form_field_authorities,
             form_inventory_sha256=prepared.form_inventory_sha256,
+            current_runtime_context=prepared.current_runtime_context,
+            current_runtime_materialization=prepared.current_runtime_materialization,
+            current_runtime_decision_authority=(
+                prepared.current_runtime_decision_authority
+            ),
         )
+        carried_package = prepared.sanity_package
+        if carried_package is None:
+            if has_current_runtime:
+                raise ValueError("current review package was not retained")
+            package = expected_package
+        else:
+            if type(carried_package) is not SanityReviewPackage:
+                raise TypeError("prepared review requires the exact sanity package")
+            carried_package.__post_init__()
+            if (
+                carried_package._current_runtime_context
+                is not prepared.current_runtime_context
+                or carried_package._current_child_materialization
+                is not prepared.current_runtime_materialization
+                or carried_package._current_child_decision_authority
+                is not prepared.current_runtime_decision_authority
+                or (
+                    has_current_runtime
+                    and carried_package._current_emitted_source is not prepared.source
+                )
+                or carried_package != expected_package
+            ):
+                raise ValueError("prepared sanity package differs from its review inputs")
+            package = carried_package
         verify_sanity_review_receipt(prepared.sanity_review_receipt, package)
         forensic = verify_forensic_receipt(prepared.forensic_root, prepared.forensic_receipt)
         if forensic["attempt_id"] != self.attempt.attempt_id:

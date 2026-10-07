@@ -13,7 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterable, Mapping, Protocol, Sequence
@@ -26,7 +26,11 @@ from .application_archive import (
     _scan_secret_bytes,
 )
 from .application_compiler import ApplicationSource, CandidateContact
-from .application_sanity_review import SanityReviewReceipt, VacancyReviewMaterial
+from .application_sanity_review import (
+    SanityReviewPackage,
+    SanityReviewReceipt,
+    VacancyReviewMaterial,
+)
 from .application_quality import ApplicationQualityInput
 from .application_quality_contracts import ApplicationPreflightQualityReview
 from .ats_application_authority import AtsApplicationAuthority
@@ -766,7 +770,7 @@ class GeneratedRevisionSink:
         metadata = {"exit_code": exit_code, "phase": "candidate_generation"}
         if content_state == "archived":
             attempt.add_artifact(
-                "generation.worker.stderr",
+                self._review_diagnostic_role("generation.worker.stderr"),
                 diagnostic_bytes,
                 media_type="text/plain",
                 disposition="observed",
@@ -783,12 +787,28 @@ class GeneratedRevisionSink:
             "phase": "candidate_generation",
         }
         attempt.add_artifact(
-            "generation.worker.stderr_receipt",
+            self._review_diagnostic_role("generation.worker.stderr_receipt"),
             canonical_json(receipt).encode("utf-8"),
             media_type="application/json",
             disposition="observed",
             metadata={"phase": "candidate_generation"},
         )
+
+    def _review_diagnostic_role(self, base_role: str) -> str:
+        if not self._recorder._review_only_active:
+            return base_role
+        attempt = self._recorder.attempt
+        existing = {
+            row.role for row in attempt._objects(attempt._events())
+        }
+        if base_role not in existing:
+            return base_role
+        suffix = 1
+        while True:
+            role = f"{base_role}.{suffix:04d}"
+            if role not in existing:
+                return role
+            suffix += 1
 
     def _archive_owned_revision(
         self, **arguments: object
@@ -1014,6 +1034,18 @@ class PreparedGreenhouseReview:
     form_field_authorities: tuple[tuple[str, str], ...] = ()
     form_inventory_sha256: str | None = None
     form_inventory: bytes | None = None
+    sanity_package: SanityReviewPackage | None = field(
+        default=None, repr=False, compare=False
+    )
+    current_runtime_context: object | None = field(
+        default=None, repr=False, compare=False
+    )
+    current_runtime_materialization: object | None = field(
+        default=None, repr=False, compare=False
+    )
+    current_runtime_decision_authority: object | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True, slots=True)
