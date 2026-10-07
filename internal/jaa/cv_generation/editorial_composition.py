@@ -530,6 +530,45 @@ def cover_claim_requirements(
     }
 
 
+def _build_cover_runtime_contract(
+    rows: Sequence[Mapping[str, str]], *, current_runtime: bool
+) -> dict[str, object]:
+    requirements = cover_claim_requirements(rows, current_runtime=current_runtime)
+    if not current_runtime:
+        return {}
+    claim_section_policy = {
+        row["claim_id"]: [row["section_heading"]] for row in rows
+    }
+    required_claim_ids = [row["claim_id"] for row in rows]
+    return {
+        "claim_section_policy": claim_section_policy,
+        "required_claim_ids": required_claim_ids,
+        "section_min_facts": dict(requirements["section_min_facts"]),
+        "writer_instructions": [
+            "Return only one canonical JSON object matching the response schema.",
+            "Write a specific UK cover letter under one page using the four supplied sections.",
+            "Use approved_claim atoms verbatim and never invent or paraphrase facts.",
+            "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
+            "Place every required claim ID exactly once, only in its claim_section_policy section, regardless of fact kind; do not require an employer claim in Opening or Company Fit.",
+            "Opening uses the exact salutation, one supplied Opening rhetorical atom, then only its bound facts.",
+            "Evidence Match and Company Fit use one supplied rhetorical atom, followed only by facts assigned to that section; an unbound section contains no factual claims.",
+            "Close carries only the required CTA, sign-off, and candidate signature.",
+            "Use the supplied rhetorical catalog, preserve supported facts, and add no extra claims.",
+            "Use the strongest supported candidate evidence and only the supplied typed rhetorical atoms.",
+            "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim.",
+            "Use at most 500 words and 3500 characters; add no em or en dash.",
+        ],
+        "humanizer_instructions": [
+            "Return only one canonical JSON object matching the response schema.",
+            "Preserve every approved_claim atom verbatim with its claim ID and assigned section, exactly once, and preserve all four sections.",
+            "Edit connective atoms only by selecting another supplied typed rhetorical atom for that section.",
+            "Preserve the exact salutation, sign-off, signature, and required CTA.",
+            "Do not require a separate Opening employer hook; follow the supplied claim assignments.",
+            "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact.",
+        ],
+    }
+
+
 def _required(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise EditorialCompositionError(f"{label} is absent or malformed")
@@ -2862,27 +2901,44 @@ def run_cover_letter_composition_runtime(
     if runtime.writer.available() is not True or runtime.humanizer.available() is not True:
         raise EditorialCompositionError("cover-letter runtime adapter is unavailable")
     rhetorical_catalog = _cover_letter_rhetorical_catalog(request)
-    writer_request = canonical_json(
+    cover_rows = [
         {
-            "editorial_request": request.document(),
-            "instructions": [
-                "Return only one canonical JSON object matching the response schema.",
-                "Write a specific UK cover letter under one page using the four supplied sections.",
-                "Use approved_claim atoms verbatim and never invent or paraphrase facts.",
-                "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
-                "After the salutation, Opening must contain an approved employer claim naming the company and role.",
-                "Use the strongest supported candidate evidence and only the supplied typed rhetorical atoms.",
-                "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim.",
-                "Use at most 500 words and 3500 characters; add no em or en dash.",
-            ],
-            "rhetorical_catalog": {
-                heading: list(values)
-                for heading, values in rhetorical_catalog.items()
-            },
-            "schema_version": "jaa.cover-letter-writer-runtime-request.v3",
-            "stage": "cover_letter_writer",
+            "claim_id": claim.claim_id,
+            "fact_kind": claim.fact_kind,
+            "section_heading": claim.section_heading,
         }
-    ).encode()
+        for claim in request.approved_claims
+    ]
+    runtime_contract = _build_cover_runtime_contract(
+        cover_rows, current_runtime=request.authority.current_runtime
+    )
+    writer_payload = {
+        "editorial_request": request.document(),
+        "instructions": [
+            "Return only one canonical JSON object matching the response schema.",
+            "Write a specific UK cover letter under one page using the four supplied sections.",
+            "Use approved_claim atoms verbatim and never invent or paraphrase facts.",
+            "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
+            "After the salutation, Opening must contain an approved employer claim naming the company and role.",
+            "Use the strongest supported candidate evidence and only the supplied typed rhetorical atoms.",
+            "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim.",
+            "Use at most 500 words and 3500 characters; add no em or en dash.",
+        ],
+        "rhetorical_catalog": {
+            heading: list(values)
+            for heading, values in rhetorical_catalog.items()
+        },
+        "schema_version": "jaa.cover-letter-writer-runtime-request.v3",
+        "stage": "cover_letter_writer",
+    }
+    if runtime_contract:
+        writer_payload["instructions"] = runtime_contract["writer_instructions"]
+        writer_payload["claim_section_policy"] = runtime_contract[
+            "claim_section_policy"
+        ]
+        writer_payload["required_claim_ids"] = runtime_contract["required_claim_ids"]
+        writer_payload["section_min_facts"] = runtime_contract["section_min_facts"]
+    writer_request = canonical_json(writer_payload).encode()
     writer_invocation = secrets.token_hex(32)
     writer_session = runtime.writer.open_fresh_session(invocation_id=writer_invocation)
     if writer_session is runtime.writer or writer_session.invocation_id != writer_invocation:
@@ -2906,26 +2962,35 @@ def run_cover_letter_composition_runtime(
     validate_cover_letter_editorial_draft(request, writer_draft)
 
     humanizer_request_sha = cover_letter_humanizer_request_sha256(request, writer_draft)
-    humanizer_request = canonical_json(
-        {
-            "editorial_request": request.document(),
-            "humanizer_request_sha256": humanizer_request_sha,
-            "instructions": [
-                "Return only one canonical JSON object matching the response schema.",
-                "Preserve every approved_claim atom and all four sections exactly.",
-                "Edit connective atoms only by selecting another supplied typed rhetorical atom for that section.",
-                "Preserve the exact salutation, sign-off, signature and opening employer hook.",
-                "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact.",
-            ],
-            "schema_version": "jaa.cover-letter-humanizer-runtime-request.v3",
-            "stage": "cover_letter_humanizer",
-            "rhetorical_catalog": {
-                heading: list(values)
-                for heading, values in rhetorical_catalog.items()
-            },
-            "writer_draft": writer_draft.document(),
-        }
-    ).encode()
+    humanizer_payload = {
+        "editorial_request": request.document(),
+        "humanizer_request_sha256": humanizer_request_sha,
+        "instructions": [
+            "Return only one canonical JSON object matching the response schema.",
+            "Preserve every approved_claim atom and all four sections exactly.",
+            "Edit connective atoms only by selecting another supplied typed rhetorical atom for that section.",
+            "Preserve the exact salutation, sign-off, signature and opening employer hook.",
+            "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact.",
+        ],
+        "schema_version": "jaa.cover-letter-humanizer-runtime-request.v3",
+        "stage": "cover_letter_humanizer",
+        "rhetorical_catalog": {
+            heading: list(values)
+            for heading, values in rhetorical_catalog.items()
+        },
+        "writer_draft": writer_draft.document(),
+    }
+    if runtime_contract:
+        humanizer_payload["instructions"] = runtime_contract[
+            "humanizer_instructions"
+        ]
+        humanizer_payload["claim_section_policy"] = runtime_contract[
+            "claim_section_policy"
+        ]
+        humanizer_payload["required_claim_ids"] = runtime_contract[
+            "required_claim_ids"
+        ]
+    humanizer_request = canonical_json(humanizer_payload).encode()
     humanizer_invocation = secrets.token_hex(32)
     humanizer_session = runtime.humanizer.open_fresh_session(
         invocation_id=humanizer_invocation

@@ -430,6 +430,107 @@ def test_cover_letter_runtime_uses_distinct_one_shot_writer_and_humanizer() -> N
     assert humanizer_request["stage"] == "cover_letter_humanizer"
     assert "approved_claim" in " ".join(writer_request["instructions"])
     assert "em dash" in " ".join(humanizer_request["instructions"])
+    assert writer_request["instructions"] == [
+        "Return only one canonical JSON object matching the response schema.",
+        "Write a specific UK cover letter under one page using the four supplied sections.",
+        "Use approved_claim atoms verbatim and never invent or paraphrase facts.",
+        "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
+        "After the salutation, Opening must contain an approved employer claim naming the company and role.",
+        "Use the strongest supported candidate evidence and only the supplied typed rhetorical atoms.",
+        "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim.",
+        "Use at most 500 words and 3500 characters; add no em or en dash.",
+    ]
+    assert humanizer_request["instructions"] == [
+        "Return only one canonical JSON object matching the response schema.",
+        "Preserve every approved_claim atom and all four sections exactly.",
+        "Edit connective atoms only by selecting another supplied typed rhetorical atom for that section.",
+        "Preserve the exact salutation, sign-off, signature and opening employer hook.",
+        "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact.",
+    ]
+    assert not {"claim_section_policy", "required_claim_ids", "section_min_facts"} & set(
+        writer_request
+    )
+    assert not {"claim_section_policy", "required_claim_ids"} & set(humanizer_request)
+    assert writer_adapter.calls[0][0] == canonical_json(
+        {
+            "editorial_request": request.document(),
+            "instructions": writer_request["instructions"],
+            "rhetorical_catalog": writer_request["rhetorical_catalog"],
+            "schema_version": "jaa.cover-letter-writer-runtime-request.v3",
+            "stage": "cover_letter_writer",
+        }
+    ).encode()
+    assert humanizer_adapter.calls[0][0] == canonical_json(
+        {
+            "editorial_request": request.document(),
+            "humanizer_request_sha256": cover_letter_humanizer_request_sha256(
+                request, writer
+            ),
+            "instructions": humanizer_request["instructions"],
+            "schema_version": "jaa.cover-letter-humanizer-runtime-request.v3",
+            "stage": "cover_letter_humanizer",
+            "rhetorical_catalog": humanizer_request["rhetorical_catalog"],
+            "writer_draft": writer.document(),
+        }
+    ).encode()
+
+
+def test_current_cover_letter_runtime_binds_writer_and_humanizer_prompts() -> None:
+    _, claims, request, draft = _current_cover_fixture()
+    writer_adapter = _Adapter("cover_letter_writer", "writer", draft)
+    humanizer_adapter = _Adapter("cover_letter_humanizer", "humanizer", draft)
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+        document_kind="cover_letter",
+    )
+
+    writer_draft, final_draft, *_ = run_cover_letter_composition_runtime(
+        request, runtime=runtime
+    )
+    writer_request = json.loads(writer_adapter.calls[0][0])
+    humanizer_request = json.loads(humanizer_adapter.calls[0][0])
+    expected_section_policy = {
+        claim.claim_id: [claim.section_heading] for claim in claims
+    }
+    expected_claim_ids = [claim.claim_id for claim in claims]
+
+    assert writer_draft == final_draft == draft
+    assert writer_request["claim_section_policy"] == expected_section_policy
+    assert writer_request["required_claim_ids"] == expected_claim_ids
+    assert writer_request["section_min_facts"] == {
+        "Opening": 1,
+        "Evidence Match": 1,
+        "Company Fit": 0,
+    }
+    writer_instructions = " ".join(writer_request["instructions"])
+    assert (
+        "do not require an employer claim in Opening or Company Fit"
+        in writer_instructions
+    )
+    assert (
+        "Opening must contain an approved employer claim naming the company and role"
+        not in writer_instructions
+    )
+    assert (
+        "Use the supplied rhetorical catalog, preserve supported facts, and add no extra claims."
+        in writer_instructions
+    )
+    assert (
+        "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim."
+        in writer_instructions
+    )
+    assert writer_request["claim_section_policy"] == humanizer_request[
+        "claim_section_policy"
+    ]
+    assert writer_request["required_claim_ids"] == humanizer_request[
+        "required_claim_ids"
+    ]
+    humanizer_instructions = " ".join(humanizer_request["instructions"])
+    assert "Do not require a separate Opening employer hook" in humanizer_instructions
+    assert "Preserve the exact salutation, sign-off, signature, and required CTA." in humanizer_instructions
+    assert "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact." in humanizer_instructions
 
 
 def test_cover_letter_admission_rejects_claim_mutation_and_kolhoz_text() -> None:
@@ -503,6 +604,22 @@ def test_current_cover_letter_uses_bound_sections_and_exact_claims() -> None:
     )
     with pytest.raises(EditorialCompositionError, match="repeats an approved claim"):
         validate_cover_letter_editorial_draft(request, duplicated)
+
+    misplaced_company_fit = replace(
+        draft.sections[2],
+        atoms=(*draft.sections[2].atoms, draft.sections[1].atoms[-1]),
+    )
+    misplaced = build_cover_letter_editorial_draft(
+        candidate_name=draft.candidate_name,
+        sections=(
+            draft.sections[0],
+            draft.sections[1],
+            misplaced_company_fit,
+            *draft.sections[3:],
+        ),
+    )
+    with pytest.raises(EditorialCompositionError, match="wrong section"):
+        validate_cover_letter_editorial_draft(request, misplaced)
 
     with pytest.raises(EditorialCompositionError, match="claim policy"):
         build_cover_letter_editorial_request(
