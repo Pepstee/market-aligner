@@ -169,6 +169,15 @@ REVIEW_REQUIRED_ROLES = frozenset({
     "assurance.cv.receipt", "assurance.cover_letter.receipt", "assurance.semantic.receipt",
     "production.identities", "browser.prefill_snapshot",
 })
+REVIEW_REPLAY_APPEND_ONLY_ROLES = frozenset({"vacancy.destination_reverification"})
+REVIEW_REPLAY_SEMANTIC_FENCE_ROLES = frozenset({
+    "review.semantic_intent",
+    "assurance.semantic.receipt",
+    "review.sanity_result",
+    "review.ats_passive_forensics",
+    "review.result",
+    "review.package",
+})
 
 
 def _review_event_allowed(event_type: str, payload: Mapping[str, object]) -> None:
@@ -1608,16 +1617,51 @@ class AttemptArchive:
         parents = tuple(lineage)
         if self._review_replay:
             _review_event_allowed("artifact_archived", {"role": role})
-            existing = [row for row in self._objects(self._events()) if row.role == role]
+            events = self._events()
+            existing = [row for row in self._objects(events) if row.role == role]
             if existing:
-                if len(existing) != 1:
-                    raise ApplicationArchiveError("review-only replay evidence is ambiguous")
-                row = existing[0]
-                if (self.read_artifact(row) != value or row.media_type != media_type
-                        or row.lineage != parents or row.disposition != disposition
-                        or row.metadata != clean_metadata):
+                if role not in REVIEW_REPLAY_APPEND_ONLY_ROLES:
+                    if len(existing) != 1:
+                        raise ApplicationArchiveError("review-only replay evidence is ambiguous")
+                    row = existing[0]
+                    if (self.read_artifact(row) != value or row.media_type != media_type
+                            or row.lineage != parents or row.disposition != disposition
+                            or row.metadata != clean_metadata):
+                        raise ApplicationArchiveError("review-only replay evidence differs")
+                    return row
+                if any(
+                    row.media_type != media_type
+                    or row.lineage != parents
+                    or row.disposition != disposition
+                    or row.metadata != clean_metadata
+                    for row in existing
+                ):
                     raise ApplicationArchiveError("review-only replay evidence differs")
-                return row
+                latest = existing[-1]
+                if self.read_artifact(latest) == value:
+                    return latest
+                if any(self.read_artifact(row) == value for row in existing[:-1]):
+                    raise ApplicationArchiveError("review-only replay evidence is stale")
+            if role in REVIEW_REPLAY_APPEND_ONLY_ROLES:
+                semantic_fence = any(
+                    (
+                        event.get("event_type") == "artifact_archived"
+                        and isinstance(event.get("payload"), Mapping)
+                        and event["payload"].get("role") in REVIEW_REPLAY_SEMANTIC_FENCE_ROLES
+                    )
+                    or (
+                        event.get("event_type") == "evidence_recorded"
+                        and isinstance(event.get("payload"), Mapping)
+                        and event["payload"].get("event_kind") == "terminal"
+                    )
+                    for event in events
+                )
+                finalized_files = any(
+                    (self.path / name).exists()
+                    for name in ("terminal-manifest.json", "release-manifest.json", "release-receipt.json")
+                )
+                if semantic_fence or finalized_files:
+                    raise ApplicationArchiveError("review-only replay evidence is past the semantic review fence")
         for parent in parents:
             _digest(parent, "lineage hash")
             _, parent_path = self._object_path(parent)

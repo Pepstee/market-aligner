@@ -117,6 +117,16 @@ def _resume_review_recorder(recorder):
     )
 
 
+def _add_destination_reverification(recorder, value):
+    return recorder.add_revision(
+        role="vacancy.destination_reverification",
+        value=value,
+        media_type="application/json",
+        prior_sha256=None,
+        approved=True,
+    )
+
+
 def _queue_base_recorder(tmp_path):
     from career_automation.production_attempt import GreenhouseAttemptRecorder
 
@@ -139,6 +149,71 @@ def test_review_only_resume_keeps_exact_intent_and_evidence(tmp_path):
     with pytest.raises(ApplicationArchiveError, match="replay evidence differs"):
         resumed._add("browser.prefill_snapshot", b'{"changed":true}', "application/json")
     assert resumed.attempt._events() == original
+
+
+def test_review_only_destination_reverification_appends_current_observation(tmp_path):
+    recorder = _queue_base_recorder(tmp_path)
+    recorder.begin_review_only()
+    first = _add_destination_reverification(recorder, b'{"equivalent":"A"}\n')
+    original_events = recorder.attempt._events()
+    original_bytes = recorder.attempt.read_artifact(first)
+
+    resumed = _resume_review_recorder(recorder)
+    resumed.begin_review_only()
+    before_update = resumed.attempt._events()
+    second = _add_destination_reverification(resumed, b'{"equivalent":"B"}\n')
+
+    after_update = resumed.attempt._events()
+    assert after_update[:len(before_update)] == before_update
+    assert after_update[:len(original_events)] == original_events
+    assert recorder.attempt.read_artifact(first) == original_bytes
+    assert recorder.attempt.read_artifact(first) == b'{"equivalent":"A"}\n'
+    assert resumed._selected()["vacancy.destination_reverification"] == second.sha256
+
+    repeated = _add_destination_reverification(resumed, b'{"equivalent":"B"}\n')
+    assert repeated == second
+    assert resumed.attempt._events() == after_update
+    with pytest.raises(ApplicationArchiveError, match="evidence is stale"):
+        _add_destination_reverification(resumed, b'{"equivalent":"A"}\n')
+    assert resumed.attempt._events() == after_update
+
+
+def test_review_only_destination_reverification_keeps_non_target_roles_immutable(tmp_path):
+    recorder = _queue_base_recorder(tmp_path)
+    recorder.begin_review_only()
+    recorder._add("vacancy.review_material", b'{"material":"A"}\n', "application/json")
+    resumed = _resume_review_recorder(recorder)
+    resumed.begin_review_only()
+    before = resumed.attempt._events()
+
+    with pytest.raises(ApplicationArchiveError, match="replay evidence differs"):
+        resumed._add("vacancy.review_material", b'{"material":"B"}\n', "application/json")
+    assert resumed.attempt._events() == before
+
+
+@pytest.mark.parametrize(
+    "fence_role",
+    [
+        "review.semantic_intent",
+        "assurance.semantic.receipt",
+        "review.sanity_result",
+        "review.ats_passive_forensics",
+        "review.result",
+        "review.package",
+    ],
+)
+def test_review_only_destination_reverification_cannot_cross_semantic_fence(tmp_path, fence_role):
+    recorder = _queue_base_recorder(tmp_path)
+    recorder.begin_review_only()
+    _add_destination_reverification(recorder, b'{"equivalent":"A"}\n')
+    resumed = _resume_review_recorder(recorder)
+    resumed.begin_review_only()
+    resumed._add(fence_role, b"{}\n", "application/json")
+    before = resumed.attempt._events()
+
+    with pytest.raises(ApplicationArchiveError, match="semantic review fence"):
+        _add_destination_reverification(resumed, b'{"equivalent":"B"}\n')
+    assert resumed.attempt._events() == before
 
 
 @pytest.mark.parametrize("extra", [None, "artifact", "navigation"])
