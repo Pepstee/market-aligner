@@ -530,6 +530,107 @@ def _current_fixture():
     return request, draft
 
 
+@pytest.mark.parametrize("require_transport_shape", (False, True))
+def test_current_cv_response_parser_accepts_equivalent_json_formatting(
+    require_transport_shape: bool,
+) -> None:
+    _, draft = _current_fixture()
+    document = draft.document(include_identity=not require_transport_shape)
+    canonical = canonical_json(document).encode("utf-8")
+    pretty = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+    reordered = json.dumps(
+        dict(reversed(tuple(document.items()))),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    expected = editorial_module._draft_from_response(
+        canonical,
+        require_transport_shape=require_transport_shape,
+        current_runtime=True,
+    )
+
+    for raw in (pretty, canonical + b"\n", reordered):
+        parsed = editorial_module._draft_from_response(
+            raw,
+            require_transport_shape=require_transport_shape,
+            current_runtime=True,
+        )
+        assert parsed == expected
+        assert parsed.document() == draft.document()
+
+
+@pytest.mark.parametrize("require_transport_shape", (False, True))
+def test_legacy_cv_response_parser_still_requires_canonical_bytes(
+    require_transport_shape: bool,
+) -> None:
+    _, draft = _current_fixture()
+    document = draft.document(include_identity=not require_transport_shape)
+    pretty = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
+
+    with pytest.raises(EditorialCompositionError, match="not canonical JSON"):
+        editorial_module._draft_from_response(
+            pretty,
+            require_transport_shape=require_transport_shape,
+            current_runtime=False,
+        )
+
+
+@pytest.mark.parametrize("current_runtime", (1, 0, "true", None))
+def test_cv_response_parser_rejects_non_exact_runtime_mode(
+    current_runtime: object,
+) -> None:
+    _, draft = _current_fixture()
+    with pytest.raises(EditorialCompositionError):
+        editorial_module._draft_from_response(
+            canonical_json(draft.document()).encode("utf-8"),
+            current_runtime=current_runtime,
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b"\xef\xbb\xbf{}",
+        b'{"candidate_name":"Synthetic","candidate_name":"Other"}',
+        b'{"candidate_name":"Synthetic","nested":{"x":1,"\\u0078":2}}',
+        b'{"candidate_name":"Synthetic","value":NaN}',
+        b'{"candidate_name":"Synthetic","value":1e400}',
+        b'{"candidate_name":"\\ud800"}',
+        b'{"candidate_name":"Synthetic"} trailing',
+        b"\xff",
+        b"[]",
+    ),
+)
+def test_current_cv_response_parser_rejects_unsafe_json(raw: bytes) -> None:
+    with pytest.raises(EditorialCompositionError):
+        editorial_module._draft_from_response(raw, current_runtime=True)
+
+
+def test_current_cv_response_parser_preserves_schema_atom_and_identity_guards() -> None:
+    _, draft = _current_fixture()
+    extra_key = draft.document(include_identity=False)
+    extra_key["unexpected"] = True
+    wrong_schema = draft.document(include_identity=False)
+    wrong_schema["schema_version"] = "unsupported"
+    malformed_atom = draft.document(include_identity=False)
+    malformed_atom["sections"][0]["atoms"][0].pop("claim_id")
+
+    for document in (extra_key, wrong_schema, malformed_atom):
+        with pytest.raises(EditorialCompositionError):
+            editorial_module._draft_from_response(
+                canonical_json(document).encode("utf-8"),
+                current_runtime=True,
+            )
+
+    wrong_identity = draft.document()
+    wrong_identity["draft_sha256"] = "0" * 64
+    with pytest.raises(EditorialCompositionError, match="identity is invalid"):
+        editorial_module._draft_from_response(
+            canonical_json(wrong_identity).encode("utf-8"),
+            current_runtime=True,
+        )
+
+
 def _stage_evidence(request, writer, final):
     return (
         EditorialStageEvidence(

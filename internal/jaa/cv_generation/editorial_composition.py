@@ -2579,11 +2579,20 @@ def _draft_from_response(
     allow_missing_city: bool = False,
     current_runtime: bool = False,
 ) -> CVEditorialDraft:
-    try:
-        document = json.loads(value)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise EditorialCompositionError("editorial backend returned invalid JSON") from exc
-    if not isinstance(document, dict) or value != canonical_json(document).encode():
+    if type(current_runtime) is not bool:
+        raise EditorialCompositionError("editorial backend returned invalid JSON")
+    if current_runtime:
+        document = _parse_strict_editorial_response(value, backend="editorial")
+    else:
+        try:
+            document = json.loads(value)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise EditorialCompositionError(
+                "editorial backend returned invalid JSON"
+            ) from exc
+    if not isinstance(document, dict) or (
+        not current_runtime and value != canonical_json(document).encode()
+    ):
         raise EditorialCompositionError("editorial backend response is not canonical JSON")
     transport_keys = {
         "candidate_city",
@@ -2630,14 +2639,15 @@ def _draft_from_response(
     return draft
 
 
-def _cover_letter_draft_from_response(
-    value: bytes,
-    *,
-    require_transport_shape: bool = False,
-    current_runtime: bool = False,
-) -> CoverLetterEditorialDraft:
-    if type(value) is not bytes or type(current_runtime) is not bool:
-        raise EditorialCompositionError("cover-letter backend returned invalid JSON")
+def _parse_strict_editorial_response(
+    value: bytes, *, backend: str
+) -> dict[str, object]:
+    if (
+        type(value) is not bytes
+        or type(backend) is not str
+        or backend not in {"editorial", "cover-letter"}
+    ):
+        raise EditorialCompositionError(f"{backend} backend returned invalid JSON")
 
     def unique_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
         document: dict[str, object] = {}
@@ -2682,10 +2692,24 @@ def _cover_letter_draft_from_response(
         reject_surrogates(document)
     except (UnicodeDecodeError, ValueError):
         raise EditorialCompositionError(
-            "cover-letter backend returned invalid JSON"
+            f"{backend} backend returned invalid JSON"
         ) from None
     if not isinstance(document, dict):
-        raise EditorialCompositionError("cover-letter backend draft schema differs")
+        raise EditorialCompositionError(
+            f"{backend} backend draft schema differs"
+        )
+    return document
+
+
+def _cover_letter_draft_from_response(
+    value: bytes,
+    *,
+    require_transport_shape: bool = False,
+    current_runtime: bool = False,
+) -> CoverLetterEditorialDraft:
+    if type(value) is not bytes or type(current_runtime) is not bool:
+        raise EditorialCompositionError("cover-letter backend returned invalid JSON")
+    document = _parse_strict_editorial_response(value, backend="cover-letter")
     if (
         not current_runtime
         and value != canonical_json(document).encode("utf-8")
