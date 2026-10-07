@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
-from cv_generation.constraints import _REJECTION_SIGNAL, policy_for_candidate
+from cv_generation.constraints import policy_for_candidate
 from cv_generation.service import (
     CVCompositionOrchestrationResult,
     CurrentRuntimeDraftCompositionResult,
@@ -43,6 +43,7 @@ from .candidate_application_factory import (
     build_candidate_application_deployment_binding,
     build_market_application_decision_authority,
     materialize_candidate_application_source,
+    partition_current_cv_claim_bindings,
 )
 from cv_generation.editorial_composition import (
     ApprovedCoverLetterClaim,
@@ -87,101 +88,6 @@ def _composition_call_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
         for key, value in items
         if key not in _COMPOSITION_ARCHIVE_ONLY_ARGUMENTS
     }
-
-
-_INTERNAL_ONLY_CV_BINDING_REASON = "internal_evidence_only"
-_CV_BINDING_DOCUMENT_KINDS = ("cv", "cover_letter")
-_CV_BINDING_REQUIRED_FIELDS = ("document_kind", "sentence_id", "text", "text_sha256")
-
-
-def _partition_cv_bindings_fail(message: str) -> None:
-    raise ValueError("partition_cv_claim_bindings: " + message)
-
-
-def partition_cv_claim_bindings(
-    rows: object,
-    *,
-    prohibited_text: Callable[[str], bool],
-) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, str], ...]]:
-    if not callable(prohibited_text):
-        _partition_cv_bindings_fail("prohibited_text must be callable")
-    if not isinstance(rows, (tuple, list)):
-        _partition_cv_bindings_fail("rows must be a tuple or list")
-
-    seen_sentence_ids: set[str] = set()
-    cv_positions: list[int] = []
-    for position, row in enumerate(rows):
-        if type(row) is not dict:
-            _partition_cv_bindings_fail(f"row {position} must be an exact dict")
-        for field_name in _CV_BINDING_REQUIRED_FIELDS:
-            if field_name not in row:
-                _partition_cv_bindings_fail(
-                    f"row {position} is missing required field {field_name!r}"
-                )
-        document_kind = row["document_kind"]
-        if (
-            type(document_kind) is not str
-            or document_kind not in _CV_BINDING_DOCUMENT_KINDS
-        ):
-            _partition_cv_bindings_fail(f"row {position} has invalid document_kind")
-        sentence_id = row["sentence_id"]
-        if type(sentence_id) is not str or not sentence_id:
-            _partition_cv_bindings_fail(f"row {position} has invalid sentence_id")
-        text = row["text"]
-        if type(text) is not str or not text:
-            _partition_cv_bindings_fail(f"row {position} has invalid text")
-        text_sha256 = row["text_sha256"]
-        if type(text_sha256) is not str:
-            _partition_cv_bindings_fail(f"row {position} has invalid text_sha256 type")
-        expected = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if text_sha256 != expected:
-            _partition_cv_bindings_fail(
-                f"row {position} text_sha256 does not match exact UTF-8 text"
-            )
-        if sentence_id in seen_sentence_ids:
-            _partition_cv_bindings_fail(f"duplicate sentence_id {sentence_id!r}")
-        seen_sentence_ids.add(sentence_id)
-        if document_kind == "cv":
-            cv_positions.append(position)
-
-    accepted: list[dict[str, Any]] = []
-    excluded: list[dict[str, str]] = []
-    for position in cv_positions:
-        row = rows[position]
-        verdict = prohibited_text(row["text"])
-        if type(verdict) is not bool:
-            _partition_cv_bindings_fail(
-                f"callback returned non-bool for row {position}"
-            )
-        if verdict is True:
-            excluded.append(
-                {
-                    "sentence_id": row["sentence_id"],
-                    "text_sha256": row["text_sha256"],
-                    "reason": _INTERNAL_ONLY_CV_BINDING_REASON,
-                }
-            )
-        else:
-            accepted.append(row)
-
-    if not accepted:
-        _partition_cv_bindings_fail(
-            "no accepted CV rows; empty outward document is prohibited"
-        )
-
-    return tuple(accepted), tuple(excluded)
-
-
-def _current_cv_binding_is_prohibited(text: str) -> bool:
-    return _REJECTION_SIGNAL.search(text) is not None
-
-
-def _partition_current_cv_claim_bindings(
-    rows: object,
-) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, str], ...]]:
-    return partition_cv_claim_bindings(
-        rows, prohibited_text=_current_cv_binding_is_prohibited
-    )
 
 
 def _contact_authority_provenance_sha256(
@@ -608,7 +514,7 @@ class CanonicalPreparationInputMaterializer:
             }
             if current_runtime:
                 cv_claim_rows, _excluded_cv_bindings = (
-                    _partition_current_cv_claim_bindings(
+                    partition_current_cv_claim_bindings(
                         [
                             dict(row)
                             for row in materialization.receipt.fact_bindings

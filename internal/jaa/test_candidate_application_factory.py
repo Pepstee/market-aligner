@@ -61,6 +61,7 @@ from cv_generation.editorial_composition import (
     ApprovedCVClaim,
     CandidateEditorialAuthority,
     build_editorial_request,
+    category_for_source_heading,
 )
 
 
@@ -2607,6 +2608,213 @@ def test_materializes_exact_authority_bound_source_without_pdf(
                         ),
                         *claims[1:],
                     ),
+                }
+            )
+        )
+
+
+def test_editorial_authorization_uses_exact_current_cv_partition() -> None:
+    def binding(sentence_id: str, text: str, heading: str = "Professional Summary"):
+        return {
+            "document_kind": "cv",
+            "sentence_id": sentence_id,
+            "section_heading": heading,
+            "text": text,
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "evidence_ids": (f"evidence-{sentence_id}",),
+        }
+
+    def shell(rows, environment: str):
+        receipt = object.__new__(
+            candidate_factory_module.CandidateApplicationMaterializationReceipt
+        )
+        object.__setattr__(receipt, "candidate_authority_file_sha256", "a" * 64)
+        object.__setattr__(
+            receipt, "deployment_binding", SimpleNamespace(environment=environment)
+        )
+        object.__setattr__(receipt, "vacancy_sha256", "b" * 64)
+        object.__setattr__(receipt, "role_title", "Synthetic role")
+        object.__setattr__(receipt, "company_name", "Synthetic company")
+        object.__setattr__(receipt, "fact_bindings", tuple(rows))
+        return receipt
+
+    def cv_claim(row, *, current_runtime: bool):
+        return SimpleNamespace(
+            claim_id=row["sentence_id"],
+            category=category_for_source_heading(
+                row["section_heading"], current_runtime=current_runtime
+            ),
+            evidence_ids=tuple(row["evidence_ids"]),
+            text=row["text"],
+            text_sha256=row["text_sha256"],
+        )
+
+    def cv_request(receipt, claims, *, current_runtime: bool):
+        return SimpleNamespace(
+            authority=SimpleNamespace(
+                source_sha256=receipt.candidate_authority_file_sha256,
+                current_runtime=current_runtime,
+            ),
+            vacancy_sha256=receipt.vacancy_sha256,
+            role_title=receipt.role_title,
+            company_name=receipt.company_name,
+            document_kind="cv",
+            approved_claims=tuple(claims),
+        )
+
+    safe_first = binding("safe-1", "Synthetic supported result one.")
+    safe_second = binding(
+        "safe-2", "Synthetic supported result two.", "Highlights"
+    )
+    excluded = binding(
+        "excluded-1", "Synthetic supported claim with an internal review caveat."
+    )
+    rows = (safe_first, safe_second, excluded)
+    receipt = shell(rows, "current_runtime")
+    original_bindings = tuple(dict(row) for row in receipt.fact_bindings)
+    safe_claims = tuple(
+        cv_claim(row, current_runtime=True) for row in (safe_first, safe_second)
+    )
+
+    receipt.authorize_editorial_request(
+        cv_request(receipt, safe_claims, current_runtime=True)
+    )
+    with pytest.raises(ValueError, match="claim set differs"):
+        receipt.authorize_editorial_request(
+            cv_request(receipt, safe_claims[:1], current_runtime=True)
+        )
+    with pytest.raises(ValueError, match="claim set differs"):
+        receipt.authorize_editorial_request(
+            cv_request(
+                receipt,
+                (*safe_claims, cv_claim(excluded, current_runtime=True)),
+                current_runtime=True,
+            )
+        )
+
+    altered_claims = (
+        SimpleNamespace(**{**vars(safe_claims[0]), "text": "Synthetic altered text."}),
+        SimpleNamespace(**{**vars(safe_claims[0]), "text_sha256": "f" * 64}),
+        SimpleNamespace(
+            **{**vars(safe_claims[0]), "evidence_ids": ("different-evidence",)}
+        ),
+        SimpleNamespace(**{**vars(safe_claims[0]), "category": "outcome"}),
+    )
+    for altered_claim in altered_claims:
+        with pytest.raises(ValueError, match="claim set differs"):
+            receipt.authorize_editorial_request(
+                cv_request(
+                    receipt,
+                    (altered_claim, safe_claims[1]),
+                    current_runtime=True,
+                )
+            )
+
+    with pytest.raises(ValueError, match="candidate authority differs"):
+        receipt.authorize_editorial_request(
+            SimpleNamespace(
+                **{
+                    **cv_request(
+                        receipt, safe_claims, current_runtime=True
+                    ).__dict__,
+                    "authority": SimpleNamespace(
+                        source_sha256="c" * 64, current_runtime=True
+                    ),
+                }
+            )
+        )
+    assert tuple(dict(row) for row in receipt.fact_bindings) == original_bindings
+
+    legacy_rows = (
+        binding("legacy-safe", "Synthetic legacy supported statement."),
+        binding(
+            "legacy-qualified",
+            "Synthetic legacy statement includes an internal review caveat.",
+        ),
+    )
+    legacy_receipt = shell(legacy_rows, "legacy")
+    all_legacy_claims = tuple(
+        cv_claim(row, current_runtime=False) for row in legacy_rows
+    )
+    legacy_receipt.authorize_editorial_request(
+        cv_request(legacy_receipt, all_legacy_claims, current_runtime=False)
+    )
+    with pytest.raises(ValueError, match="claim set differs"):
+        legacy_receipt.authorize_editorial_request(
+            cv_request(
+                legacy_receipt,
+                tuple(
+                    cv_claim(row, current_runtime=False)
+                    for row in legacy_rows[:1]
+                ),
+                current_runtime=False,
+            )
+        )
+
+
+def test_current_cover_letter_authorization_still_requires_exact_bindings() -> None:
+    def binding(sentence_id: str, text: str, section_heading: str):
+        return {
+            "document_kind": "cover_letter",
+            "sentence_id": sentence_id,
+            "section_heading": section_heading,
+            "fact_kind": "candidate",
+            "text": text,
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "evidence_ids": (f"evidence-{sentence_id}",),
+        }
+
+    rows = (
+        binding(
+            "cover-1",
+            "Synthetic cover statement includes an internal review caveat.",
+            "Opening",
+        ),
+        binding("cover-2", "Synthetic cover statement two.", "Body"),
+    )
+    receipt = object.__new__(
+        candidate_factory_module.CandidateApplicationMaterializationReceipt
+    )
+    object.__setattr__(receipt, "candidate_authority_file_sha256", "a" * 64)
+    object.__setattr__(
+        receipt,
+        "deployment_binding",
+        SimpleNamespace(environment="current_runtime"),
+    )
+    object.__setattr__(receipt, "vacancy_sha256", "b" * 64)
+    object.__setattr__(receipt, "role_title", "Synthetic role")
+    object.__setattr__(receipt, "company_name", "Synthetic company")
+    object.__setattr__(receipt, "fact_bindings", rows)
+
+    def claim(row):
+        return SimpleNamespace(
+            claim_id=row["sentence_id"],
+            evidence_ids=row["evidence_ids"],
+            fact_kind=row["fact_kind"],
+            section_heading=row["section_heading"],
+            text=row["text"],
+            text_sha256=row["text_sha256"],
+        )
+
+    request = SimpleNamespace(
+        authority=SimpleNamespace(
+            source_sha256=receipt.candidate_authority_file_sha256,
+            current_runtime=True,
+        ),
+        vacancy_sha256=receipt.vacancy_sha256,
+        role_title=receipt.role_title,
+        company_name=receipt.company_name,
+        document_kind="cover_letter",
+        approved_claims=tuple(claim(row) for row in rows),
+    )
+
+    receipt.authorize_editorial_request(request)
+    with pytest.raises(ValueError, match="claim set differs"):
+        receipt.authorize_editorial_request(
+            SimpleNamespace(
+                **{
+                    **request.__dict__,
+                    "approved_claims": request.approved_claims[:1],
                 }
             )
         )

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from career_automation import candidate_application_factory as candidate_factory
 from career_automation import market_aligner_preparation as preparation
 from career_automation import production_preparation_runner as runner
 from career_automation.market_aligner_preparation import MarketApplicationPreparation
@@ -93,7 +94,7 @@ def test_cv_binding_partition_excludes_whole_rejected_rows_and_preserves_order()
         seen.append(text)
         return "internal review" in text
 
-    accepted, exclusions = preparation.partition_cv_claim_bindings(
+    accepted, exclusions = candidate_factory.partition_cv_claim_bindings(
         rows, prohibited_text=prohibited_text
     )
 
@@ -115,9 +116,11 @@ def test_cv_binding_partition_excludes_whole_rejected_rows_and_preserves_order()
 
 def test_cv_binding_partition_refuses_empty_or_all_excluded_cv_sets() -> None:
     with pytest.raises(ValueError, match="no accepted CV rows"):
-        preparation.partition_cv_claim_bindings([], prohibited_text=lambda text: False)
+        candidate_factory.partition_cv_claim_bindings(
+            [], prohibited_text=lambda text: False
+        )
     with pytest.raises(ValueError, match="no accepted CV rows"):
-        preparation.partition_cv_claim_bindings(
+        candidate_factory.partition_cv_claim_bindings(
             [_cv_binding_row("cv-1", "Synthetic internal review only.")],
             prohibited_text=lambda text: True,
         )
@@ -130,7 +133,9 @@ def test_cv_binding_partition_rejects_duplicate_ids_across_document_kinds() -> N
     ]
 
     with pytest.raises(ValueError, match="duplicate sentence_id"):
-        preparation.partition_cv_claim_bindings(rows, prohibited_text=lambda text: False)
+        candidate_factory.partition_cv_claim_bindings(
+            rows, prohibited_text=lambda text: False
+        )
 
 
 def test_cv_binding_partition_rejects_malformed_rows_and_hashes() -> None:
@@ -160,7 +165,7 @@ def test_cv_binding_partition_rejects_malformed_rows_and_hashes() -> None:
 
     for rows in cases:
         with pytest.raises(ValueError):
-            preparation.partition_cv_claim_bindings(
+            candidate_factory.partition_cv_claim_bindings(
                 rows, prohibited_text=lambda text: False
             )
 
@@ -171,9 +176,13 @@ def test_cv_binding_partition_rejects_invalid_predicates_and_results() -> None:
         _cv_binding_row("cv-2", "Synthetic second statement."),
     ]
     with pytest.raises(ValueError, match="prohibited_text must be callable"):
-        preparation.partition_cv_claim_bindings(rows, prohibited_text="not-callable")
+        candidate_factory.partition_cv_claim_bindings(
+            rows, prohibited_text="not-callable"
+        )
     with pytest.raises(ValueError, match="callback returned non-bool"):
-        preparation.partition_cv_claim_bindings(rows, prohibited_text=lambda text: 1)
+        candidate_factory.partition_cv_claim_bindings(
+            rows, prohibited_text=lambda text: 1
+        )
 
     calls = 0
 
@@ -183,7 +192,9 @@ def test_cv_binding_partition_rejects_invalid_predicates_and_results() -> None:
         return False if calls == 1 else "not-bool"
 
     with pytest.raises(ValueError, match="callback returned non-bool"):
-        preparation.partition_cv_claim_bindings(rows, prohibited_text=non_bool_on_second)
+        candidate_factory.partition_cv_claim_bindings(
+            rows, prohibited_text=non_bool_on_second
+        )
 
 
 def test_current_cv_binding_partition_uses_existing_rejection_predicate() -> None:
@@ -193,7 +204,7 @@ def test_current_cv_binding_partition_uses_existing_rejection_predicate() -> Non
     rows = [safe, qualified]
     snapshot = [dict(row) for row in rows]
 
-    accepted, exclusions = preparation._partition_current_cv_claim_bindings(rows)
+    accepted, exclusions = candidate_factory.partition_current_cv_claim_bindings(rows)
 
     assert accepted == (safe,)
     assert exclusions == (

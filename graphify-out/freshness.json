@@ -1,11 +1,11 @@
 {
   "community_count": 29688,
-  "edge_count": 76368,
-  "node_count": 57318,
+  "edge_count": 76381,
+  "node_count": 57326,
   "outputs": {
     ".graphify_labels.json": "958acceca6590be59b5abe496d1da2b771cde8a75bf348c766f377db451ecf62",
     "GRAPH_REPORT.md": "ce27e7ebb64972e1172f0ab3a8534c993e4bc4efc932459e785b9017967fc201",
-    "graph.json": "d58b56a51488bdea7b1b87f87990c795bdfcadc345a53a9bdcaeb950335d66b9"
+    "graph.json": "8c928b01b680db6ee90e28f0c27d672bd3869652927c7a1238349e4286ed73cf"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "9a9b7b3dd2603d6e1a0ee98eb8b63d6b41d7068a",
+  "source_base_commit": "c911350147a56c4a195a2b1043a2fca6be89dfe0",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -82,7 +82,7 @@
     "internal/jaa/career_automation/browser_executor.py": "9205268e371a4bff9618c023c88b86a226eaa8c7fecaf9aef8b8c9427d9e52e2",
     "internal/jaa/career_automation/browser_workflows.py": "d76a20c4c8b6cc5465f4cdc9b39c535ab367f4f587fa854579e46865401ba122",
     "internal/jaa/career_automation/canary_forensic_evidence.py": "368050e5f6971525fc5adfaa6ca7309287dc68b6cdb33091230d3e9b3ed2cfb4",
-    "internal/jaa/career_automation/candidate_application_factory.py": "f0547ad995e0c0d1bcad067cb370500130c5e09a5ee1ed8061f877ae79785ea2",
+    "internal/jaa/career_automation/candidate_application_factory.py": "2cec8b843bafcf706a31025a040beb00da192a5abc78f681c26c128ae0887e6c",
     "internal/jaa/career_automation/candidate_authority.py": "3e392bf91817e1be696cec7e5434c24cd277c92501504898da7beab3c5e4dd35",
     "internal/jaa/career_automation/candidate_contact_authority.py": "cee11dfc5a746870116d4e813c8a7bc5fc52c73abecfa7d5ff3fb09204359946",
     "internal/jaa/career_automation/candidate_generation_worker.py": "82fe4385d9b14390e20ec7ae066cd6951af4cb99dcad30f6ffd06ecce3b510ed",
@@ -153,7 +153,7 @@
     "internal/jaa/career_automation/live_canary_snapshot_document.py": "4a8cb89d5dc8b2268d5dcfb3aaa71d7c60773c5255e4537b0ad9676fbceedfb0",
     "internal/jaa/career_automation/live_vacancy_discovery.py": "14984e8b6362ad995e0c247ea725906e76b515f5aa31ed3904a65e7fbf147b4f",
     "internal/jaa/career_automation/market_aligner_handoff.py": "d46ea482054fcdb4a07572818943cf9573c1a7d7ced6295c918e8a2e0be90c51",
-    "internal/jaa/career_automation/market_aligner_preparation.py": "65ea9bc123ad33d3a2fd5c765f6e10c29f8b7fa1bd72b6a4d9f2dc4dedfe5f5e",
+    "internal/jaa/career_automation/market_aligner_preparation.py": "3f2ac2c0b20a35096775404e3da36bc6879b8a66e8cefa20efa2222797ac0011",
     "internal/jaa/career_automation/migrations.py": "85be2549462993af1178b2fff6676e49cff16d7c398214b2b35fbfd273b2c067",
     "internal/jaa/career_automation/models.py": "a2ecd1e8662baacab95dba5f6c84a6a93f58b8cbfd907507e51e3e66ee1b3223",
     "internal/jaa/career_automation/network_witnessed_fixture.py": "c47e3649a931af01780f8d96284e8020f889b50be7778bb649a8b6a40842711b",
@@ -504,7 +504,7 @@
     "internal/jaa/test_assurance_manifest_truth.py": "7c332645e440d38b38b42e0ad9b914a8bc737db7b72473d09b146ad818cdc969",
     "internal/jaa/test_ats_application_authority.py": "21250db060b917e5d57247ed27d64abc0dd6baab1bfda0009edaf32e8c67cdf9",
     "internal/jaa/test_authority_provisioning.py": "2bc92afd73dc8eaf92d02507d2ddca29a1370f9a0e4745f1003b2c1087d52f47",
-    "internal/jaa/test_candidate_application_factory.py": "401a30bb2f814d762777eb6f29a8a18d5325bdf89952bef370b71f051458b2e3",
+    "internal/jaa/test_candidate_application_factory.py": "0e7df42d407bb2ed9539cf6919fbd57203de6d1a821400200884497b7e557230",
     "internal/jaa/test_candidate_authority.py": "ca4a1791b5e918ba04c765e3ac533a2c8f1364d3df29ffd3b708c02c45b6fb4d",
     "internal/jaa/test_candidate_contact_authority.py": "cdb84f6b6c7af8ccff2b7443d91684cc0071fb6e973cb99dbe761454a6318cc8",
     "internal/jaa/test_candidate_contact_enrollment.py": "86d7afacc8f6fcec19c539840cb3c2740d5bbb6e279320407714d411bf3a2e2e",
@@ -678,7 +678,7 @@
     "internal/jaa/test_production_ats_executor.py": "036ea894615c98bd7928cf34f0a6b8961841ea8225108817d27fd718fe43105a",
     "internal/jaa/test_production_handoff_runner.py": "59105f5c6c7c11a1e6fe8e8a031bb5dd91a75c59c099a6fba91800879e27f3e3",
     "internal/jaa/test_production_operational_surfaces.py": "297fa7889824bcd99db5582096f48c585df9a166dc977454322b810d14d14e6e",
-    "internal/jaa/test_production_preparation_runner.py": "5868914bb261913aee0ea29c905a1f6520e975a17d14c318ca930017c2aa5843",
+    "internal/jaa/test_production_preparation_runner.py": "bb5855d8b5a35f84088d31df14dcd3e40cd539ed9e98c39e33d2998b29962644",
     "internal/jaa/test_production_queue.py": "4938e6ccb2201304b3fec2437af3ee9015ca94691b5f5c1e104e8b6069707718",
     "internal/jaa/test_production_runner.py": "c65d342574bf369b003afe660d335ac75ad2c913fb734ab12924dbc4d6a124e8",
     "internal/jaa/test_protected_corpus_binding.py": "f89867e487a336cd2cbba2af498d32677b2772bd6509ebcd52c7bb94b6af2b65",
