@@ -1,11 +1,11 @@
 {
   "community_count": 29688,
-  "edge_count": 76549,
-  "node_count": 57386,
+  "edge_count": 76572,
+  "node_count": 57396,
   "outputs": {
     ".graphify_labels.json": "958acceca6590be59b5abe496d1da2b771cde8a75bf348c766f377db451ecf62",
     "GRAPH_REPORT.md": "ce27e7ebb64972e1172f0ab3a8534c993e4bc4efc932459e785b9017967fc201",
-    "graph.json": "59d6617216905d0f2bf7299b41e721e716beb1d11a63773a2ef1c5fa6f4ebbba"
+    "graph.json": "fb5996868cc2d6c4481cd5e63cf34fb01c57fcb0bb4cf81ed016f9b8f69b306f"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "2ed23bccb4243763d5b80eeb1864b21ac1bab6cf",
+  "source_base_commit": "0a6186020c67b67df454c6b61254ddfd4f9a43ce",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -151,7 +151,7 @@
     "internal/jaa/career_automation/live_canary_operator_document_intake.py": "d5455f898f68f041bb0a86a3abc9707c2b16981d19f7dd30a01285b15e7bc63c",
     "internal/jaa/career_automation/live_canary_operator_fixture_composition.py": "6be3aa327a7ba38df219b91fc6a7211b05c81231af90313148c2a5f6d77ea877",
     "internal/jaa/career_automation/live_canary_snapshot_document.py": "4a8cb89d5dc8b2268d5dcfb3aaa71d7c60773c5255e4537b0ad9676fbceedfb0",
-    "internal/jaa/career_automation/live_vacancy_discovery.py": "14984e8b6362ad995e0c247ea725906e76b515f5aa31ed3904a65e7fbf147b4f",
+    "internal/jaa/career_automation/live_vacancy_discovery.py": "0b2ab21f7683652a597092e179164bb068ad738b28edcb0ed1dfb2ef363e2428",
     "internal/jaa/career_automation/market_aligner_handoff.py": "d46ea482054fcdb4a07572818943cf9573c1a7d7ced6295c918e8a2e0be90c51",
     "internal/jaa/career_automation/market_aligner_preparation.py": "a2ed8e647e961e41de246c7ce79ec629dca9a13e3cea91845bd434c8bed44615",
     "internal/jaa/career_automation/migrations.py": "85be2549462993af1178b2fff6676e49cff16d7c398214b2b35fbfd273b2c067",
@@ -668,7 +668,7 @@
     "internal/jaa/test_jaa16_release_certification.py": "33888e4846e35be9f3fc246437604a76b544bea5d4eec8542699a2efa39b9280",
     "internal/jaa/test_jaa_certification_profile.py": "dfa5052d4f45a05b87f159b83f0a685feef2a331668abb0dc1ad55d0ef916ca8",
     "internal/jaa/test_jaa_module_boundaries.py": "4797e8e8c7b61becbb58108990c50528b693255cc8aa15a5bf9b244fd4735931",
-    "internal/jaa/test_live_vacancy_discovery.py": "e3c2e7081239ac20f663882bf0f65de65950eebfb5ef49132eff352a5685ffa4",
+    "internal/jaa/test_live_vacancy_discovery.py": "1122d04a2233e6183af68d17b353156b8490d8a90cfc30caf96776756466a430",
     "internal/jaa/test_ma_native_browser_diagnostic.py": "7414a2eb3ef2e2ea0da2bc0a6bcf2a9b42ab72bd1548294c1a2b76cac3c7e3b7",
     "internal/jaa/test_nongreenhouse_fit_projection.py": "13d601e30c8b4d232c63f319cb39c2b16200d51d4270a8bcaa5c7bfb458fb26c",
     "internal/jaa/test_nongreenhouse_provider_alias.py": "98b57c26cb4251c8c35b4e6e5004fdf3ff616bad419450de669f8de298bd1aea",

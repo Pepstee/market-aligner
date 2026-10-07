@@ -660,9 +660,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/live_vacancy_discovery.py": {
-    "mtime": 1788246507.2727973,
-    "seen": 1790775868.5198352,
-    "ast_hash": "3902fdd9b8c055a6f9dda1ace93eda12",
+    "mtime": 1791345254.473941,
+    "seen": 1791345350.0116105,
+    "ast_hash": "118d144a55e986277c3ef7dbfef38d25",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/migrations.py": {
@@ -3204,9 +3204,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_live_vacancy_discovery.py": {
-    "mtime": 1788246507.327775,
-    "seen": 1790775868.5202768,
-    "ast_hash": "6e9791f9e16c4409932d0e710447a41f",
+    "mtime": 1791345254.505941,
+    "seen": 1791345350.012104,
+    "ast_hash": "fc6f39fb35b8e139014a9702a55b1c58",
     "semantic_hash": ""
   },
   "internal/jaa/test_nongreenhouse_fit_projection.py": {

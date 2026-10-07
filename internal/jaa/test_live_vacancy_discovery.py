@@ -1,4 +1,6 @@
 import hashlib
+import html
+import json
 
 import pytest
 
@@ -165,6 +167,138 @@ def test_immediate_browser_body_reverification_rejects_requirement_swap() -> Non
             b"<h1>Graduate Engineer</h1><p>Requires C++ embedded firmware, "
             b"hardware debugging, circuit design, and security clearance.</p>",
         )
+
+
+def test_greenhouse_json_content_matches_rendered_html_and_keeps_raw_hashes() -> None:
+    content = (
+        "<h1>Engineer</h1><ul><li>Python experience is required.</li>"
+        "<li>Kafka not required.</li><li>Familiarity with Redis.</li></ul>"
+    )
+    source = json.dumps(
+        {
+            "content": html.escape(content),
+            "content_text": "Python, Kafka, and Redis are duplicated metadata.",
+            "title": "Ignored metadata",
+        }
+    ).encode()
+    destination = (
+        content + "<div>Indicates a required field</div>"
+    ).encode()
+
+    receipt = verify_vacancy_body_equivalence(source, destination)
+
+    assert receipt["equivalent"] is True
+    assert receipt["source_body_sha256"] == hashlib.sha256(source).hexdigest()
+    assert receipt["destination_body_sha256"] == hashlib.sha256(destination).hexdigest()
+    assert receipt["source_material_requirement_sha256s"] == receipt[
+        "destination_material_requirement_sha256s"
+    ]
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "Java experience is required.",
+        "C++ experience is required.",
+    ),
+)
+def test_greenhouse_json_content_rejects_changed_technology_constraint(
+    replacement: str,
+) -> None:
+    source_content = (
+        "<h1>Engineer</h1><p>Python experience is required.</p>"
+        "<p>Kafka not required.</p><p>Familiarity with Redis.</p>"
+    )
+    source = json.dumps({"content": html.escape(source_content)}).encode()
+    destination = source_content.replace(
+        "Python experience is required.", replacement
+    ).encode()
+
+    with pytest.raises(ValueError, match="description differs"):
+        verify_vacancy_body_equivalence(source, destination)
+
+
+def test_greenhouse_json_content_rejects_swapped_requirement_polarity() -> None:
+    source_content = (
+        "<h1>Engineer</h1><p>Python experience is required.</p>"
+        "<p>Kafka not required.</p><p>Familiarity with Redis.</p>"
+    )
+    source = json.dumps({"content": html.escape(source_content)}).encode()
+    destination = (
+        "<h1>Engineer</h1><p>Python experience is required.</p>"
+        "<p>Redis not required.</p><p>Familiarity with Kafka.</p>"
+    ).encode()
+
+    with pytest.raises(ValueError, match="description differs"):
+        verify_vacancy_body_equivalence(source, destination)
+
+
+def test_vacancy_equivalence_text_decodes_json_content_once_and_preserves_layout() -> None:
+    from career_automation.live_vacancy_discovery import _vacancy_equivalence_text
+
+    content = "<p>One &amp; two</p>\n<p>Three</p>"
+    wrapped = json.dumps({"content": html.escape(content)}).encode()
+    assert _vacancy_equivalence_text(wrapped) == content
+    assert _vacancy_equivalence_text(
+        b'{"content":"&amp;amp;lt;tag&amp;amp;gt;"}'
+    ) == "&amp;lt;tag&amp;gt;"
+    plain_html = b"<p>Plain HTML stays unchanged.</p>"
+    assert _vacancy_equivalence_text(plain_html) == plain_html.decode()
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        b'{"content":',
+        b'{"content_text":"usable fallback only"}',
+        b'{"content":7}',
+        b'{"content":"  \n "}',
+        b'[{"content":"not an object"}]',
+        b'{"content":"first","content":"second"}',
+    ),
+    ids=("invalid-json", "content-text-only", "non-string", "blank", "array", "duplicate-key"),
+)
+def test_vacancy_equivalence_json_rejects_invalid_or_unusable_content(
+    body: bytes,
+) -> None:
+    from career_automation.live_vacancy_discovery import _vacancy_equivalence_text
+
+    with pytest.raises(ValueError):
+        _vacancy_equivalence_text(body)
+
+
+def test_vacancy_equivalence_json_does_not_fallback_to_content_text() -> None:
+    source_content = (
+        "<h1>Engineer</h1><p>Support delivery across the team.</p>"
+    )
+    source = json.dumps(
+        {
+            "content": html.escape(source_content),
+            "content_text": "Python experience is required and Kafka is optional.",
+        }
+    ).encode()
+    destination = (
+        source_content
+        + "<p>Python experience is required.</p><p>Kafka is optional.</p>"
+    ).encode()
+
+    with pytest.raises(ValueError, match="description differs"):
+        verify_vacancy_body_equivalence(source, destination)
+
+
+def test_only_exact_indicates_required_field_notice_is_provider_chrome() -> None:
+    source = b"<main><p>Python experience is required.</p></main>"
+    exact = (
+        b"<main><p>Python experience is required.</p>"
+        b"<div>Indicates a required field</div></main>"
+    )
+    extended = (
+        b"<main><p>Python experience is required.</p>"
+        b"<div>Indicates a required field for applicants.</div></main>"
+    )
+    assert verify_vacancy_body_equivalence(source, exact)["equivalent"] is True
+    with pytest.raises(ValueError, match="description differs"):
+        verify_vacancy_body_equivalence(source, extended)
 
 
 def test_long_common_body_cannot_hide_critical_requirement_replacement() -> None:
