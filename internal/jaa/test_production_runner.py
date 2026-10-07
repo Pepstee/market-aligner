@@ -1718,8 +1718,12 @@ def test_runner_terminalizes_observed_provider_boundary_before_preparation(
 
 
 @pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("inherited_pythonpath", [None, "/stale/market-aligner/site-packages"])
 def test_private_worker_channel_archives_real_child_revisions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: bool,
+    inherited_pythonpath: str | None,
 ) -> None:
     """Real child/pipe/archive, synthetic generator only; no candidate corpus."""
     import base64
@@ -1727,6 +1731,10 @@ def test_private_worker_channel_archives_real_child_revisions(
     import subprocess
     import sys
 
+    if inherited_pythonpath is None:
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+    else:
+        monkeypatch.setenv("PYTHONPATH", inherited_pythonpath)
     sink, _recorder = _durable_sink(tmp_path)
     monkeypatch.setattr(sink, "_generator_source_identity", lambda: ("a" * 40, {}))
     original_popen = subprocess.Popen
@@ -1734,9 +1742,13 @@ def test_private_worker_channel_archives_real_child_revisions(
     sentinel = "SYNTHETIC-PRIVATE-REVISION-AND-ERROR"
     script = '''
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from career_automation import candidate_generation_worker as worker
 from career_automation.candidate_application_factory import CandidateApplicationPackage
+expected_worker_path = __EXPECTED_WORKER_PATH__
+if Path(worker.__file__).resolve() != Path(expected_worker_path).resolve():
+    raise AssertionError("child imported a different candidate worker")
 
 def generate(**arguments):
     for role in ("generation.inputs", "document.source_inputs", "document.cv.constraints",
@@ -1750,15 +1762,14 @@ def generate(**arguments):
                                        vacancy_requirements=())
 worker.build_candidate_application_package = generate
 raise SystemExit(worker.main())
-'''.replace("SENTINEL", repr(sentinel)).replace("FAIL", repr(failure))
+'''.replace("__EXPECTED_WORKER_PATH__", repr(str(ROOT / "career_automation" / "candidate_generation_worker.py"))).replace("SENTINEL", repr(sentinel)).replace("FAIL", repr(failure))
 
     def launch(command, **kwargs):
         if command == [sys.executable, "-m", "career_automation.candidate_generation_worker"]:
-            # Keep the real parent transport, substitute only the corpus-dependent
-            # generator inside the child. Paths are explicit since parent changes cwd.
-            kwargs["env"]["PYTHONPATH"] = os.pathsep.join(
-                [str(ROOT), str(ROOT.parents[1] / "src")]
-            )
+            expected_pythonpath = [str(ROOT), str(ROOT.parents[1] / "src")]
+            if inherited_pythonpath:
+                expected_pythonpath.append(inherited_pythonpath)
+            assert kwargs["env"]["PYTHONPATH"] == os.pathsep.join(expected_pythonpath)
             observed["stdout"] = os.dup(kwargs["stdout"].fileno())
             observed["stderr"] = os.dup(kwargs["stderr"].fileno())
             return original_popen([sys.executable, "-c", script], **kwargs)
@@ -1883,6 +1894,11 @@ def test_current_pre_review_worker_archives_typed_package_and_exact_inventory(
     script = f'''\
 import os
 import pickle
+from pathlib import Path
+from career_automation import candidate_generation_worker
+expected_worker_path = {str(ROOT / "career_automation" / "candidate_generation_worker.py")!r}
+if Path(candidate_generation_worker.__file__).resolve() != Path(expected_worker_path).resolve():
+    raise AssertionError("child imported a different candidate worker")
 from career_automation import production_preparation_runner
 expected = {{"application_id": {application_id!r}, **{pre_review_kwargs!r}}}
 def run_pre_review(**kwargs):
@@ -1891,16 +1907,16 @@ def run_pre_review(**kwargs):
     with open(os.environ["JAA_TEST_PREPARATION_PICKLE"], "rb") as handle:
         return pickle.load(handle)
 production_preparation_runner.run_production_market_pre_review = run_pre_review
-from career_automation import candidate_generation_worker
 candidate_generation_worker.build_candidate_application_package = lambda **_: (_ for _ in ()).throw(AssertionError("legacy builder used"))
 raise SystemExit(candidate_generation_worker.main())
 '''
 
     def launch(command, **kwargs):
         if command == [sys.executable, "-m", "career_automation.candidate_generation_worker"]:
-            kwargs["env"]["PYTHONPATH"] = os.pathsep.join(
-                [str(ROOT), str(ROOT.parents[1] / "src")]
-            )
+            assert kwargs["env"]["PYTHONPATH"].split(os.pathsep)[:2] == [
+                str(ROOT),
+                str(ROOT.parents[1] / "src"),
+            ]
             kwargs["env"]["JAA_TEST_PREPARATION_PICKLE"] = str(preparation_path)
             observed["stdout"] = os.dup(kwargs["stdout"].fileno())
             observed["stderr"] = os.dup(kwargs["stderr"].fileno())

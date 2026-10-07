@@ -780,9 +780,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_runner.py": {
-    "mtime": 1791387491.7452567,
-    "seen": 1791387747.6151636,
-    "ast_hash": "6f30d5f13e42c629a70e64b8ff3a1f05",
+    "mtime": 1791389783.8452225,
+    "seen": 1791390007.2150834,
+    "ast_hash": "988434cd355074185fda8d294629d4a2",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/provider_observation_authority.py": {
@@ -3252,9 +3252,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_production_runner.py": {
-    "mtime": 1791387529.9812512,
-    "seen": 1791387747.615526,
-    "ast_hash": "1d40093eba1c6963ec00b43d086c78fa",
+    "mtime": 1791389795.369222,
+    "seen": 1791390007.2154603,
+    "ast_hash": "f9f5b66af95a52ce87ec39833c271b82",
     "semantic_hash": ""
   },
   "internal/jaa/test_provider_observation_authority.py": {
@@ -4068,9 +4068,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/cv_generation/editorial_composition.py": {
-    "mtime": 1791370494.389538,
-    "seen": 1791371424.6962922,
-    "ast_hash": "2f127e055913c0de52a3912946633dfb",
+    "mtime": 1791389692.4292285,
+    "seen": 1791390007.2151318,
+    "ast_hash": "145db2b22ce094f9c753d87da7dab5a9",
     "semantic_hash": ""
   },
   "internal/jaa/form_filling/ats_forensics.py": {
@@ -4146,9 +4146,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_cover_letter_editorial_parity.py": {
-    "mtime": 1791371483.393525,
-    "seen": 1791371536.1769497,
-    "ast_hash": "9feae0c8ef847312f3d01f3fd2cac3eb",
+    "mtime": 1791389802.5252235,
+    "seen": 1791390007.2153082,
+    "ast_hash": "5d00b58b6e37cb0547c9ed85b9700408",
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_adversarial_rebuild.py": {
@@ -4176,9 +4176,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_editorial_composition.py": {
-    "mtime": 1791369446.429557,
-    "seen": 1791369528.6657774,
-    "ast_hash": "d4e930fc6b88ea9773e999d2e10a02a7",
+    "mtime": 1791389783.8772223,
+    "seen": 1791390007.215316,
+    "ast_hash": "668557983aabf7b4951ab775af36cae4",
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_import_order.py": {

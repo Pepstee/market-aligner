@@ -396,6 +396,13 @@ class GeneratedRevisionSink:
                 read_fd, write_fd = os.pipe()
                 with os.fdopen(read_fd, "rb") as revisions:
                     environment = dict(os.environ)
+                    package_root = Path(__file__).resolve().parents[1]
+                    project_src = package_root.parents[1] / "src"
+                    pythonpath = [str(package_root), str(project_src)]
+                    inherited_pythonpath = environment.get("PYTHONPATH")
+                    if inherited_pythonpath:
+                        pythonpath.append(inherited_pythonpath)
+                    environment["PYTHONPATH"] = os.pathsep.join(pythonpath)
                     environment[GENERATION_OUTPUT_FD_ENV] = str(write_fd)
                     try:
                         process = subprocess.Popen(

@@ -785,6 +785,16 @@ def test_current_runtime_writer_request_exposes_available_claims() -> None:
         "second copy" in instruction
         for instruction in writer_request["instructions"]
     )
+    current_framing_instruction = next(
+        instruction
+        for instruction in writer_request["instructions"]
+        if instruction.startswith("Omit whole claims that narrate internal governance")
+    )
+    assert "evidence origin or provenance" in current_framing_instruction
+    assert "weakness" in current_framing_instruction
+    assert "irrelevant to the target role" in current_framing_instruction
+    assert "genuine AI/LLM technical experience" in current_framing_instruction
+    assert "Preserve every material caveat, qualifier, limitation, and negation" in current_framing_instruction
 
 
 def _current_education_fixture(education_text: str, graduation_month_year: str | None):

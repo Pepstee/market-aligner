@@ -567,6 +567,17 @@ def test_current_cover_letter_runtime_binds_writer_and_humanizer_prompts() -> No
         "Add no work-rights text, AI disclosure, unsupported tool claim, or internal process commentary."
         in writer_instructions
     )
+    current_framing_instruction = next(
+        instruction
+        for instruction in writer_request["instructions"]
+        if instruction.startswith("Omit whole claims that narrate internal governance")
+    )
+    assert "evidence provenance" in current_framing_instruction
+    assert "apologize, admit weakness, or use defensive framing" in current_framing_instruction
+    assert "Genuine AI/LLM technical experience" in current_framing_instruction
+    assert "employer facts remain exact" in current_framing_instruction
+    assert "first person for candidate statements" in writer_instructions
+    assert "only once" in writer_instructions
     assert writer_request["claim_section_policy"] == humanizer_request[
         "claim_section_policy"
     ]
