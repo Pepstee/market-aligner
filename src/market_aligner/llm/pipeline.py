@@ -8,6 +8,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
+from market_aligner.assessment.geography import explicit_country_code
 from market_aligner.applications.canonical import (
     ContractValidationError,
     PROFILE_ID_PATTERN,
@@ -287,9 +288,15 @@ def _structured_work_country_quote_supports(
     Code and quote are the original extracted facts. Only ``location.name``
     and ``offices`` are read from the same verified raw public posting.
     """
-    if type(code) is not str or code not in {"GB", "UK"}:
+    if type(code) is not str:
         return False
     if not isinstance(quote, str) or not quote.strip():
+        return False
+    try:
+        expected_country_code = explicit_country_code(code)
+    except ValueError:
+        return False
+    if expected_country_code is None:
         return False
     if not isinstance(source_listing, Mapping):
         return False
@@ -305,8 +312,46 @@ def _structured_work_country_quote_supports(
 
     normalized_quote = normalize(quote)
     normalized_location = normalize(location_name)
+    scope_markers = {
+        "not", "no", "outside", "except", "excluding", "if", "unless", "or",
+        "either", "anywhere", "worldwide", "emea", "eu", "eea",
+    }
+
+    def has_scope_marker(text: str) -> bool:
+        return any(token in scope_markers for token in re.findall(r"[a-z]+", normalize(text)))
+
+    if has_scope_marker(location_name) or has_scope_marker(quote):
+        return False
+
+    location_parts = [part.strip() for part in location_name.split(",")]
+    if any(not part for part in location_parts):
+        return False
+    if any(
+        re.fullmatch(r"[A-Za-z]{2}", part)
+        and explicit_country_code(part) is None
+        for part in location_parts
+    ):
+        return False
+    location_country_codes = [
+        country_code
+        for part in location_parts
+        if (country_code := explicit_country_code(part)) is not None
+    ]
     if (
-        code == "GB"
+        len(location_country_codes) != 1
+        or location_country_codes[0] != expected_country_code
+    ):
+        return False
+    if (
+        normalized_quote == normalized_location
+        or explicit_country_code(quote) == expected_country_code
+    ):
+        return True
+
+    if expected_country_code != "GB":
+        return False
+    if (
+        expected_country_code == "GB"
         and normalized_quote == normalized_location
         and (
             normalized_location == "united kingdom"
@@ -405,7 +450,7 @@ def accept_vacancy_eligibility_facts(
                 )
             ):
                 raise ContractValidationError(
-                    "vacancy eligibility country code is absent from its quote"
+                    f"vacancy eligibility {evidence.field} country code is absent from its quote"
                 )
             if evidence.field == "required_residence" and not any(
                 token in folded for token in ("reside", "resident", "residency")

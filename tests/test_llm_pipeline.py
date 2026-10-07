@@ -1574,6 +1574,100 @@ class VacancyEligibilityContractTests(unittest.TestCase):
             accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs),
         )
 
+    def test_work_jurisdiction_accepts_supported_structured_country_aliases(self) -> None:
+        for code, quote, location_name in (
+            ("DE", "Germany", "Berlin, Germany"),
+            ("DE", "Berlin, Germany", "Berlin, Germany"),
+            ("FR", "France", "Paris, France"),
+            ("FR", "Paris, France", "Paris, France"),
+        ):
+            with self.subTest(code=code, quote=quote, location=location_name):
+                raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+                    code=code,
+                    quote=quote,
+                    description=quote,
+                    location_name=location_name,
+                    offices=None,
+                )
+                self.assertEqual(
+                    facts,
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    ),
+                )
+
+    def test_work_jurisdiction_rejects_unsupported_ambiguous_or_unrelated_locations(
+        self,
+    ) -> None:
+        cases = (
+            ("FR", "Germany", "Berlin, Germany"),
+            ("DE", "Germany", "Berlin, Germany, France"),
+            ("GB", "France, United Kingdom", "France, United Kingdom"),
+            ("GB", "United Kingdom", "France, United Kingdom"),
+            ("DE", "not in, Germany", "not in, Germany"),
+            ("DE", "not,in,Germany", "not,in,Germany"),
+            ("DE", "not/in, Germany", "not/in, Germany"),
+            ("DE", "no jobs in, Germany", "no jobs in, Germany"),
+            ("GB", "US, United Kingdom", "US, United Kingdom"),
+            ("DE", "Berlin", "Berlin"),
+            ("DE", "This role is remote", "Berlin, Germany"),
+            ("US", "United States", "New York, United States"),
+        )
+        for code, quote, location_name in cases:
+            with self.subTest(code=code, quote=quote, location=location_name):
+                raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+                    code=code,
+                    quote=quote,
+                    description=quote,
+                    location_name=location_name,
+                    offices=None,
+                )
+                with self.assertRaisesRegex(
+                    ContractValidationError, "country code is absent"
+                ):
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    )
+
+    def test_country_quote_error_names_only_the_validated_field(self) -> None:
+        for field, quote, location_name in (
+            ("work_jurisdiction", "not,in,Germany", "not,in,Germany"),
+            ("required_residence", "residency required in Berlin", "Berlin, Germany"),
+        ):
+            with self.subTest(field=field):
+                raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+                    code="DE",
+                    quote=quote,
+                    description=quote,
+                    location_name=location_name,
+                    offices=None,
+                    field=field,
+                )
+                with self.assertRaises(ContractValidationError) as raised:
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    )
+                self.assertEqual(
+                    f"vacancy eligibility {field} country code is absent from its quote",
+                    str(raised.exception),
+                )
+
+    def test_structured_country_alias_does_not_establish_required_residence(
+        self,
+    ) -> None:
+        raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+            code="DE",
+            quote="Germany",
+            description="Germany",
+            location_name="Berlin, Germany",
+            offices=None,
+            field="required_residence",
+        )
+        with self.assertRaisesRegex(
+            ContractValidationError, "country code is absent"
+        ):
+            accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs)
+
     def test_work_jurisdiction_rejects_negated_and_multicountry_quotes(self) -> None:
         for quote in (
             "outside, United Kingdom",
