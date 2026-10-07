@@ -576,7 +576,7 @@ def _read_current_runtime_admission_index(
             "current runtime admission store changed while reading"
         )
     by_application: dict[str, sqlite3.Row] = {}
-    identity_roots: dict[tuple[str, str, str], str] = {}
+    identity_roots: dict[str, str] = {}
     for row in rows:
         application_id = row["application_id"]
         root_sha256 = row["handoff_root_sha256"]
@@ -617,11 +617,10 @@ def _read_current_runtime_admission_index(
                 "current runtime admission index handoff differs"
             ) from exc
         payload = handoff.payload
-        identity = (
-            str(payload["profile_id"]),
-            str(payload["profile_version"]),
-            str(payload["job_key"]),
-        )
+        identity = handoff.logical_identity_sha256
+        identity_document = canonical_json_bytes(
+            handoff.logical_identity_document
+        ).decode("utf-8")
         if (
             handoff.application_id != application_id
             or handoff.root_sha256 != root_sha256
@@ -631,7 +630,15 @@ def _read_current_runtime_admission_index(
             or row["profile_id"] != profile_id
             or row["profile_version"] != profile_version
             or row["job_key"] != payload["job_key"]
-            or application_id in by_application
+            or row["logical_identity_json"] != identity_document
+            or row["logical_identity_sha256"] != identity
+        ):
+            connection.close()
+            raise ProductionHandoffAdmissionError(
+                "current runtime admission index handoff differs"
+            )
+        if (
+            application_id in by_application
             or (identity in identity_roots and identity_roots[identity] != root_sha256)
         ):
             connection.close()

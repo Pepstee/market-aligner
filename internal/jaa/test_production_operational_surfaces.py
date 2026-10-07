@@ -82,6 +82,176 @@ def _deployment(tmp_path: Path) -> admission_runner._ProductionAdmissionDeployme
     )
 
 
+def _synthetic_current_admission_index(monkeypatch, tmp_path, intent_hashes):
+    deployment = _deployment(tmp_path)
+    deployment.admission_root.mkdir(parents=True, mode=0o700)
+    database = deployment.admission_root / "admissions.sqlite3"
+    database.write_bytes(b"synthetic admission index fixture")
+    os.chmod(database, 0o600)
+    profile_id = "prf_" + "1" * 32
+    profile_version = "v1.10"
+    job_key = "greenhouse:synthetic:8242603"
+    rows = []
+    parsed_by_bytes = {}
+    for row_index, intent_hash in enumerate(intent_hashes):
+        original_bytes = f"synthetic-current-handoff-{row_index}".encode("ascii")
+        root_sha256 = hashlib.sha256(original_bytes).hexdigest()
+        identity_document = {
+            "assessment_receipt_sha256": "2" * 64,
+            "candidate_intent_sha256": intent_hash,
+            "eligibility_receipt_sha256": "3" * 64,
+            "job_key": job_key,
+            "profile_id": profile_id,
+            "profile_version": profile_version,
+            "selection_receipt_sha256": "4" * 64,
+            "vacancy_snapshot_sha256": "5" * 64,
+        }
+        identity_json = canonical_json_bytes(identity_document).decode("utf-8")
+        logical_identity_sha256 = hashlib.sha256(
+            canonical_json_bytes(identity_document)
+        ).hexdigest()
+        application_id = "app_" + logical_identity_sha256
+        rows.append(
+            {
+                "application_id": application_id,
+                "admission_kind": admission_runner.ADMISSION_KIND_CURRENT_RUNTIME,
+                "environment": admission_runner.CURRENT_RUNTIME_ENVIRONMENT,
+                "authority_scope": admission_runner.CURRENT_RUNTIME_AUTHORITY_SCOPE,
+                "emission_profile": "current_runtime_non_release_v1",
+                "logical_identity_json": identity_json,
+                "logical_identity_sha256": logical_identity_sha256,
+                "trust_mode": admission_runner.CURRENT_RUNTIME_TRUST_MODE,
+                "trust_root_id": admission_runner.CURRENT_RUNTIME_TRUST_ROOT_ID,
+                "producer_product": "market-aligner",
+                "producer_commit_sha": COMMIT,
+                "profile_id": profile_id,
+                "profile_version": profile_version,
+                "job_key": job_key,
+                "handoff_root_sha256": root_sha256,
+                "original_bytes": original_bytes,
+                "freshness_provenance": admission_runner.CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+                "sealed": 1,
+            }
+        )
+        parsed_by_bytes[original_bytes] = SimpleNamespace(
+            application_id=application_id,
+            root_sha256=root_sha256,
+            logical_identity_document=identity_document,
+            logical_identity_sha256=logical_identity_sha256,
+            payload={
+                "profile_id": profile_id,
+                "profile_version": profile_version,
+                "job_key": job_key,
+                "candidate_intent_sha256": intent_hash,
+                "producer": {"commit_sha": COMMIT, "product": "market-aligner"},
+            },
+        )
+
+    class SyntheticConnection:
+        def __init__(self):
+            self.closed = False
+            self.row_factory = None
+
+        def execute(self, *_args, **_kwargs):
+            return SimpleNamespace(fetchall=lambda: rows)
+
+        def close(self):
+            self.closed = True
+
+    connection = SyntheticConnection()
+    monkeypatch.setattr(
+        admission_runner,
+        "verify_current_runtime_admission_schema",
+        lambda _connection: "synthetic-schema",
+    )
+    monkeypatch.setattr(
+        admission_runner,
+        "_parse_current_runtime_handoff",
+        parsed_by_bytes.__getitem__,
+    )
+    monkeypatch.setattr(
+        admission_runner,
+        "sqlite3",
+        SimpleNamespace(
+            connect=lambda *_args, **_kwargs: connection,
+            Row=object,
+            Error=RuntimeError,
+        ),
+    )
+    return deployment, profile_id, profile_version, rows, connection
+
+
+def test_current_admission_index_distinguishes_candidate_intent_identities(
+    monkeypatch, tmp_path
+):
+    deployment, profile_id, profile_version, rows, connection = (
+        _synthetic_current_admission_index(
+            monkeypatch, tmp_path, ("8" * 64, "9" * 64)
+        )
+    )
+
+    indexed_connection, indexed_rows = (
+        admission_runner._read_current_runtime_admission_index(
+            deployment,
+            profile_id=profile_id,
+            profile_version=profile_version,
+        )
+    )
+
+    assert indexed_connection is connection
+    assert len(rows) == len(indexed_rows) == 2
+    assert len({row["logical_identity_sha256"] for row in rows}) == 2
+    assert connection.closed is False
+    connection.close()
+
+
+def test_current_admission_index_refuses_conflicting_roots_for_same_identity(
+    monkeypatch, tmp_path
+):
+    deployment, profile_id, profile_version, rows, connection = (
+        _synthetic_current_admission_index(
+            monkeypatch, tmp_path, ("8" * 64, "8" * 64)
+        )
+    )
+
+    assert rows[0]["logical_identity_sha256"] == rows[1]["logical_identity_sha256"]
+    assert rows[0]["handoff_root_sha256"] != rows[1]["handoff_root_sha256"]
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="roots are ambiguous",
+    ):
+        admission_runner._read_current_runtime_admission_index(
+            deployment,
+            profile_id=profile_id,
+            profile_version=profile_version,
+        )
+    assert connection.closed is True
+
+
+@pytest.mark.parametrize(
+    "binding_field", ("logical_identity_json", "logical_identity_sha256")
+)
+def test_current_admission_index_binds_stored_logical_identity(
+    monkeypatch, tmp_path, binding_field
+):
+    deployment, profile_id, profile_version, rows, connection = (
+        _synthetic_current_admission_index(monkeypatch, tmp_path, ("8" * 64,))
+    )
+    rows[0][binding_field] = "mismatched stored identity"
+
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="index handoff differs",
+    ):
+        admission_runner._read_current_runtime_admission_index(
+            deployment,
+            profile_id=profile_id,
+            profile_version=profile_version,
+        )
+
+    assert connection.closed is True
+
+
 def _execution(deployment, **changes) -> Path:
     basis = {
         "application_id": "app_" + "1" * 64,
