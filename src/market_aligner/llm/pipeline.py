@@ -191,6 +191,17 @@ _MINIMUM_YEARS_PATTERNS = (
         r"a minimum of (?P<num>\d+(?:\.\d+)?) years of experience is required\.?"
     ),
 )
+_PLUS_MINIMUM_YEARS_PATTERN = re.compile(
+    r"(?P<num>\d+(?:\.\d+)?)\+ years of "
+    r"(?:[a-z][a-z'-]* ){0,8}experience"
+    r"(?:, with [a-z][a-z'-]*(?: [a-z][a-z'-]*){0,8})?\.?"
+)
+_PLUS_MINIMUM_YEARS_DISQUALIFIERS = re.compile(
+    r"\b(?:not|no|never|without|unless|except|less|fewer|under|below|up to|"
+    r"at most|maximum|minimum|approximately|approx|around|about|roughly|"
+    r"preferred|optional|between|more than|zero|one|two|three|four|five|"
+    r"six|seven|eight|nine|ten)\b"
+)
 _CONTRACT_QUOTE_PATTERNS = {
     "apprenticeship": (re.compile(r"this is an apprenticeship\.?"),),
     "contract": (re.compile(r"this is a contract position\.?"),),
@@ -223,12 +234,20 @@ def quote_supports_eligibility(field: str, value: object, quote: object) -> bool
             return False
         if value < 0:
             return False
-        return any(
+        if any(
             match is not None and float(match.group("num")) == expected
             for match in (
                 pattern.fullmatch(normalized)
                 for pattern in _MINIMUM_YEARS_PATTERNS
             )
+        ):
+            return True
+        plus_match = _PLUS_MINIMUM_YEARS_PATTERN.fullmatch(normalized)
+        return bool(
+            plus_match is not None
+            and len(re.findall(r"\d+(?:\.\d+)?", normalized)) == 1
+            and _PLUS_MINIMUM_YEARS_DISQUALIFIERS.search(normalized) is None
+            and float(plus_match.group("num")) == expected
         )
     if field == "contract_type" and isinstance(value, str):
         patterns = _CONTRACT_QUOTE_PATTERNS.get(value)

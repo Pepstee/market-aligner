@@ -1,7 +1,7 @@
-# Graph Report - market-aligner  (2026-10-07)
+# Graph Report - market-aligner  (2026-10-08)
 
 ## Corpus Check
-- 787 files · ~1,156,504 words
+- 787 files · ~1,156,697 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 11 file(s) not represented in the graph (top: (none) 4, .jsonl 4, .lock 2)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `ebb75574`
+- Built from commit: `5662b6d9`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
