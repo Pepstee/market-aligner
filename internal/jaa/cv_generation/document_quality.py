@@ -482,6 +482,13 @@ def _normalized_lines(text: str) -> tuple[str, ...]:
     return tuple(" ".join(line.split()) for line in text.splitlines() if line.strip())
 
 
+def _expected_lines(artifact: PdfArtifact) -> tuple[str, ...]:
+    """Rendered lines under the per-line whitespace normalization for Poppler."""
+    return _normalized_lines(
+        "\n".join(line for page in artifact.rendered_lines for line in page)
+    )
+
+
 def _duplicate_prose(text: str) -> tuple[str, ...]:
     seen: set[str] = set()
     duplicates: set[str] = set()
@@ -596,10 +603,7 @@ def _verify_pdf(
     layout_path = directory / f"{artifact.document_kind}.txt"
     _run(runtime, "pdftotext", "-layout", str(pdf_path), str(layout_path))
     poppler_text = layout_path.read_text(encoding="utf-8")
-    expected_lines = tuple(
-        line for page in artifact.rendered_lines for line in page if line.strip()
-    )
-    if _normalized_lines(poppler_text) != expected_lines:
+    if _normalized_lines(poppler_text) != _expected_lines(artifact):
         raise DocumentQualityError("Poppler ATS text order differs from rendered order")
     bbox_path = directory / f"{artifact.document_kind}.html"
     _run(runtime, "pdftotext", "-bbox-layout", str(pdf_path), str(bbox_path))
