@@ -4794,9 +4794,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_cover_letter_closing_rendering.py": {
-    "mtime": 1791360101.0737069,
-    "seen": 1791360710.8876224,
-    "ast_hash": "29238e44a988cb0d7f1fc0e96a410960",
+    "mtime": 1791361070.3057058,
+    "seen": 1791361121.7617629,
+    "ast_hash": "dc95d2d3788c669c9645776f4f44bf4c",
     "semantic_hash": ""
   }
 }
