@@ -1814,8 +1814,17 @@ def test_current_pre_review_worker_archives_typed_package_and_exact_inventory(
 ) -> None:
     import os
     import subprocess
+    from test_current_review_source_binding import (
+        _admitted_context,
+        _child_materialization,
+        _original_source,
+    )
 
-    source, _strategy = _source()
+    source = _original_source()
+    materialization_context = _admitted_context(monkeypatch, source)
+    child_materialization, child_decision_authority = _child_materialization(
+        materialization_context
+    )
     artifacts = render_pdf_artifacts(source)
     facts = {row.sentence_id: row.text for row in source.facts}
     constraint_receipt = validate_generated_cv(
@@ -1838,9 +1847,11 @@ def test_current_pre_review_worker_archives_typed_package_and_exact_inventory(
     package = CandidateApplicationPackage(
         source=source,
         artifacts=artifacts,
-        vacancy_requirements=("synthetic requirement",),
+        vacancy_requirements=child_materialization.vacancy_requirements,
         materialized_source=source,
         source_policy_receipt=constraint_receipt,
+        current_runtime_materialization=child_materialization,
+        current_runtime_decision_authority=child_decision_authority,
     )
     preparation = MarketApplicationPreparation(
         preparation_id="1" * 64,
@@ -1862,7 +1873,7 @@ def test_current_pre_review_worker_archives_typed_package_and_exact_inventory(
     )
     original_popen = subprocess.Popen
     observed: dict[str, int] = {}
-    application_id = "app_" + "b" * 64
+    application_id = materialization_context.application_id
     pre_review_kwargs = {
         "current_runtime_config_path": str(tmp_path / "runtime.json"),
         "current_runtime_config_sha256": "c" * 64,
@@ -1898,11 +1909,13 @@ raise SystemExit(candidate_generation_worker.main())
 
     monkeypatch.setattr(runner_module.subprocess, "Popen", launch)
     arguments = {
-        "decision_receipt": {},
-        "candidate_projection": {},
+        "decision_receipt": materialization_context.decision_receipt,
+        "candidate_projection": {
+            "projection_sha256": child_decision_authority.candidate_projection_sha256
+        },
         "job_key": source.job_key,
         "vacancy_sha256": source.vacancy_sha256,
-        "source_url": "https://example.test/current-job",
+        "source_url": child_decision_authority.source_url,
         "role_title": source.role_title,
         "company_name": source.company_name,
         "contact": source.contact,
@@ -1917,6 +1930,8 @@ raise SystemExit(candidate_generation_worker.main())
     assert type(generated) is CandidateApplicationPackage
     assert generated.materialized_source == source
     assert generated.source_policy_receipt == constraint_receipt
+    assert generated.current_runtime_materialization == child_materialization
+    assert generated.current_runtime_decision_authority == child_decision_authority
     assert sink._current_runtime_generation is True
     authority = sink.seal()
     assert authority.repository_head == "a" * 40
@@ -1942,6 +1957,13 @@ raise SystemExit(candidate_generation_worker.main())
     input_document = json.loads(revisions["generation.inputs"].value)
     assert input_document["application_id"] == application_id
     assert input_document["preparation_receipt_sha256"] == preparation.receipt_sha256
+    assert input_document["draft_materialization_receipt_sha256"] == (
+        child_materialization.receipt.receipt_sha256
+    )
+    assert input_document["draft_decision_authority_sha256"] == (
+        child_decision_authority.authority_sha256
+    )
+    assert input_document["schema_version"] == "jaa.current-runtime-generation-inputs.v2"
     assert input_document["materialized_source_sha256"] == source.content_sha256
     assert input_document["release_authority"] is False
     assert input_document["review_status"] == "not_performed"
@@ -1950,6 +1972,8 @@ raise SystemExit(candidate_generation_worker.main())
     assert restored.materialized_source == source
     assert restored.artifacts == artifacts
     assert restored.source_policy_receipt == constraint_receipt
+    assert restored.current_runtime_materialization == child_materialization
+    assert restored.current_runtime_decision_authority == child_decision_authority
     assert len(observed) == 2
     for descriptor in observed.values():
         os.close(descriptor)

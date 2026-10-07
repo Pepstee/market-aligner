@@ -75,7 +75,7 @@ MAX_CURRENT_EVIDENCE_TEXT_BYTES = 20_000
 MAX_CURRENT_EVIDENCE_SENTENCE_ID_BYTES = 256
 CURRENT_CLAIM_DOCUMENT_KINDS = ("cv", "cover_letter", "answer")
 CURRENT_CLAIM_EVIDENCE_SCHEMA_VERSION = "jaa.current-claim-review-evidence.v1"
-CURRENT_CLAIM_REVIEW_BINDING_SCHEMA_VERSION = "jaa.current-claim-review-binding.v1"
+CURRENT_CLAIM_REVIEW_BINDING_SCHEMA_VERSION = "jaa.current-claim-review-binding.v2"
 CURRENT_PROMPT_SCHEMA_VERSION = "jaa.application-sanity-prompt.v2.current-evidence.v1"
 
 
@@ -484,6 +484,9 @@ class CurrentClaimReviewEvidence:
 class CurrentClaimReviewBinding:
     application_id: str
     materialization_receipt_sha256: str
+    child_materialization_receipt_sha256: str
+    parent_decision_authority_sha256: str
+    child_decision_authority_sha256: str
     candidate_projection_sha256: str
     original_source_identity: str
     original_source_sha256: str
@@ -498,6 +501,9 @@ class CurrentClaimReviewBinding:
             for name in (
                 "application_id",
                 "materialization_receipt_sha256",
+                "child_materialization_receipt_sha256",
+                "parent_decision_authority_sha256",
+                "child_decision_authority_sha256",
                 "candidate_projection_sha256",
                 "original_source_identity",
                 "original_source_sha256",
@@ -515,6 +521,9 @@ class CurrentClaimReviewBinding:
                 not re.fullmatch(r"[0-9a-f]{64}", value)
                 for value in (
                     self.materialization_receipt_sha256,
+                    self.child_materialization_receipt_sha256,
+                    self.parent_decision_authority_sha256,
+                    self.child_decision_authority_sha256,
                     self.candidate_projection_sha256,
                     self.original_source_identity,
                     self.original_source_sha256,
@@ -530,6 +539,15 @@ class CurrentClaimReviewBinding:
             "schema_version": self.schema_version,
             "application_id": self.application_id,
             "materialization_receipt_sha256": self.materialization_receipt_sha256,
+            "child_materialization_receipt_sha256": (
+                self.child_materialization_receipt_sha256
+            ),
+            "parent_decision_authority_sha256": (
+                self.parent_decision_authority_sha256
+            ),
+            "child_decision_authority_sha256": (
+                self.child_decision_authority_sha256
+            ),
             "candidate_projection_sha256": self.candidate_projection_sha256,
             "original_source_identity": self.original_source_identity,
             "original_source_sha256": self.original_source_sha256,
@@ -562,6 +580,12 @@ class SanityReviewPackage:
         default=None, repr=False, compare=False
     )
     _current_emitted_source: object | None = field(
+        default=None, repr=False, compare=False
+    )
+    _current_child_materialization: object | None = field(
+        default=None, repr=False, compare=False
+    )
+    _current_child_decision_authority: object | None = field(
         default=None, repr=False, compare=False
     )
 
@@ -658,11 +682,15 @@ class SanityReviewPackage:
             if (
                 self._current_runtime_context is not None
                 or self._current_emitted_source is not None
+                or self._current_child_materialization is not None
+                or self._current_child_decision_authority is not None
             ):
                 raise ValueError("legacy review cannot carry current source context")
         elif (
             self._current_runtime_context is None
             or self._current_emitted_source is None
+            or self._current_child_materialization is None
+            or self._current_child_decision_authority is None
         ):
             raise ValueError("current review requires its retained native source context")
         if review_binding is not None:
@@ -693,6 +721,8 @@ class SanityReviewPackage:
             expected_binding, expected_rows = _current_review_binding_and_evidence(
                 emitted_source=self._current_emitted_source,
                 current_runtime_context=self._current_runtime_context,
+                child_materialization=self._current_child_materialization,
+                child_decision_authority=self._current_child_decision_authority,
                 form_answer_bindings=self.form_answer_bindings,
             )
             if review_binding != expected_binding or evidence_rows != expected_rows:
@@ -921,6 +951,8 @@ def _current_review_binding_and_evidence(
     *,
     emitted_source: object,
     current_runtime_context: object,
+    child_materialization: object,
+    child_decision_authority: object,
     form_answer_bindings: Sequence[tuple[str, str]],
 ) -> tuple[CurrentClaimReviewBinding, tuple[CurrentClaimReviewEvidence, ...]]:
     from career_automation.application_compiler import (
@@ -930,13 +962,28 @@ def _current_review_binding_and_evidence(
     )
     from career_automation.candidate_application_factory import (
         CURRENT_RUNTIME_ENVIRONMENT,
+        CandidateApplicationMaterialization,
         CandidateApplicationMaterializationReceipt,
+        MarketApplicationDecisionAuthority,
     )
-    from .market_aligner_preparation import MarketApplicationMaterializationContext
+    from .market_aligner_preparation import (
+        MarketApplicationMaterializationContext,
+        verify_current_runtime_materialization_carrier,
+    )
 
     if type(current_runtime_context) is not MarketApplicationMaterializationContext:
         raise TypeError("current review requires the exact admitted materialization context")
+    if (
+        type(child_materialization) is not CandidateApplicationMaterialization
+        or type(child_decision_authority) is not MarketApplicationDecisionAuthority
+    ):
+        raise TypeError("current review requires the exact child materialization")
     current_runtime_context.__post_init__()
+    verify_current_runtime_materialization_carrier(
+        parent_context=current_runtime_context,
+        child_materialization=child_materialization,
+        child_decision_authority=child_decision_authority,
+    )
     if (
         current_runtime_context.market_decision_authority.environment
         != CURRENT_RUNTIME_ENVIRONMENT
@@ -944,7 +991,8 @@ def _current_review_binding_and_evidence(
     ):
         raise ValueError("current review context or emitted source is invalid")
     original_source = current_runtime_context.materialization.source
-    receipt = current_runtime_context.materialization.receipt
+    parent_receipt = current_runtime_context.materialization.receipt
+    receipt = child_materialization.receipt
     if (
         type(original_source) is not ApplicationSource
         or type(receipt) is not CandidateApplicationMaterializationReceipt
@@ -1121,8 +1169,15 @@ def _current_review_binding_and_evidence(
         raise ValueError("current review has no source-bound candidate claims")
     binding = CurrentClaimReviewBinding(
         application_id=current_runtime_context.application_id,
-        materialization_receipt_sha256=receipt.receipt_sha256,
-        candidate_projection_sha256=receipt.candidate_projection_sha256,
+        materialization_receipt_sha256=parent_receipt.receipt_sha256,
+        child_materialization_receipt_sha256=receipt.receipt_sha256,
+        parent_decision_authority_sha256=(
+            current_runtime_context.market_decision_authority.authority_sha256
+        ),
+        child_decision_authority_sha256=(
+            child_decision_authority.authority_sha256
+        ),
+        candidate_projection_sha256=parent_receipt.candidate_projection_sha256,
         original_source_identity=original_source.source_id,
         original_source_sha256=original_source.content_sha256,
         emitted_source_identity=emitted_source.source_id,
@@ -1156,6 +1211,8 @@ def package_from_application(
     form_field_authorities: Sequence[tuple[str, str]] = (),
     form_inventory_sha256: str | None = None,
     current_runtime_context: object | None = None,
+    current_runtime_materialization: object | None = None,
+    current_runtime_decision_authority: object | None = None,
 ) -> SanityReviewPackage:
     """Build review data from the exact immutable application objects."""
     if current_runtime_context is None and any(
@@ -1163,6 +1220,11 @@ def package_from_application(
         for fact in getattr(source, "facts", ())
     ):
         raise ValueError("pending current drafts require original-source review")
+    if current_runtime_context is None and (
+        current_runtime_materialization is not None
+        or current_runtime_decision_authority is not None
+    ):
+        raise ValueError("legacy review cannot carry current materialization")
     canonical_fields = canonical_form_fields(
         source,
         questions,
@@ -1207,6 +1269,8 @@ def package_from_application(
         current_binding, current_evidence_rows = _current_review_binding_and_evidence(
             emitted_source=source,
             current_runtime_context=current_runtime_context,
+            child_materialization=current_runtime_materialization,
+            child_decision_authority=current_runtime_decision_authority,
             form_answer_bindings=answer_bindings,
         )
         approved_evidence_ids = tuple(
@@ -1237,6 +1301,14 @@ def package_from_application(
         current_claim_review_binding=current_binding,
         _current_runtime_context=current_runtime_context,
         _current_emitted_source=source if current_runtime_context is not None else None,
+        _current_child_materialization=(
+            current_runtime_materialization if current_runtime_context is not None else None
+        ),
+        _current_child_decision_authority=(
+            current_runtime_decision_authority
+            if current_runtime_context is not None
+            else None
+        ),
     )
 
 

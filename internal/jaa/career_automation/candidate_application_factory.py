@@ -6,7 +6,7 @@ import copy
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -306,6 +306,12 @@ class CandidateApplicationPackage:
     vacancy_requirements: tuple[str, ...]
     materialized_source: ApplicationSource | None = None
     source_policy_receipt: CandidateSourcePolicyReceipt | None = None
+    current_runtime_materialization: CandidateApplicationMaterialization | None = field(
+        default=None, repr=False
+    )
+    current_runtime_decision_authority: MarketApplicationDecisionAuthority | None = field(
+        default=None, repr=False
+    )
 
 
 @dataclass(frozen=True)

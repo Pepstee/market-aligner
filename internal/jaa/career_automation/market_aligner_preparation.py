@@ -359,6 +359,105 @@ class MarketApplicationMaterializationContext:
         self.materialization.receipt.__post_init__()
 
 
+def verify_current_runtime_materialization_carrier(
+    *,
+    parent_context: MarketApplicationMaterializationContext,
+    child_materialization: CandidateApplicationMaterialization,
+    child_decision_authority: MarketApplicationDecisionAuthority,
+) -> None:
+    if (
+        type(parent_context) is not MarketApplicationMaterializationContext
+        or type(child_materialization) is not CandidateApplicationMaterialization
+        or type(child_decision_authority) is not MarketApplicationDecisionAuthority
+    ):
+        raise TypeError("current materialization carrier types are invalid")
+    parent_context.__post_init__()
+    parent_materialization = parent_context.materialization
+    parent_authority = parent_context.market_decision_authority
+    if (
+        type(parent_materialization) is not CandidateApplicationMaterialization
+        or type(parent_authority) is not MarketApplicationDecisionAuthority
+        or type(parent_materialization.receipt)
+        is not CandidateApplicationMaterializationReceipt
+        or type(child_materialization.receipt)
+        is not CandidateApplicationMaterializationReceipt
+    ):
+        raise TypeError("current parent or child receipt types are invalid")
+    parent_materialization.receipt.__post_init__()
+    parent_authority.__post_init__()
+    child_materialization.receipt.__post_init__()
+    child_decision_authority.__post_init__()
+    parent_receipt = parent_materialization.receipt
+    child_receipt = child_materialization.receipt
+    parent_binding = parent_receipt.deployment_binding
+    child_binding = child_receipt.deployment_binding
+    if (
+        child_receipt.decision_authority_schema != child_decision_authority.schema_version
+        or child_receipt.decision_authority_sha256
+        != child_decision_authority.authority_sha256
+        or parent_receipt.decision_authority_schema != parent_authority.schema_version
+        or parent_receipt.decision_authority_sha256 != parent_authority.authority_sha256
+        or child_binding.current_boundary_receipt_sha256
+        != child_decision_authority.current_boundary_receipt_sha256
+        or parent_binding.current_boundary_receipt_sha256
+        != parent_authority.current_boundary_receipt_sha256
+        or child_receipt.decision_receipt_sha256
+        != hashlib.sha256(
+            (canonical_json(child_decision_authority.decision_receipt()) + "\n").encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        or parent_receipt.decision_receipt_sha256
+        != hashlib.sha256(
+            (canonical_json(parent_authority.decision_receipt()) + "\n").encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        or child_decision_authority.decision_receipt()
+        != dict(parent_context.decision_receipt)
+        or child_materialization.source != parent_materialization.source
+        or child_materialization.editable != parent_materialization.editable
+        or child_materialization.vacancy_requirements
+        != parent_materialization.vacancy_requirements
+        or child_receipt.application_source_id
+        != child_materialization.source.source_id
+        or child_receipt.application_source_sha256
+        != child_materialization.source.content_sha256
+        or child_receipt.deployment_binding.application_id
+        != parent_context.application_id
+        or child_decision_authority.application_id != parent_context.application_id
+        or child_receipt.deployment_binding.environment
+        != CURRENT_RUNTIME_ENVIRONMENT
+        or child_decision_authority.environment != CURRENT_RUNTIME_ENVIRONMENT
+        or child_binding.application_id != parent_binding.application_id
+        or child_binding.handoff_root_sha256 != parent_binding.handoff_root_sha256
+        or child_binding.admission_receipt_sha256
+        != parent_binding.admission_receipt_sha256
+        or child_binding.candidate_authority_file_sha256
+        != parent_binding.candidate_authority_file_sha256
+    ):
+        raise ValueError("current child materialization bindings differ")
+
+    child_receipt_document = asdict(child_receipt)
+    parent_receipt_document = asdict(parent_receipt)
+    for document in (child_receipt_document, parent_receipt_document):
+        document.pop("receipt_sha256")
+        document.pop("decision_authority_sha256")
+        binding_document = document["deployment_binding"]
+        binding_document.pop("binding_sha256")
+        binding_document.pop("current_boundary_receipt_sha256")
+    if child_receipt_document != parent_receipt_document:
+        raise ValueError("current materialization stable receipt fields differ")
+
+    child_authority_document = child_decision_authority.document()
+    parent_authority_document = parent_authority.document()
+    for document in (child_authority_document, parent_authority_document):
+        document.pop("authority_sha256")
+        document.pop("current_boundary_receipt_sha256")
+    if child_authority_document != parent_authority_document:
+        raise ValueError("current materialization stable decision fields differ")
+
+
 class PreparationInputMaterializer(Protocol):
     """Build typed CV inputs from an exact admitted job and exact authorities."""
 
@@ -1038,17 +1137,30 @@ def _persist_current_runtime_drafts(
     result.__post_init__()
     materialization_receipt = orchestration_arguments.get("materialization_receipt")
     materialization = orchestration_arguments.get("materialization")
+    market_decision_authority = orchestration_arguments.get(
+        "market_decision_authority"
+    )
     request = orchestration_arguments.get("request")
     cover_request = orchestration_arguments.get("cover_letter_request")
     base_source = orchestration_arguments.get("base_source")
     if (
         type(materialization_receipt) is not CandidateApplicationMaterializationReceipt
         or type(materialization) is not CandidateApplicationMaterialization
+        or type(market_decision_authority) is not MarketApplicationDecisionAuthority
         or request is None
         or cover_request is None
         or base_source is None
         or materialization.source != base_source
         or materialization.receipt != materialization_receipt
+        or materialization_receipt.decision_authority_sha256
+        != market_decision_authority.authority_sha256
+        or materialization_receipt.deployment_binding.current_boundary_receipt_sha256
+        != verified.current_boundary_receipt_sha256
+        or market_decision_authority.current_boundary_receipt_sha256
+        != verified.current_boundary_receipt_sha256
+        or market_decision_authority.decision_receipt()
+        != orchestration_arguments.get("decision_receipt")
+        or market_decision_authority.environment != CURRENT_RUNTIME_ENVIRONMENT
         or result.initial_source.contact != base_source.contact
         or result.initial_source.job_key != base_source.job_key
         or result.initial_source.vacancy_sha256 != base_source.vacancy_sha256
@@ -1192,6 +1304,8 @@ def _persist_current_runtime_drafts(
         vacancy_requirements=materialization.vacancy_requirements,
         materialized_source=base_source,
         source_policy_receipt=result.initial_constraint_receipt,
+        current_runtime_materialization=materialization,
+        current_runtime_decision_authority=market_decision_authority,
     )
     return MarketApplicationPreparation(
         preparation_id=preparation_id,

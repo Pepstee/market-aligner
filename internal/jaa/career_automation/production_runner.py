@@ -473,11 +473,20 @@ class GeneratedRevisionSink:
         if current_runtime:
             from cv_generation.constraints import CandidateSourcePolicyReceipt
             from .application_compiler import ApplicationSource, verify_application_source
+            from .candidate_application_factory import (
+                CURRENT_RUNTIME_ENVIRONMENT,
+                CandidateApplicationMaterialization,
+                MarketApplicationDecisionAuthority,
+            )
             from .rendering import render_editable_text, verify_application_artifacts
 
+            child_materialization = package.current_runtime_materialization
+            child_authority = package.current_runtime_decision_authority
             if (
                 type(package.source) is not ApplicationSource
                 or type(package.materialized_source) is not ApplicationSource
+                or type(child_materialization) is not CandidateApplicationMaterialization
+                or type(child_authority) is not MarketApplicationDecisionAuthority
                 or type(package.source_policy_receipt) is not CandidateSourcePolicyReceipt
                 or package.source_policy_receipt.release_authority is not False
                 or package.source_policy_receipt.passed is not True
@@ -493,6 +502,38 @@ class GeneratedRevisionSink:
                 or package.materialized_source.role_title != package.source.role_title
                 or package.materialized_source.company_name != package.source.company_name
                 or package.materialized_source.contact != package.source.contact
+                or child_materialization.source != package.materialized_source
+                or child_materialization.vacancy_requirements
+                != package.vacancy_requirements
+                or child_materialization.receipt.application_source_id
+                != package.materialized_source.source_id
+                or child_materialization.receipt.application_source_sha256
+                != package.materialized_source.content_sha256
+                or child_materialization.receipt.deployment_binding.application_id
+                != current_runtime_application_id
+                or child_materialization.receipt.deployment_binding.environment
+                != CURRENT_RUNTIME_ENVIRONMENT
+                or child_materialization.receipt.decision_authority_schema
+                != child_authority.schema_version
+                or child_materialization.receipt.decision_authority_sha256
+                != child_authority.authority_sha256
+                or child_authority.application_id != current_runtime_application_id
+                or child_authority.environment != CURRENT_RUNTIME_ENVIRONMENT
+                or child_authority.source_job_key != job_key
+                or child_authority.raw_listing_sha256 != vacancy_sha256
+                or child_authority.source_url != source_url
+                or child_authority.role_title != role_title
+                or child_authority.company_name != company_name
+                or child_authority.candidate_projection_sha256
+                != candidate_projection.get("projection_sha256")
+                or child_authority.decision_receipt() != dict(decision_receipt)
+                or child_materialization.receipt.decision_receipt_sha256
+                != hashlib.sha256(
+                    (
+                        canonical_json(child_authority.decision_receipt())
+                        + "\n"
+                    ).encode("utf-8")
+                ).hexdigest()
                 or package.source.job_key != job_key
                 or package.source.vacancy_sha256 != vacancy_sha256
                 or package.source.role_title != role_title
@@ -503,6 +544,8 @@ class GeneratedRevisionSink:
             ):
                 raise ValueError("current pre-review package binding differs")
             package.source_policy_receipt.__post_init__()
+            child_materialization.receipt.__post_init__()
+            child_authority.__post_init__()
             verify_application_source(package.materialized_source)
             verify_application_source(package.source)
             verify_application_artifacts(package.artifacts)
@@ -565,6 +608,8 @@ class GeneratedRevisionSink:
                     "company_name",
                     "current_recovery_manifest_relative_path",
                     "current_runtime_config_sha256",
+                    "draft_decision_authority_sha256",
+                    "draft_materialization_receipt_sha256",
                     "environment",
                     "job_key",
                     "materialized_source_id",
@@ -602,7 +647,25 @@ class GeneratedRevisionSink:
                 or generation_document.get("release_authority") is not False
                 or generation_document.get("review_status") != "not_performed"
                 or generation_document.get("schema_version")
-                != "jaa.current-runtime-generation-inputs.v1"
+                != "jaa.current-runtime-generation-inputs.v2"
+                or generation_document.get("draft_decision_authority_sha256")
+                != child_authority.authority_sha256
+                or generation_document.get("draft_materialization_receipt_sha256")
+                != child_materialization.receipt.receipt_sha256
+                or type(
+                    generation_document.get("draft_decision_authority_sha256")
+                )
+                is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["draft_decision_authority_sha256"]
+                ) is None
+                or type(
+                    generation_document.get("draft_materialization_receipt_sha256")
+                )
+                is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["draft_materialization_receipt_sha256"]
+                ) is None
                 or type(generation_document.get("preparation_id")) is not str
                 or _LOWERCASE_SHA256.fullmatch(
                     generation_document["preparation_id"]
@@ -638,6 +701,11 @@ class GeneratedRevisionSink:
             ):
                 raise ValueError("current generation input receipt binding differs")
             self._current_runtime_generation = True
+        elif (
+            package.current_runtime_materialization is not None
+            or package.current_runtime_decision_authority is not None
+        ):
+            raise ValueError("legacy generation cannot carry current materialization")
         required = {
             "generation.inputs",
             "document.source_inputs",

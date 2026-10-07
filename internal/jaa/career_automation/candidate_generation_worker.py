@@ -17,7 +17,12 @@ from .application_compiler import (
     CandidateContact,
     verify_application_source,
 )
-from .candidate_application_factory import CandidateApplicationPackage
+from .candidate_application_factory import (
+    CURRENT_RUNTIME_ENVIRONMENT,
+    CandidateApplicationMaterialization,
+    CandidateApplicationPackage,
+    MarketApplicationDecisionAuthority,
+)
 from cv_generation.service import build_candidate_application_package
 from .evidence_matching import canonical_json
 
@@ -147,12 +152,16 @@ def _generate_current_runtime_package(
         raise ValueError("current pre-review returned an invalid package")
     package = preparation.package
     materialized_source = package.materialized_source
+    materialization = package.current_runtime_materialization
+    decision_authority = package.current_runtime_decision_authority
     source = package.source
     artifacts = package.artifacts
     constraint_receipt = preparation.initial_constraint_receipt
     if (
         type(source) is not ApplicationSource
         or type(materialized_source) is not ApplicationSource
+        or type(materialization) is not CandidateApplicationMaterialization
+        or type(decision_authority) is not MarketApplicationDecisionAuthority
         or package.source_policy_receipt != constraint_receipt
         or type(package.vacancy_requirements) is not tuple
         or any(type(value) is not str for value in package.vacancy_requirements)
@@ -173,6 +182,27 @@ def _generate_current_runtime_package(
         or materialized_source.role_title != source.role_title
         or materialized_source.company_name != source.company_name
         or materialized_source.contact != source.contact
+        or materialization.source != materialized_source
+        or materialization.vacancy_requirements != package.vacancy_requirements
+        or materialization.receipt.application_source_id != materialized_source.source_id
+        or materialization.receipt.application_source_sha256
+        != materialized_source.content_sha256
+        or materialization.receipt.deployment_binding.application_id
+        != application_id
+        or materialization.receipt.deployment_binding.environment
+        != CURRENT_RUNTIME_ENVIRONMENT
+        or materialization.receipt.decision_authority_sha256
+        != decision_authority.authority_sha256
+        or decision_authority.application_id != application_id
+        or decision_authority.environment != CURRENT_RUNTIME_ENVIRONMENT
+        or decision_authority.source_job_key != source.job_key
+        or decision_authority.raw_listing_sha256 != source.vacancy_sha256
+        or decision_authority.source_url != request["source_url"]
+        or decision_authority.role_title != source.role_title
+        or decision_authority.company_name != source.company_name
+        or decision_authority.candidate_projection_sha256
+        != request["candidate_projection"].get("projection_sha256")
+        or decision_authority.decision_receipt() != request["decision_receipt"]
         or artifacts.source_id != source.source_id
         or constraint_receipt.source_id != source.source_id
         or constraint_receipt.cv_sha256 != artifacts.editable.cv_sha256
@@ -184,6 +214,8 @@ def _generate_current_runtime_package(
     verify_application_source(source)
     verify_application_artifacts(artifacts)
     constraint_receipt.__post_init__()
+    materialization.receipt.__post_init__()
+    decision_authority.__post_init__()
     if render_editable_text(source) != artifacts.editable:
         raise ValueError("current pre-review artifacts differ from prepared source")
 
@@ -202,6 +234,12 @@ def _generate_current_runtime_package(
                     "current_runtime_config_sha256": pre_review_kwargs[
                         "current_runtime_config_sha256"
                     ],
+                    "draft_decision_authority_sha256": (
+                        decision_authority.authority_sha256
+                    ),
+                    "draft_materialization_receipt_sha256": (
+                        materialization.receipt.receipt_sha256
+                    ),
                     "environment": "current_runtime",
                     "job_key": source.job_key,
                     "materialized_source_id": materialized_source.source_id,
@@ -216,7 +254,7 @@ def _generate_current_runtime_package(
                     "release_authority": False,
                     "review_status": "not_performed",
                     "role_title": source.role_title,
-                    "schema_version": "jaa.current-runtime-generation-inputs.v1",
+                    "schema_version": "jaa.current-runtime-generation-inputs.v2",
                     "source_sha256": source.content_sha256,
                     "source_url": request["source_url"],
                     "vacancy_source_identity": source.vacancy_source_identity,

@@ -217,6 +217,9 @@ def current_review_package(monkeypatch) -> SanityReviewPackage:
     binding = review_module.CurrentClaimReviewBinding(
         application_id="app_" + "b" * 64,
         materialization_receipt_sha256="c" * 64,
+        child_materialization_receipt_sha256="1" * 64,
+        parent_decision_authority_sha256="2" * 64,
+        child_decision_authority_sha256="3" * 64,
         candidate_projection_sha256="d" * 64,
         original_source_identity="e" * 64,
         original_source_sha256="f" * 64,
@@ -234,6 +237,8 @@ def current_review_package(monkeypatch) -> SanityReviewPackage:
         current_claim_review_binding=binding,
         _current_runtime_context=object(),
         _current_emitted_source=object(),
+        _current_child_materialization=object(),
+        _current_child_decision_authority=object(),
     )
 
 
