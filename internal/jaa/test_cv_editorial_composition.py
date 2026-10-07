@@ -55,6 +55,135 @@ def test_detached_response_schema_types_every_property() -> None:
     require_property_types(editorial_module._COVER_LETTER_RESPONSE_SCHEMA)
 
 
+def _synthetic_cover_response() -> dict[str, object]:
+    return {
+        "candidate_name": "Casey Synthetic",
+        "schema_version": editorial_module.COVER_LETTER_DRAFT_SCHEMA,
+        "sections": [
+            {
+                "heading": heading,
+                "atoms": [
+                    {
+                        "claim_id": None,
+                        "source_kind": "connective",
+                        "text": "Synthetic text.",
+                    }
+                ],
+            }
+            for heading in ("Opening", "Evidence Match", "Company Fit", "Close")
+        ],
+    }
+
+
+def _cover_response_bytes(document: dict[str, object]) -> bytes:
+    return canonical_json(document).encode("utf-8")
+
+
+def test_cover_response_parser_keeps_canonical_mode_and_allows_current_formatting() -> None:
+    document = _synthetic_cover_response()
+    canonical = _cover_response_bytes(document)
+    pretty = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+
+    for current_runtime in (False, True):
+        parsed = editorial_module._cover_letter_draft_from_response(
+            canonical, current_runtime=current_runtime
+        )
+        assert parsed.document(include_identity=False) == document
+
+    parsed = editorial_module._cover_letter_draft_from_response(
+        pretty, current_runtime=True
+    )
+    assert parsed.document(include_identity=False) == document
+    with pytest.raises(EditorialCompositionError, match="not canonical JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            pretty, current_runtime=False
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b'{"candidate_name":"Casey","candidate_name":"Other"}',
+        b'{"candidate_name":"Casey","nested":{"key":1,"key":2}}',
+        b'{"candidate_name":"Casey","nested":{"x":1,"\\u0078":2}}',
+    ),
+)
+def test_cover_response_parser_rejects_duplicate_keys_in_current_mode(raw: bytes) -> None:
+    with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            raw, current_runtime=True
+        )
+
+
+@pytest.mark.parametrize(
+    "number",
+    (b"NaN", b"Infinity", b"-Infinity", b"1e400", b"-1e400"),
+)
+def test_cover_response_parser_rejects_nonfinite_numbers_in_current_mode(
+    number: bytes,
+) -> None:
+    raw = b'{"candidate_name":"Casey","value":' + number + b"}"
+    with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            raw, current_runtime=True
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b"\xef\xbb\xbf{}",
+        b'{"candidate_name":"Casey"} trailing',
+        b"[1,2]",
+        b"\xff",
+    ),
+)
+def test_cover_response_parser_rejects_malformed_json_in_current_mode(raw: bytes) -> None:
+    with pytest.raises(EditorialCompositionError):
+        editorial_module._cover_letter_draft_from_response(
+            raw, current_runtime=True
+        )
+
+
+@pytest.mark.parametrize("current_runtime", (1, 0, "true", None))
+def test_cover_response_parser_rejects_non_exact_mode_types(current_runtime) -> None:
+    with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            _cover_response_bytes(_synthetic_cover_response()),
+            current_runtime=current_runtime,
+        )
+
+
+def test_cover_response_parser_rejects_non_bytes_and_unpaired_surrogates() -> None:
+    class BytesSubclass(bytes):
+        pass
+
+    with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            BytesSubclass(b"{}"), current_runtime=True
+        )
+    with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            bytearray(b"{}"), current_runtime=True
+        )
+    for raw in (
+        b'{"candidate_name":"\\ud800"}',
+        b'{"candidate_name":"Casey","sections":[{"text":"\\ude00"}]}',
+    ):
+        with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+            editorial_module._cover_letter_draft_from_response(
+                raw, current_runtime=True
+            )
+
+    document = _synthetic_cover_response()
+    document["candidate_name"] = "Casey 😀"
+    paired = json.dumps(document, ensure_ascii=True).encode("utf-8")
+    parsed = editorial_module._cover_letter_draft_from_response(
+        paired, current_runtime=True
+    )
+    assert parsed.candidate_name == "Casey 😀"
+
+
 def test_editorial_section_policy_keeps_legacy_and_maps_current_headings() -> None:
     legacy = editorial_module.editorial_section_policy()
     current = editorial_module.editorial_section_policy(current_runtime=True)

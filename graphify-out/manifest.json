@@ -4068,9 +4068,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/cv_generation/editorial_composition.py": {
-    "mtime": 1791331925.7221806,
-    "seen": 1791331929.605919,
-    "ast_hash": "66c1a480249f0b0a77a4f076a80bf241",
+    "mtime": 1791335549.5701005,
+    "seen": 1791335741.1828825,
+    "ast_hash": "fdc63fe1184d5f45d1130088814e7377",
     "semantic_hash": ""
   },
   "internal/jaa/form_filling/ats_forensics.py": {
@@ -4146,9 +4146,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_cover_letter_editorial_parity.py": {
-    "mtime": 1791331929.2461808,
-    "seen": 1791331929.6061108,
-    "ast_hash": "677b6b65b830779e48b9e53c33b1403e",
+    "mtime": 1791335675.7100973,
+    "seen": 1791335741.1830606,
+    "ast_hash": "feb9c53b800d6f25bd9bdcf9165ce5ec",
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_adversarial_rebuild.py": {
@@ -4176,9 +4176,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_editorial_composition.py": {
-    "mtime": 1791330957.4101696,
-    "seen": 1791331037.0374568,
-    "ast_hash": "921fba18d443852fd6538c560ae2edea",
+    "mtime": 1791335669.5300972,
+    "seen": 1791335741.1830661,
+    "ast_hash": "b51bcfa3c3bbc95745b0811449912383",
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_import_order.py": {

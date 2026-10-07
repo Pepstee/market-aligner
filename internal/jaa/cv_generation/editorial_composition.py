@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import copy
 import json
+import math
 import os
 import re
 import secrets
@@ -95,6 +96,7 @@ _ALLOWED_CODEX_EVENTS = frozenset(
 _ALLOWED_CODEX_ITEMS = frozenset({"agent_message", "reasoning"})
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_JSON_SURROGATE = re.compile("[\ud800-\udfff]")
 _MONTH_YEAR = re.compile(
     r"^(?:January|February|March|April|May|June|July|August|September|"
     r"October|November|December) 20\d{2}$"
@@ -2329,6 +2331,25 @@ class DetachedCodexEditorialAdapter:
         validate_editorial_city(city, allow_missing_city=allow_missing)
         return city, allow_missing, current_runtime
 
+    def _request_cover_letter_current_runtime(self, request_bytes: bytes) -> bool:
+        try:
+            payload = json.loads(request_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise EditorialCompositionError("editorial request mode is invalid") from None
+        if (
+            not isinstance(payload, dict)
+            or request_bytes != canonical_json(payload).encode("utf-8")
+        ):
+            raise EditorialCompositionError("editorial request mode is invalid")
+        try:
+            authority = payload["editorial_request"]["authority"]
+            current_runtime = authority.get("current_runtime_pre_review", False)
+            if type(current_runtime) is not bool:
+                raise TypeError
+        except (AttributeError, KeyError, TypeError):
+            raise EditorialCompositionError("editorial request mode is invalid") from None
+        return current_runtime
+
     def _response_schema_for_request(self, request_bytes: bytes) -> Mapping[str, object]:
         editorial_mode = self._request_editorial_mode(request_bytes)
         if editorial_mode is None:
@@ -2382,6 +2403,11 @@ class DetachedCodexEditorialAdapter:
             )
         env = _scrubbed_codex_environment(self.process_environment)
         response_schema = self._response_schema_for_request(request_bytes)
+        current_cover_runtime = (
+            self._request_cover_letter_current_runtime(request_bytes)
+            if self.stage.startswith("cover_letter_")
+            else False
+        )
         with tempfile.TemporaryDirectory(
             prefix=f"jaa-{self.stage}-request-"
         ) as request_dir, tempfile.TemporaryDirectory(
@@ -2478,7 +2504,9 @@ class DetachedCodexEditorialAdapter:
             response_bytes = output_path.read_bytes()
             if self.stage.startswith("cover_letter_"):
                 _cover_letter_draft_from_response(
-                    response_bytes, require_transport_shape=True
+                    response_bytes,
+                    require_transport_shape=True,
+                    current_runtime=current_cover_runtime,
                 )
             else:
                 editorial_mode = self._request_editorial_mode(request_bytes)
@@ -2606,14 +2634,62 @@ def _cover_letter_draft_from_response(
     value: bytes,
     *,
     require_transport_shape: bool = False,
+    current_runtime: bool = False,
 ) -> CoverLetterEditorialDraft:
+    if type(value) is not bytes or type(current_runtime) is not bool:
+        raise EditorialCompositionError("cover-letter backend returned invalid JSON")
+
+    def unique_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        document: dict[str, object] = {}
+        for key, item in pairs:
+            if key in document:
+                raise ValueError("duplicate JSON object key")
+            document[key] = item
+        return document
+
+    def reject_nonfinite_constant(value: str) -> object:
+        raise ValueError("non-finite JSON number")
+
+    def parse_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("non-finite JSON number")
+        return parsed
+
+    def reject_surrogates(value: object) -> None:
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, str):
+                if _JSON_SURROGATE.search(item):
+                    raise ValueError("invalid Unicode scalar")
+            elif isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+
     try:
-        document = json.loads(value)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        text = value.decode("utf-8", "strict")
+        if value.startswith(b"\xef\xbb\xbf") or text.startswith("\ufeff"):
+            raise ValueError("UTF-8 BOM is not allowed")
+        document = json.loads(
+            text,
+            object_pairs_hook=unique_object_pairs,
+            parse_constant=reject_nonfinite_constant,
+            parse_float=parse_finite_float,
+        )
+        reject_surrogates(document)
+    except (UnicodeDecodeError, ValueError):
         raise EditorialCompositionError(
             "cover-letter backend returned invalid JSON"
-        ) from exc
-    if not isinstance(document, dict) or value != canonical_json(document).encode():
+        ) from None
+    if not isinstance(document, dict):
+        raise EditorialCompositionError("cover-letter backend draft schema differs")
+    if (
+        not current_runtime
+        and value != canonical_json(document).encode("utf-8")
+    ):
         raise EditorialCompositionError(
             "cover-letter backend response is not canonical JSON"
         )
@@ -2958,7 +3034,10 @@ def run_cover_letter_composition_runtime(
         raise EditorialCompositionError(
             "cover-letter writer result differs from configured adapter"
         )
-    writer_draft = _cover_letter_draft_from_response(writer_result.response_bytes)
+    writer_draft = _cover_letter_draft_from_response(
+        writer_result.response_bytes,
+        current_runtime=request.authority.current_runtime,
+    )
     validate_cover_letter_editorial_draft(request, writer_draft)
 
     humanizer_request_sha = cover_letter_humanizer_request_sha256(request, writer_draft)
@@ -3016,7 +3095,10 @@ def run_cover_letter_composition_runtime(
         raise EditorialCompositionError(
             "cover-letter Humanizer result differs from configured adapter"
         )
-    final_draft = _cover_letter_draft_from_response(humanizer_result.response_bytes)
+    final_draft = _cover_letter_draft_from_response(
+        humanizer_result.response_bytes,
+        current_runtime=request.authority.current_runtime,
+    )
     writer_evidence = EditorialStageEvidence(
         stage="cover_letter_writer",
         environment=runtime.environment,

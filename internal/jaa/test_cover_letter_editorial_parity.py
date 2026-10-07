@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +30,7 @@ from cv_generation.editorial_composition import (
     ApprovedCoverLetterClaim,
     CandidateEditorialAuthority,
     CoverLetterSection,
+    DetachedCodexEditorialAdapter,
     EditorialAtom,
     EditorialBackendResult,
     EditorialCompositionError,
@@ -305,7 +308,9 @@ class _Session:
 
     def invoke(self, *, request_bytes):
         self.adapter.calls.append((request_bytes, self.invocation_id))
-        response = canonical_json(self.adapter.draft.document()).encode()
+        response = self.adapter.response_bytes
+        if response is None:
+            response = canonical_json(self.adapter.draft.document()).encode()
         return EditorialBackendResult(
             response_bytes=response,
             invocation_id=self.invocation_id,
@@ -328,6 +333,7 @@ class _Adapter:
         self.environment = "synthetic"
         self.transport_identity = f"transport:{provider}"
         self.calls = []
+        self.response_bytes = None
 
     def available(self):
         return True
@@ -485,7 +491,6 @@ def test_current_cover_letter_runtime_binds_writer_and_humanizer_prompts() -> No
         humanizer=humanizer_adapter,
         document_kind="cover_letter",
     )
-
     writer_draft, final_draft, *_ = run_cover_letter_composition_runtime(
         request, runtime=runtime
     )
@@ -532,6 +537,212 @@ def test_current_cover_letter_runtime_binds_writer_and_humanizer_prompts() -> No
     assert "Preserve the exact salutation, sign-off, signature, and required CTA." in humanizer_instructions
     assert "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact." in humanizer_instructions
 
+
+def test_current_cover_runtime_passes_trusted_mode_to_both_response_parsers() -> None:
+    _, _, request, writer = _current_cover_fixture()
+    final = writer
+
+    def pretty(draft):
+        return json.dumps(
+            draft.document(), ensure_ascii=False, indent=2
+        ).encode("utf-8") + b"\n"
+
+    writer_bytes = pretty(writer)
+    humanizer_bytes = pretty(final)
+    writer_adapter = _Adapter("cover_letter_writer", "writer", writer)
+    writer_adapter.response_bytes = writer_bytes
+    humanizer_adapter = _Adapter("cover_letter_humanizer", "humanizer", final)
+    humanizer_adapter.response_bytes = humanizer_bytes
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+        document_kind="cover_letter",
+    )
+
+    writer_draft, final_draft, writer_evidence, humanizer_evidence = (
+        run_cover_letter_composition_runtime(request, runtime=runtime)
+    )
+
+    assert writer_draft == writer
+    assert final_draft == final
+    assert writer_evidence.response_bytes_sha256 == hashlib.sha256(writer_bytes).hexdigest()
+    assert humanizer_evidence.response_bytes_sha256 == hashlib.sha256(
+        humanizer_bytes
+    ).hexdigest()
+
+
+def test_legacy_cover_runtime_still_requires_canonical_response_bytes() -> None:
+    _, request, _, writer, final = _fixture()
+    writer_adapter = _Adapter("cover_letter_writer", "writer", writer)
+    writer_adapter.response_bytes = json.dumps(
+        writer.document(), ensure_ascii=False, indent=2
+    ).encode("utf-8") + b"\n"
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=_Adapter("cover_letter_humanizer", "humanizer", final),
+        document_kind="cover_letter",
+    )
+
+    with pytest.raises(EditorialCompositionError, match="not canonical JSON"):
+        run_cover_letter_composition_runtime(request, runtime=runtime)
+
+
+def test_detached_cover_adapter_binds_format_mode_to_request_and_preserves_bytes(
+    monkeypatch, tmp_path
+) -> None:
+    _, _, request, draft = _current_cover_fixture()
+    response = draft.document()
+    response.pop("draft_sha256")
+    response_bytes = json.dumps(
+        response, ensure_ascii=False, indent=2
+    ).encode("utf-8") + b"\n"
+    binary = tmp_path / "synthetic-codex"
+    binary.write_bytes(b"synthetic detached codex")
+    binary.chmod(0o700)
+    adapter = DetachedCodexEditorialAdapter(
+        stage="cover_letter_writer",
+        model="synthetic-model",
+        codex_binary=str(binary),
+        environment="synthetic",
+        process_environment={"HOME": str(tmp_path), "PATH": str(tmp_path)},
+    )
+    request_bytes = canonical_json(
+        {
+            "editorial_request": request.document(),
+            "instructions": [],
+            "stage": "cover_letter_writer",
+        }
+    ).encode("utf-8")
+
+    def fake_run(command, **kwargs):
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_bytes(response_bytes)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message"}}
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "cv_generation.editorial_composition.subprocess.run", fake_run
+    )
+    result = adapter.open_fresh_session(invocation_id="current-cover").invoke(
+        request_bytes=request_bytes
+    )
+    assert result.response_bytes == response_bytes
+    assert result.response_sha256 == hashlib.sha256(response_bytes).hexdigest()
+
+
+def test_detached_legacy_cover_adapter_requires_canonical_bytes_and_exact_mode(
+    monkeypatch, tmp_path
+) -> None:
+    _, request, _, draft, _ = _fixture()
+    response = draft.document()
+    response.pop("draft_sha256")
+    response_bytes = json.dumps(
+        response, ensure_ascii=False, indent=2
+    ).encode("utf-8") + b"\n"
+    binary = tmp_path / "synthetic-legacy-codex"
+    binary.write_bytes(b"synthetic detached codex")
+    binary.chmod(0o700)
+    adapter = DetachedCodexEditorialAdapter(
+        stage="cover_letter_writer",
+        model="synthetic-model",
+        codex_binary=str(binary),
+        environment="synthetic",
+        process_environment={"HOME": str(tmp_path), "PATH": str(tmp_path)},
+    )
+    request_bytes = canonical_json(
+        {
+            "editorial_request": request.document(),
+            "instructions": [],
+            "stage": "cover_letter_writer",
+        }
+    ).encode("utf-8")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_bytes(response_bytes)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message"}}
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "cv_generation.editorial_composition.subprocess.run", fake_run
+    )
+    with pytest.raises(EditorialCompositionError, match="not canonical JSON"):
+        adapter.open_fresh_session(invocation_id="legacy-cover").invoke(
+            request_bytes=request_bytes
+        )
+    malformed = json.loads(request_bytes)
+    malformed["editorial_request"]["authority"]["current_runtime_pre_review"] = 1
+    with pytest.raises(EditorialCompositionError, match="mode is invalid"):
+        adapter.open_fresh_session(invocation_id="bad-mode-cover").invoke(
+            request_bytes=canonical_json(malformed).encode("utf-8")
+        )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure", ("duplicate", "unknown_fact"))
+def test_detached_current_cover_adapter_keeps_duplicate_and_fact_guards(
+    monkeypatch, tmp_path, failure
+) -> None:
+    _, _, request, draft = _current_cover_fixture()
+    response = draft.document()
+    response.pop("draft_sha256")
+    if failure == "unknown_fact":
+        response["sections"][0]["atoms"][0]["source_kind"] = "unapproved_fact"
+        response_bytes = json.dumps(response, ensure_ascii=False, indent=2).encode()
+    else:
+        valid = canonical_json(response).encode()
+        response_bytes = b'{"candidate_name":"Other",' + valid[1:]
+    binary = tmp_path / f"synthetic-codex-{failure}"
+    binary.write_bytes(b"synthetic detached codex")
+    binary.chmod(0o700)
+    adapter = DetachedCodexEditorialAdapter(
+        stage="cover_letter_writer",
+        model="synthetic-model",
+        codex_binary=str(binary),
+        environment="synthetic",
+        process_environment={"HOME": str(tmp_path), "PATH": str(tmp_path)},
+    )
+    request_bytes = canonical_json(
+        {
+            "editorial_request": request.document(),
+            "instructions": [],
+            "stage": "cover_letter_writer",
+        }
+    ).encode("utf-8")
+
+    def fake_run(command, **kwargs):
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_bytes(response_bytes)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message"}}
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "cv_generation.editorial_composition.subprocess.run", fake_run
+    )
+    expected = "invalid JSON" if failure == "duplicate" else "source kind is unsupported"
+    with pytest.raises(EditorialCompositionError, match=expected):
+        adapter.open_fresh_session(invocation_id=f"current-cover-{failure}").invoke(
+            request_bytes=request_bytes
+        )
 
 def test_cover_letter_admission_rejects_claim_mutation_and_kolhoz_text() -> None:
     _, request, _, writer, final = _fixture()
