@@ -20,6 +20,7 @@ from career_automation.production_queue import (
     build_ascending_queue,
     prior_attempts_from_archive,
 )
+from career_automation.production_attempt import GreenhouseAttemptRecorder
 
 
 ROOT = Path(__file__).resolve().parent
@@ -27,12 +28,14 @@ NOW = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
 
 
 @pytest.mark.parametrize("retry", [False, True])
-def test_review_only_terminal_never_automatically_reenters(retry):
+@pytest.mark.parametrize("review_only", [False, True])
+def test_review_only_terminal_never_automatically_reenters(retry, review_only):
     candidate = _candidate("10", "0.2")
     prior = PriorAttempt(candidate.vacancy, "jaa-20260805T120000Z-0123456789abcdef",
                          "review_only", _digest("review-terminal"))
     queue = build_ascending_queue((candidate,), prior_attempts=(prior,), as_of=NOW,
-                                  retry_repairable_preclick_blocks=retry)
+                                  retry_repairable_preclick_blocks=retry,
+                                  review_only=review_only)
     assert queue.next_action is None
     assert queue.excluded[0].reason == "prior_review_only"
 
@@ -176,9 +179,46 @@ def test_incomplete_attempt_is_resumed_without_creating_a_duplicate() -> None:
     assert queue.next_action.attempt_id == prior.attempt_id
 
 
+def test_incomplete_review_only_intent_is_mode_aware_from_archive(tmp_path: Path) -> None:
+    candidate = _candidate("10", "0.2")
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=tmp_path / "archive",
+        repository_root=ROOT,
+        vacancy=candidate.vacancy,
+        complete_vacancy=b"vacancy-10",
+        structured_vacancy={},
+        assessment={},
+    )
+    recorder.begin_review_only()
+    prior = prior_attempts_from_archive(recorder.attempt.archive)
+
+    assert len(prior) == 1
+    assert prior[0].review_only_intent_present is True
+    live_queue = build_ascending_queue((candidate,), prior_attempts=prior, as_of=NOW)
+    assert live_queue.next_action is None
+    assert live_queue.excluded[0].reason == "prior_incomplete_review_only"
+    explicit_live_queue = build_ascending_queue(
+        (candidate,), prior_attempts=prior, as_of=NOW, review_only=False
+    )
+    assert explicit_live_queue == live_queue
+
+    review_queue = build_ascending_queue(
+        (candidate,), prior_attempts=prior, as_of=NOW, review_only=True
+    )
+    assert review_queue.next_action is not None
+    assert review_queue.next_action.action == "resume_attempt"
+    assert review_queue.next_action.attempt_id == recorder.attempt.attempt_id
+
+    with pytest.raises(ProductionQueueError, match="review-only queue mode"):
+        build_ascending_queue((candidate,), prior_attempts=prior, review_only=1)
+    with pytest.raises(ProductionQueueError, match="review-only intent state"):
+        replace(prior[0], review_only_intent_present=1)
+
+
+@pytest.mark.parametrize("review_only", [False, True])
 @pytest.mark.parametrize("outcome", (None, "crashed", "timed_out", "abandoned"))
 def test_click_intent_quarantines_regardless_of_terminal_state(
-    outcome: str | None,
+    outcome: str | None, review_only: bool,
 ) -> None:
     candidate = _candidate("10", "0.2")
     prior = PriorAttempt(
@@ -188,7 +228,9 @@ def test_click_intent_quarantines_regardless_of_terminal_state(
         _digest("terminal") if outcome is not None else None,
         click_intent_present=True,
     )
-    queue = build_ascending_queue((candidate,), prior_attempts=(prior,), as_of=NOW)
+    queue = build_ascending_queue(
+        (candidate,), prior_attempts=(prior,), as_of=NOW, review_only=review_only
+    )
     assert not queue.ready
     assert queue.excluded[0].reason == "prior_click_intent"
 

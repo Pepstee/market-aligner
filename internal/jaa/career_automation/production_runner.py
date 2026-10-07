@@ -1009,6 +1009,7 @@ class GreenhouseProductionRunner:
             (candidate.vacancy for candidate in candidates),
             prior_attempts=prior_attempts_from_archive(self.archive),
             retry_repairable_preclick_blocks=self.retry_repairable_preclick_blocks,
+            review_only=self.review_only,
         )
 
     @staticmethod

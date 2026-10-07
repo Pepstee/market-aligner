@@ -220,6 +220,7 @@ class PriorAttempt:
     terminal_manifest_sha256: str | None
     click_intent_present: bool = False
     repairable_preclick_human_verification: bool = False
+    review_only_intent_present: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.vacancy, VacancyArchiveIdentity):
@@ -230,6 +231,8 @@ class PriorAttempt:
             raise ProductionQueueError("click-intent state must be a boolean")
         if type(self.repairable_preclick_human_verification) is not bool:
             raise ProductionQueueError("repairable-block state must be a boolean")
+        if type(self.review_only_intent_present) is not bool:
+            raise ProductionQueueError("review-only intent state must be a boolean")
         if self.outcome is None:
             if self.terminal_manifest_sha256 is not None:
                 raise ProductionQueueError("incomplete attempt has a terminal hash")
@@ -333,6 +336,7 @@ def prior_attempts_from_archive(
                 repairable_preclick_human_verification=(
                     repairable_preclick_human_verification
                 ),
+                review_only_intent_present="review.intent" in roles,
             )
         )
     return tuple(rows)
@@ -344,9 +348,12 @@ def build_ascending_queue(
     prior_attempts: Iterable[PriorAttempt] = (),
     as_of: datetime | None = None,
     retry_repairable_preclick_blocks: bool = False,
+    review_only: bool = False,
 ) -> AscendingProductionQueue:
     if type(retry_repairable_preclick_blocks) is not bool:
         raise ProductionQueueError("repairable-block retry policy must be boolean")
+    if type(review_only) is not bool:
+        raise ProductionQueueError("review-only queue mode must be boolean")
     supplied_now = as_of or datetime.now(timezone.utc)
     if supplied_now.tzinfo is None or supplied_now.utcoffset() is None:
         raise ProductionQueueError("queue evaluation time must include a timezone")
@@ -421,6 +428,10 @@ def build_ascending_queue(
             reason = "unsupported_provider"
         elif len(incomplete) > 1:
             raise ProductionQueueError("vacancy has multiple incomplete attempts")
+        elif not review_only and any(
+            row.review_only_intent_present for row in incomplete
+        ):
+            reason = "prior_incomplete_review_only"
         if reason is not None:
             excluded.append(QueueExclusion(candidate, reason))
             continue

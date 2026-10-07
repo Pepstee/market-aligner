@@ -708,6 +708,98 @@ def _candidate() -> ProductionRunCandidate:
     )
 
 
+def _attempt_tree_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    for entry in sorted(path.rglob("*")):
+        if not entry.is_file():
+            continue
+        relative = entry.relative_to(path).as_posix().encode("utf-8")
+        content = entry.read_bytes()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def test_live_runner_skips_incomplete_review_intent_and_progresses_next_candidate(
+    tmp_path: Path,
+) -> None:
+    first = _candidate()
+    second_vacancy = VacancyArchiveIdentity(
+        job_key="greenhouse:example:456",
+        vacancy_sha256=_digest("second vacancy"),
+        role_title="Analyst",
+        company_name="Example",
+        source_url="https://job-boards.greenhouse.io/example/jobs/456",
+    )
+    second = replace(
+        first,
+        vacancy=LiveVacancy.create(
+            vacancy=second_vacancy,
+            provider="greenhouse",
+            fit_score="0.4",
+            live=True,
+            eligible=True,
+            duplicate=False,
+            live_verified_at=datetime.now(timezone.utc).isoformat(),
+            scoring_inputs_sha256=_digest("second score"),
+        ),
+        complete_vacancy=b"second vacancy",
+        structured_vacancy={"job_key": second_vacancy.job_key},
+        assessment={"fit_score": 0.4},
+    )
+    archive_root = tmp_path / "archive"
+    interrupted = GreenhouseAttemptRecorder.create(
+        archive_root=archive_root,
+        repository_root=ROOT,
+        vacancy=first.vacancy.vacancy,
+        complete_vacancy=b"vacancy",
+        structured_vacancy=first.structured_vacancy,
+        assessment=first.assessment,
+    )
+    interrupted.begin_review_only()
+    before = _attempt_tree_sha256(interrupted.attempt.path)
+    opened: list[str] = []
+
+    class SyntheticNavigationReached(Exception):
+        pass
+
+    def open_vacancy(item, _page):
+        opened.append(item.vacancy.vacancy.job_key)
+        raise SyntheticNavigationReached
+
+    runner = GreenhouseProductionRunner(
+        repository_root=ROOT,
+        archive_root=archive_root,
+    )
+    page = SimpleNamespace(on=lambda *_args: None)
+    with pytest.raises(SyntheticNavigationReached):
+        runner.execute_next(
+            page,
+            candidates=(first, second),
+            open_vacancy=open_vacancy,
+            prepare_release=lambda *_args: pytest.fail(
+                "synthetic canary reached release preparation"
+            ),
+        )
+
+    assert opened == [second_vacancy.job_key]
+    assert _attempt_tree_sha256(interrupted.attempt.path) == before
+    first_rows = runner.archive.query(job_key=first.vacancy.vacancy.job_key)
+    assert len(first_rows) == 1
+    assert first_rows[0]["attempt_id"] == interrupted.attempt.attempt_id
+    assert first_rows[0]["terminal_finalized"] is False
+    second_rows = runner.archive.query(job_key=second_vacancy.job_key)
+    assert len(second_rows) == 1
+    second_attempt = runner.archive.open_attempt(str(second_rows[0]["attempt_id"]))
+    assert second_rows[0]["terminal_finalized"] is True
+    assert not any(
+        row.role == "submission.click_intent"
+        for row in second_attempt._objects(second_attempt._events())
+    )
+
+
 def _package(
     *,
     cv_text: str = "cv",
