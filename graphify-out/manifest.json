@@ -4020,9 +4020,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_handoff_admission_runner.py": {
-    "mtime": 1791314240.6628573,
-    "seen": 1791318855.7500038,
-    "ast_hash": "51c4d311f5db780a5888b584f4f7b33c",
+    "mtime": 1791342284.273996,
+    "seen": 1791342409.630098,
+    "ast_hash": "76a6bdcf08a20e459a8df7fec59a56c9",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_handoff_runner.py": {
@@ -4218,9 +4218,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_production_operational_surfaces.py": {
-    "mtime": 1791316462.814821,
-    "seen": 1791318855.7503846,
-    "ast_hash": "e43ff645d091e874b0daa2b3fe7e460e",
+    "mtime": 1791342344.1539853,
+    "seen": 1791342409.6305506,
+    "ast_hash": "f6ae3deea04b85c71a858d8b678b6662",
     "semantic_hash": ""
   },
   "internal/jaa/test_production_preparation_runner.py": {

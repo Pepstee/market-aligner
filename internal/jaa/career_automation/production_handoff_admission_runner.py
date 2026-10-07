@@ -954,6 +954,44 @@ def _read_published_handoff_pinned(
     return document, receipt_bytes, current_commit, source_record, adapter, handoff
 
 
+def _read_admissible_published_handoff_pinned(
+    *,
+    execution_receipt_path: str | Path,
+    deployment: _ProductionAdmissionDeployment,
+    paths: _PinnedProductionPaths,
+    commit_resolver: Callable[[Path, int], str],
+) -> tuple[dict[str, object], bytes, str, str, ProtectedLocalOutbox, object]:
+    allow_admitted_current_ancestor = (
+        deployment.environment == CURRENT_RUNTIME_ENVIRONMENT
+    )
+    pinned = _read_published_handoff_pinned(
+        execution_receipt_path=execution_receipt_path,
+        deployment=deployment,
+        paths=paths,
+        commit_resolver=commit_resolver,
+        allow_admitted_current_ancestor=allow_admitted_current_ancestor,
+    )
+    document, _, current_commit, _, adapter, handoff = pinned
+    producer_commit_sha = str(document["producer_commit_sha"])
+    if producer_commit_sha != current_commit:
+        connection, admitted_rows = _read_current_runtime_admission_index(
+            deployment,
+            profile_id=handoff.payload["profile_id"],
+            profile_version=handoff.payload["profile_version"],
+        )
+        try:
+            row = _admitted_current_runtime_receipt_row(document, admitted_rows)
+            if row is None:
+                raise ProductionHandoffAdmissionError(
+                    "current-runtime ancestor replay requires a matching stored admission"
+                )
+            _verify_current_runtime_admission_row(row, adapter=adapter)
+        finally:
+            connection.close()
+        paths.verify_references()
+    return pinned
+
+
 def _run_production_handoff_admission_pinned(
     *,
     execution_receipt_path: str | Path,
@@ -982,14 +1020,15 @@ def _run_production_handoff_admission_pinned(
         or getattr(witness, "environment", None) != "production"
     ):
         raise ProductionHandoffAdmissionError("production current-time witness differs")
-    document, receipt_bytes, current_commit, source_record, adapter, _handoff = (
-        _read_published_handoff_pinned(
+    document, receipt_bytes, _current_commit, source_record, adapter, _handoff = (
+        _read_admissible_published_handoff_pinned(
             execution_receipt_path=execution_receipt_path,
             deployment=deployment,
             paths=paths,
             commit_resolver=commit_resolver,
         )
     )
+    producer_commit_sha = str(document["producer_commit_sha"])
     data_descriptor = os.dup(paths.data_descriptor)
     try:
         state_descriptor = _open_private_child(data_descriptor, "state")
@@ -1063,7 +1102,7 @@ def _run_production_handoff_admission_pinned(
                         ],
                         "handoff_root_sha256": admission.handoff_root_sha256,
                         "operation": operation,
-                        "producer_commit_sha": current_commit,
+                        "producer_commit_sha": producer_commit_sha,
                         "release_token_issued": False,
                         "schema_version": (
                             CURRENT_RUNTIME_OPERATION_SCHEMA
@@ -1110,7 +1149,7 @@ def _run_production_handoff_admission_pinned(
                         ).hexdigest(),
                         handoff_root_sha256=str(admission.handoff_root_sha256),
                         source_record_sha256=source_record,
-                        producer_commit_sha=current_commit,
+                        producer_commit_sha=producer_commit_sha,
                         environment=(
                             CURRENT_RUNTIME_ENVIRONMENT
                             if current_runtime

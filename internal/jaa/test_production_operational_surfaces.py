@@ -942,6 +942,376 @@ def test_current_selection_requires_a_stored_root_before_full_validation():
         )
 
 
+def _install_admissible_handoff_reader(
+    monkeypatch,
+    *,
+    environment,
+    producer_commit_sha,
+    admitted_row,
+    current_commit=COMMIT,
+    reader_error=None,
+    verify_error=None,
+):
+    events = []
+    application_id = "app_" + "1" * 64
+    root_sha256 = "2" * 64
+    document = {
+        "schema_version": admission_runner.CURRENT_RUNTIME_EXECUTION_SCHEMA,
+        "application_id": application_id,
+        "handoff_root_sha256": root_sha256,
+        "producer_commit_sha": producer_commit_sha,
+    }
+    handoff = SimpleNamespace(
+        payload={"profile_id": "prf_" + "3" * 32, "profile_version": "v1.10"},
+        application_id=application_id,
+        root_sha256=root_sha256,
+    )
+    adapter = SimpleNamespace(handoff_bytes=b"synthetic handoff", context_bytes=b"context")
+    pinned = (document, b"receipt bytes", current_commit, "4" * 64, adapter, handoff)
+    captured = {}
+
+    class FakeConnection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+            events.append("close")
+
+    def read_published_handoff(
+        *,
+        execution_receipt_path,
+        deployment,
+        paths,
+        commit_resolver,
+        allow_admitted_current_ancestor=False,
+    ):
+        events.append(("read", allow_admitted_current_ancestor))
+        captured["allow_admitted_current_ancestor"] = allow_admitted_current_ancestor
+        if reader_error is not None:
+            raise reader_error
+        return pinned
+
+    def read_admission_index(deployment, *, profile_id, profile_version):
+        events.append(("index", profile_id, profile_version))
+        connection = FakeConnection()
+        captured["connection"] = connection
+        rows = {application_id: admitted_row} if admitted_row is not None else {}
+        return connection, rows
+
+    def verify_admission_row(row, *, adapter):
+        events.append("verify_stored_row")
+        if verify_error is not None:
+            raise verify_error
+
+    monkeypatch.setattr(
+        admission_runner,
+        "_read_published_handoff_pinned",
+        read_published_handoff,
+    )
+    monkeypatch.setattr(
+        admission_runner,
+        "_read_current_runtime_admission_index",
+        read_admission_index,
+    )
+    monkeypatch.setattr(
+        admission_runner,
+        "_verify_current_runtime_admission_row",
+        verify_admission_row,
+    )
+    deployment = SimpleNamespace(environment=environment)
+    paths = SimpleNamespace(
+        verify_references=lambda: events.append("verify_references")
+    )
+    return pinned, captured, deployment, paths, events
+
+
+def test_admissible_reader_verifies_exact_stored_ancestor_before_return(monkeypatch):
+    ancestor_commit = "b" * 40
+    root_sha256 = "2" * 64
+    admitted_row = {
+        "handoff_root_sha256": root_sha256,
+        "producer_commit_sha": ancestor_commit,
+    }
+    pinned, captured, deployment, paths, events = _install_admissible_handoff_reader(
+        monkeypatch,
+        environment=admission_runner.CURRENT_RUNTIME_ENVIRONMENT,
+        producer_commit_sha=ancestor_commit,
+        admitted_row=admitted_row,
+    )
+
+    result = admission_runner._read_admissible_published_handoff_pinned(
+        execution_receipt_path=Path("receipt.json"),
+        deployment=deployment,
+        paths=paths,
+        commit_resolver=lambda *_: COMMIT,
+    )
+
+    assert result is pinned
+    assert result[0]["producer_commit_sha"] == ancestor_commit
+    assert captured["allow_admitted_current_ancestor"] is True
+    assert captured["connection"].closed is True
+    assert events == [
+        ("read", True),
+        ("index", "prf_" + "3" * 32, "v1.10"),
+        "verify_stored_row",
+        "close",
+        "verify_references",
+    ]
+
+
+def test_admissible_reader_refuses_unmatched_ancestor_and_closes_index(monkeypatch):
+    pinned, captured, deployment, paths, events = _install_admissible_handoff_reader(
+        monkeypatch,
+        environment=admission_runner.CURRENT_RUNTIME_ENVIRONMENT,
+        producer_commit_sha="b" * 40,
+        admitted_row={
+            "handoff_root_sha256": "5" * 64,
+            "producer_commit_sha": "b" * 40,
+        },
+    )
+
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="matching stored admission",
+    ) as error:
+        admission_runner._read_admissible_published_handoff_pinned(
+            execution_receipt_path=Path("receipt.json"),
+            deployment=deployment,
+            paths=paths,
+            commit_resolver=lambda *_: COMMIT,
+        )
+
+    assert "app_" not in str(error.value)
+    assert captured["connection"].closed is True
+    assert "verify_stored_row" not in events
+    assert "verify_references" not in events
+
+
+def test_admissible_reader_refuses_stored_producer_mismatch_and_closes_index(
+    monkeypatch,
+):
+    pinned, captured, deployment, paths, events = _install_admissible_handoff_reader(
+        monkeypatch,
+        environment=admission_runner.CURRENT_RUNTIME_ENVIRONMENT,
+        producer_commit_sha="b" * 40,
+        admitted_row={
+            "handoff_root_sha256": "2" * 64,
+            "producer_commit_sha": "c" * 40,
+        },
+    )
+
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="stored admission",
+    ):
+        admission_runner._read_admissible_published_handoff_pinned(
+            execution_receipt_path=Path("receipt.json"),
+            deployment=deployment,
+            paths=paths,
+            commit_resolver=lambda *_: COMMIT,
+        )
+
+    assert captured["connection"].closed is True
+    assert "verify_stored_row" not in events
+    assert "verify_references" not in events
+
+
+def test_admissible_reader_closes_index_when_stored_verification_fails(monkeypatch):
+    pinned, captured, deployment, paths, events = _install_admissible_handoff_reader(
+        monkeypatch,
+        environment=admission_runner.CURRENT_RUNTIME_ENVIRONMENT,
+        producer_commit_sha="b" * 40,
+        admitted_row={
+            "handoff_root_sha256": "2" * 64,
+            "producer_commit_sha": "b" * 40,
+        },
+        verify_error=admission_runner.ProductionHandoffAdmissionError(
+            "stored admission mismatch"
+        ),
+    )
+
+    with pytest.raises(admission_runner.ProductionHandoffAdmissionError):
+        admission_runner._read_admissible_published_handoff_pinned(
+            execution_receipt_path=Path("receipt.json"),
+            deployment=deployment,
+            paths=paths,
+            commit_resolver=lambda *_: COMMIT,
+        )
+
+    assert captured["connection"].closed is True
+    assert events[-1] == "close"
+    assert "verify_references" not in events
+
+
+def test_admissible_reader_keeps_fresh_and_legacy_modes_strict(monkeypatch):
+    pinned, captured, deployment, paths, events = _install_admissible_handoff_reader(
+        monkeypatch,
+        environment=admission_runner.CURRENT_RUNTIME_ENVIRONMENT,
+        producer_commit_sha=COMMIT,
+        admitted_row=None,
+    )
+    result = admission_runner._read_admissible_published_handoff_pinned(
+        execution_receipt_path=Path("receipt.json"),
+        deployment=deployment,
+        paths=paths,
+        commit_resolver=lambda *_: COMMIT,
+    )
+    assert result is pinned
+    assert events == [("read", True)]
+    assert "connection" not in captured
+
+    legacy_error = admission_runner.ProductionHandoffAdmissionError(
+        "producer is not current HEAD"
+    )
+    _, legacy_captured, legacy_deployment, legacy_paths, legacy_events = (
+        _install_admissible_handoff_reader(
+            monkeypatch,
+            environment="production",
+            producer_commit_sha="a" * 40,
+            admitted_row=None,
+            reader_error=legacy_error,
+        )
+    )
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="producer is not current HEAD",
+    ):
+        admission_runner._read_admissible_published_handoff_pinned(
+            execution_receipt_path=Path("receipt.json"),
+            deployment=legacy_deployment,
+            paths=legacy_paths,
+            commit_resolver=lambda *_: COMMIT,
+        )
+    assert legacy_captured["allow_admitted_current_ancestor"] is False
+    assert legacy_events == [("read", False)]
+    assert "connection" not in legacy_captured
+
+
+def test_admissible_reader_propagates_nonancestor_refusal_before_index(monkeypatch):
+    reader_error = admission_runner.ProductionHandoffAdmissionError(
+        "producer is not an ancestor of current HEAD"
+    )
+    _, captured, deployment, paths, events = _install_admissible_handoff_reader(
+        monkeypatch,
+        environment=admission_runner.CURRENT_RUNTIME_ENVIRONMENT,
+        producer_commit_sha="a" * 40,
+        admitted_row=None,
+        reader_error=reader_error,
+    )
+
+    with pytest.raises(
+        admission_runner.ProductionHandoffAdmissionError,
+        match="producer is not an ancestor",
+    ):
+        admission_runner._read_admissible_published_handoff_pinned(
+            execution_receipt_path=Path("receipt.json"),
+            deployment=deployment,
+            paths=paths,
+            commit_resolver=lambda *_: COMMIT,
+        )
+
+    assert captured["allow_admitted_current_ancestor"] is True
+    assert events == [("read", True)]
+    assert "connection" not in captured
+
+
+def test_ancestor_replay_receipts_keep_authenticated_producer_commit(
+    monkeypatch, tmp_path: Path
+):
+    ancestor_commit = "b" * 40
+    document = {
+        "application_id": "app_" + "1" * 64,
+        "handoff_job_key": "job_" + "2" * 64,
+        "handoff_root_sha256": "3" * 64,
+        "producer_commit_sha": ancestor_commit,
+        "semantic_receipt_sha256": "4" * 64,
+    }
+    source_record_sha256 = "5" * 64
+    adapter = SimpleNamespace(handoff_bytes=b"original handoff", context_bytes=b"context")
+    pinned = (
+        document,
+        b"execution receipt bytes",
+        COMMIT,
+        source_record_sha256,
+        adapter,
+        SimpleNamespace(),
+    )
+    events = []
+    operation_documents = []
+
+    class FakeStore:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def admit_current_runtime_nonrelease(self, handoff_bytes, context_bytes):
+            events.append(("store_admit", handoff_bytes, context_bytes))
+            return SimpleNamespace(
+                environment=admission_runner.CURRENT_RUNTIME_ENVIRONMENT,
+                authority_scope=admission_runner.CURRENT_RUNTIME_AUTHORITY_SCOPE,
+                admission_kind=admission_runner.ADMISSION_KIND_CURRENT_RUNTIME,
+                application_id=document["application_id"],
+                job_key=document["handoff_job_key"],
+                handoff_root_sha256=document["handoff_root_sha256"],
+                created=False,
+                verification_receipt_sha256="6" * 64,
+            )
+
+    def read_admissible(*, execution_receipt_path, deployment, paths, commit_resolver):
+        events.append("authenticated_ancestor_checked")
+        return pinned
+
+    def save_operation(_descriptor, _name, value):
+        operation_documents.append(json.loads(value))
+
+    deployment = admission_runner._ProductionAdmissionDeployment(
+        data_home=tmp_path / "data",
+        repository_root=tmp_path / "repo",
+        outbox_root=tmp_path / "outbox",
+        execution_receipt_root=tmp_path / "outbox" / "receipts",
+        admission_root=tmp_path / "data" / "state" / "jaa-production-admissions",
+        environment=admission_runner.CURRENT_RUNTIME_ENVIRONMENT,
+        trust_root_id=admission_runner.CURRENT_RUNTIME_TRUST_ROOT_ID,
+        freshness_provenance=admission_runner.CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+    )
+    paths = SimpleNamespace(
+        data_descriptor=10,
+        verify_references=lambda: events.append("verify_references"),
+    )
+    child_descriptors = {"state": 20, "jaa-production-admissions": 21, "receipts": 22}
+    monkeypatch.setattr(
+        admission_runner,
+        "_read_admissible_published_handoff_pinned",
+        read_admissible,
+    )
+    monkeypatch.setattr(admission_runner, "HandoffAdmissionStore", FakeStore)
+    monkeypatch.setattr(admission_runner, "_prepare_database", lambda *_: None)
+    monkeypatch.setattr(admission_runner, "_create_or_exact", save_operation)
+    monkeypatch.setattr(
+        admission_runner,
+        "_open_private_child",
+        lambda _parent, name: child_descriptors[name],
+    )
+    monkeypatch.setattr(admission_runner.os, "dup", lambda _descriptor: 11)
+    monkeypatch.setattr(admission_runner.os, "close", lambda _descriptor: None)
+
+    result = admission_runner._run_production_handoff_admission_pinned(
+        execution_receipt_path=Path("receipt.json"),
+        deployment=deployment,
+        witness=None,
+        paths=paths,
+        commit_resolver=lambda *_: COMMIT,
+    )
+
+    assert events.index("authenticated_ancestor_checked") < next(
+        index for index, event in enumerate(events) if isinstance(event, tuple) and event[0] == "store_admit"
+    )
+    assert result.producer_commit_sha == ancestor_commit
+    assert operation_documents[0]["producer_commit_sha"] == ancestor_commit
+    assert result.document()["producer_commit_sha"] == ancestor_commit
+    assert result.document()["release_token_issued"] is False
+    assert result.document()["submission_authority"] is False
+
+
 def test_current_selection_accepts_only_verified_ancestor_producers(
     monkeypatch,
 ):
