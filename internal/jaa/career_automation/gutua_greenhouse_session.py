@@ -41,6 +41,11 @@ from .browser_executor import GreenhouseSuccessEvidence
 from .ats_application_authority import build_ats_application_authority
 from cv_generation.service import CandidateApplicationPackage
 from .candidate_contact_authority import load_candidate_contact_authority
+from .candidate_contact_authority import (
+    CurrentContactProvenance,
+    resolve_native_contact,
+)
+from .candidate_application_factory import CURRENT_RUNTIME_ENVIRONMENT
 from .candidate_release_gate import (
     CandidateAuthorityFiles,
     CandidateAuthorityReleaseGate,
@@ -81,7 +86,10 @@ from .production_runner import (
     ProductionRunCandidate,
     browser_runtime_options,
 )
-from .market_aligner_preparation import MarketApplicationMaterializationContext
+from .market_aligner_preparation import (
+    MarketApplicationMaterializationContext,
+    _contact_authority_provenance_sha256,
+)
 from .production_handoff_admission_runner import (
     run_production_handoff_admission,
     selected_published_handoffs,
@@ -1481,13 +1489,40 @@ class GutuaGreenhouseSession:
             prior_sha256=None,
             approved=True,
         )
-        contact_path = (
-            market_context.contact_authority_path
-            if market_context is not None
-            else _required_file(CONTACT_ENV)
+        current_runtime = (
+            market_context is not None
+            and market_context.market_decision_authority.environment
+            == CURRENT_RUNTIME_ENVIRONMENT
         )
-        contact_authority = load_candidate_contact_authority(
-            contact_path, repository_root=self.repository_root
+        contact_path = (
+            None
+            if current_runtime
+            else (
+                market_context.contact_authority_path
+                if market_context is not None
+                else _required_file(CONTACT_ENV)
+            )
+        )
+        contact_provenance = (
+            market_context.contact_provenance
+            if current_runtime and market_context is not None
+            else None
+        )
+
+        def validate_current_contact(provenance) -> None:
+            if market_context is None or provenance is not market_context.contact_provenance:
+                raise ValueError("current contact provenance differs from admitted context")
+            market_context.__post_init__()
+
+        contact_authority = resolve_native_contact(
+            current_runtime=current_runtime,
+            provenance=contact_provenance,
+            signed_path=contact_path,
+            current_type=CurrentContactProvenance,
+            validate_current=validate_current_contact,
+            load_legacy=lambda path: load_candidate_contact_authority(
+                path, repository_root=self.repository_root
+            ),
         )
         decision_row = self.decision_by_key[vacancy.job_key]
         decision = (
@@ -1717,7 +1752,9 @@ class GutuaGreenhouseSession:
                     policy_identity=POLICY_SHA256,
                     configuration_identity=content_hash({
                         "candidate_decision": decision_row["receipt_sha256"],
-                        "contact_authority": contact_authority.authority_sha256,
+                        "contact_authority": _contact_authority_provenance_sha256(
+                            contact_authority, current_runtime=current_runtime
+                        ),
                     }),
                 ),
                 generation_authority=generation_authority,
@@ -1916,7 +1953,9 @@ class GutuaGreenhouseSession:
                 configuration_identity=content_hash(
                     {
                         "candidate_decision": decision_row["receipt_sha256"],
-                        "contact_authority": contact_authority.authority_sha256,
+                        "contact_authority": _contact_authority_provenance_sha256(
+                            contact_authority, current_runtime=current_runtime
+                        ),
                         "provider_observation": (
                             observation_authority.observation_sha256
                         ),

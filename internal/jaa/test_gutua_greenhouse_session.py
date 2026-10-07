@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import career_automation.gutua_greenhouse_session as session_module
 import career_automation.candidate_contact_authority as contact_module
 import career_automation.production_runner as runner_module
+from jaa_core.contracts import CandidateContact
 from career_automation.gutua_greenhouse_session import GutuaGreenhouseSession
 from career_automation.gutua_greenhouse_session import (
     APPROVED_CANDIDATE_SOURCE_HASHES,
@@ -2293,3 +2294,138 @@ def test_original_visible_listing_is_archived_before_contact_authority(tmp_path,
         projected = json.loads((recorder.attempt.archive.root / review.relative_path).read_bytes())
         assert projected["exact_text"].encode("utf-8") != original
         browser.close()
+
+
+def test_prepare_application_uses_current_contact_provenance_without_legacy_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_hash = "a" * 64
+    contact_values = {
+        "full_name": "Synthetic Candidate",
+        "email": "candidate@example.org",
+        "phone": "+12025550123",
+        "city": None,
+    }
+    sources = {
+        name: [
+            {
+                "sha256": source_hash,
+                "locator": f"saved_cv_1.page1.line{line}",
+            }
+        ]
+        for name, line in (("full_name", 1), ("email", 2), ("phone", 3))
+    }
+    bound = contact_module.bind_contact_sources(
+        contact_values,
+        sources,
+        [source_hash],
+        {
+            "manifest_sha256": "b" * 64,
+            "activation_sha256": "c" * 64,
+            "profile_sha256": "d" * 64,
+            "approval_id": "synthetic-approval",
+        },
+    )
+    semantic_sha256 = str(bound["provenance_sha256"])
+    candidate_contact = CandidateContact(
+        full_name=contact_values["full_name"],
+        email=contact_values["email"],
+        phone=contact_values["phone"],
+        city=None,
+        record_id=f"current-contact-{semantic_sha256}",
+        record_version=1,
+        provenance_sha256=semantic_sha256,
+    )
+    encoded = (canonical_json(bound) + "\n").encode("utf-8")
+    provenance = contact_module.CurrentContactProvenance(
+        contact=candidate_contact,
+        encoded_document=encoded,
+        sha256=hashlib.sha256(encoded).hexdigest(),
+    )
+    vacancy_body = b"Synthetic local vacancy: build and test a demonstration service."
+    vacancy = VacancyArchiveIdentity(
+        job_key="greenhouse:synthetic-local:0003",
+        vacancy_sha256=hashlib.sha256(vacancy_body).hexdigest(),
+        source_url="http://127.0.0.1:1/synthetic/application",
+        role_title="Synthetic Software Engineer",
+        company_name="Example Systems",
+    )
+    revalidations = []
+
+    class CurrentContext:
+        contact_authority_path = None
+        contact_provenance = provenance
+        market_decision_authority = SimpleNamespace(
+            environment=session_module.CURRENT_RUNTIME_ENVIRONMENT,
+            decision_receipt=lambda: {"synthetic": True},
+        )
+
+        def __post_init__(self):
+            self.contact_provenance.__post_init__()
+            revalidations.append("current")
+
+    context = CurrentContext()
+    session = object.__new__(GutuaGreenhouseSession)
+    session.approved_evidence_path = tmp_path / "approved-evidence.json"
+    session.archive_root = tmp_path
+    session.repository_root = Path(__file__).resolve().parents[2]
+    session.market_context_by_key = {vacancy.job_key: context}
+    session.complete_vacancy_by_key = {vacancy.job_key: vacancy_body}
+    session.decision_by_key = {vacancy.job_key: {"receipt": {"synthetic": True}}}
+    session.candidate_projection = {"synthetic": True}
+    monkeypatch.setattr(
+        session_module,
+        "verify_vacancy_body_equivalence",
+        lambda *_args, **_kwargs: {"equivalent": True},
+    )
+    monkeypatch.setattr(
+        session_module,
+        "build_vacancy_review_material",
+        lambda **_kwargs: SimpleNamespace(document=lambda: {"synthetic": True}),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_required_file",
+        lambda _name: pytest.fail("current mode requested a legacy contact path"),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "load_candidate_contact_authority",
+        lambda *_args, **_kwargs: pytest.fail("current mode invoked the legacy loader"),
+    )
+    captured = {}
+
+    class Attempt:
+        def add_artifact(self, *_args, **_kwargs):
+            pass
+
+    class Recorder:
+        attempt = Attempt()
+
+        def add_revision(self, *_args, **_kwargs):
+            pass
+
+    class Page:
+        def content(self):
+            return "<html><body>Synthetic local vacancy</body></html>"
+
+        def locator(self, _selector):
+            return SimpleNamespace(inner_text=lambda: "Synthetic local vacancy")
+
+    class Sink:
+        def generate_candidate_application(self, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    item = SimpleNamespace(vacancy=SimpleNamespace(vacancy=vacancy))
+    with pytest.raises(
+        TypeError, match="owned candidate generator returned an invalid package"
+    ):
+        session._prepare_application(item, Recorder(), Page(), Sink(), review_only=True)
+
+    assert captured["contact"] is candidate_contact
+    assert revalidations == ["current"]
+    assert provenance.sha256 != candidate_contact.provenance_sha256
+    assert session_module._contact_authority_provenance_sha256(
+        provenance, current_runtime=True
+    ) == candidate_contact.provenance_sha256

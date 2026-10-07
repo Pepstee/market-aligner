@@ -844,6 +844,42 @@ def load_candidate_contact_authority(
     )
 
 
+def resolve_native_contact(
+    *,
+    current_runtime,
+    provenance,
+    signed_path,
+    current_type,
+    validate_current,
+    load_legacy,
+):
+    if type(current_runtime) is not bool:
+        raise TypeError("current_runtime must be exactly bool")
+    if not isinstance(current_type, type):
+        raise TypeError("current_type must be a class")
+    if not callable(validate_current):
+        raise TypeError("validate_current must be callable")
+    if not callable(load_legacy):
+        raise TypeError("load_legacy must be callable")
+
+    if current_runtime:
+        if signed_path is not None:
+            raise ValueError("current mode refuses a legacy signed contact path")
+        if type(provenance) is not current_type:
+            raise ValueError("current mode requires exact typed contact provenance")
+        result = validate_current(provenance)
+        if result is not None:
+            raise ValueError("current contact validation did not return None")
+        return provenance
+
+    if provenance is not None:
+        raise ValueError("legacy mode refuses current contact provenance")
+    is_nonempty_str = isinstance(signed_path, str) and signed_path != ""
+    if not is_nonempty_str and not isinstance(signed_path, os.PathLike):
+        raise ValueError("legacy mode requires a signed contact path")
+    return load_legacy(signed_path)
+
+
 __all__ = [
     "ATTESTATION",
     "CandidateContactAuthority",
@@ -851,6 +887,7 @@ __all__ = [
     "CurrentContactProvenance",
     "bind_contact_sources",
     "load_current_contact_provenance",
+    "resolve_native_contact",
     "SCHEMA_VERSION",
     "PUBLIC_KEY_ENV",
     "REGISTRY_ATTESTATION",
