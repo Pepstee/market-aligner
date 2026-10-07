@@ -525,7 +525,7 @@ def test_current_cover_letter_runtime_binds_writer_and_humanizer_prompts() -> No
         not in writer_instructions
     )
     assert (
-        "Opening uses the exact salutation and supplied plain role/company sentence, followed only by its bound facts."
+        "In Opening, emit separate atoms in this order: the exact supplied salutation as source_kind 'connective' with claim_id null; the exact role/company sentence in rhetorical_catalog['Opening'] as a separate 'connective' with claim_id null; then only zero or more approved_claim atoms assigned to Opening, each retaining its bound claim_id. Do not combine, omit, reorder, or relabel these atoms."
         in writer_instructions
     )
     assert (
@@ -585,6 +585,10 @@ def test_current_cover_letter_runtime_binds_writer_and_humanizer_prompts() -> No
     assert writer_request["available_claim_ids"] == expected_claim_ids
     assert humanizer_request["available_claim_ids"] == expected_claim_ids
     humanizer_instructions = " ".join(humanizer_request["instructions"])
+    assert (
+        "Preserve the two separate Opening connective atoms in order, with null claim IDs and exact text; do not combine or remove them."
+        in humanizer_instructions
+    )
     assert (
         "Do not add generic signposts or an Opening employer hook; follow the supplied claim assignments."
         in humanizer_instructions

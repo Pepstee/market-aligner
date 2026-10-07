@@ -774,9 +774,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_queue.py": {
-    "mtime": 1791374298.761474,
-    "seen": 1791374906.7930038,
-    "ast_hash": "06cca984d6bb1b35547d2b8d368a5247",
+    "mtime": 1791391575.1212003,
+    "seen": 1791391767.9625745,
+    "ast_hash": "df1e97f406225c578987a04bd3dc3659",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/production_runner.py": {
@@ -3246,9 +3246,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_production_queue.py": {
-    "mtime": 1791374588.7454743,
-    "seen": 1791374906.793468,
-    "ast_hash": "d26055a2378c4ff7bc825ed1aec8741d",
+    "mtime": 1791391608.6011982,
+    "seen": 1791391767.9629672,
+    "ast_hash": "6ea56de73aeeb929ca8a0a09931ff23b",
     "semantic_hash": ""
   },
   "internal/jaa/test_production_runner.py": {
@@ -4068,9 +4068,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/cv_generation/editorial_composition.py": {
-    "mtime": 1791389692.4292285,
-    "seen": 1791390007.2151318,
-    "ast_hash": "145db2b22ce094f9c753d87da7dab5a9",
+    "mtime": 1791391115.6332061,
+    "seen": 1791391288.3718023,
+    "ast_hash": "a4dcbc43f60c1b0374aca04323e91d1b",
     "semantic_hash": ""
   },
   "internal/jaa/form_filling/ats_forensics.py": {
@@ -4146,9 +4146,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_cover_letter_editorial_parity.py": {
-    "mtime": 1791389802.5252235,
-    "seen": 1791390007.2153082,
-    "ast_hash": "5d00b58b6e37cb0547c9ed85b9700408",
+    "mtime": 1791391115.6692061,
+    "seen": 1791391288.3719718,
+    "ast_hash": "e35da73badd6d4a6df7b4c064b153e6b",
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_adversarial_rebuild.py": {
@@ -4800,9 +4800,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_current_editorial_request_contract.py": {
-    "mtime": 1791364849.8056216,
-    "seen": 1791364958.1542163,
-    "ast_hash": "33646301440788ac4bb24ff636df6065",
+    "mtime": 1791391115.7012062,
+    "seen": 1791391288.3719728,
+    "ast_hash": "36943338c9e4232db3328e8a5e2fe26f",
     "semantic_hash": ""
   },
   "internal/jaa/test_current_review_source_binding.py": {

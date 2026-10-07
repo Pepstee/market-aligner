@@ -194,6 +194,8 @@ def test_incomplete_review_only_intent_is_mode_aware_from_archive(tmp_path: Path
 
     assert len(prior) == 1
     assert prior[0].review_only_intent_present is True
+    assert prior[0].semantic_fence_present is False
+    assert prior[0].terminal_recovery_pending is False
     live_queue = build_ascending_queue((candidate,), prior_attempts=prior, as_of=NOW)
     assert live_queue.next_action is None
     assert live_queue.excluded[0].reason == "prior_incomplete_review_only"
@@ -213,6 +215,100 @@ def test_incomplete_review_only_intent_is_mode_aware_from_archive(tmp_path: Path
         build_ascending_queue((candidate,), prior_attempts=prior, review_only=1)
     with pytest.raises(ProductionQueueError, match="review-only intent state"):
         replace(prior[0], review_only_intent_present=1)
+    with pytest.raises(ProductionQueueError, match="semantic fence state"):
+        replace(prior[0], semantic_fence_present=1)
+    with pytest.raises(ProductionQueueError, match="terminal recovery state"):
+        replace(prior[0], terminal_recovery_pending=1)
+
+
+def test_review_only_queue_skips_fenced_archive_and_selects_fresh_candidate(
+    tmp_path: Path,
+) -> None:
+    consumed = _candidate("10", "0.1")
+    fresh = _candidate("11", "0.2")
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=tmp_path / "archive",
+        repository_root=ROOT,
+        vacancy=consumed.vacancy,
+        complete_vacancy=b"vacancy-10",
+        structured_vacancy={},
+        assessment={},
+    )
+    recorder.begin_review_only()
+    recorder.attempt.add_artifact(
+        "review.semantic_intent",
+        (
+            json.dumps(
+                {"attempt_id": recorder.attempt.attempt_id},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+            + b"\n"
+        ),
+        media_type="application/json",
+    )
+
+    prior = prior_attempts_from_archive(recorder.attempt.archive)
+    assert len(prior) == 1
+    assert prior[0].review_only_intent_present is True
+    assert prior[0].semantic_fence_present is True
+    assert prior[0].terminal_recovery_pending is False
+
+    queue = build_ascending_queue(
+        (consumed, fresh), prior_attempts=prior, as_of=NOW, review_only=True
+    )
+
+    assert len(queue.excluded) == 1
+    assert queue.excluded[0].vacancy.vacancy.job_key == consumed.vacancy.job_key
+    assert queue.excluded[0].reason == "prior_incomplete_review_only_semantic_fence"
+    assert len(queue.ready) == 1
+    assert queue.next_action is not None
+    assert queue.next_action.vacancy == fresh
+    assert queue.next_action.action == "create_attempt"
+    assert queue.next_action.attempt_id is None
+
+
+def test_review_only_queue_preserves_pending_terminal_recovery(tmp_path: Path) -> None:
+    candidate = _candidate("10", "0.2")
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=tmp_path / "archive",
+        repository_root=ROOT,
+        vacancy=candidate.vacancy,
+        complete_vacancy=b"vacancy-10",
+        structured_vacancy={},
+        assessment={},
+    )
+    recorder.begin_review_only()
+    recorder.attempt.add_artifact(
+        "review.semantic_intent",
+        (
+            json.dumps(
+                {"attempt_id": recorder.attempt.attempt_id},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+            + b"\n"
+        ),
+        media_type="application/json",
+    )
+    recorder._record_evidence("terminal", result="completed", members={})
+
+    prior = prior_attempts_from_archive(recorder.attempt.archive)
+    assert prior[0].review_only_intent_present is True
+    assert prior[0].semantic_fence_present is True
+    assert prior[0].terminal_recovery_pending is True
+    review_queue = build_ascending_queue(
+        (candidate,), prior_attempts=prior, as_of=NOW, review_only=True
+    )
+    assert review_queue.next_action is not None
+    assert review_queue.next_action.action == "resume_attempt"
+    assert review_queue.next_action.attempt_id == recorder.attempt.attempt_id
+
+    live_queue = build_ascending_queue(
+        (candidate,), prior_attempts=prior, as_of=NOW
+    )
+    assert live_queue.next_action is None
+    assert live_queue.excluded[0].reason == "prior_incomplete_review_only"
 
 
 @pytest.mark.parametrize("review_only", [False, True])

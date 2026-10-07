@@ -442,6 +442,29 @@ def test_current_cover_candidate_paraphrase_allowed_and_employer_change_refused(
         current_runtime=True,
     )
     validate_cover_letter_editorial_draft(request, draft)
+    combined_opening = CoverLetterSection(
+        "Opening",
+        (
+            EditorialAtom(
+                "connective",
+                "Dear Hiring Manager, I am applying for the Software Engineer role at Example Company.",
+                None,
+            ),
+            EditorialAtom(
+                "approved_claim",
+                "Example Company runs a support platform for software teams.",
+                "cov-emp-1",
+            ),
+        ),
+        current_runtime=True,
+    )
+    combined_opening_draft = build_cover_letter_editorial_draft(
+        candidate_name="Alex Example",
+        sections=(combined_opening, *draft.sections[1:]),
+        current_runtime=True,
+    )
+    with pytest.raises(EditorialCompositionError):
+        validate_cover_letter_editorial_draft(request, combined_opening_draft)
     changed = build_cover_letter_editorial_draft(
         candidate_name="Alex Example",
         sections=_current_cover_sections(
