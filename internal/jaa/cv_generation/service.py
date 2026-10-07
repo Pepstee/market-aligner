@@ -81,6 +81,7 @@ from .editorial_composition import (
     EditorialStageEvidence,
     admit_cover_letter_editorial_composition,
     admit_editorial_composition,
+    editorial_section_policy,
     validate_cover_letter_editorial_draft,
     validate_editorial_draft,
 )
@@ -164,6 +165,11 @@ def _source_for_editorial_draft(
     ):
         raise CVCompositionServiceError("artifact contact differs from editorial authority")
 
+    allowed_headings = (
+        editorial_section_policy(current_runtime=True)
+        if request.authority.current_runtime
+        else CV_SECTION_HEADINGS
+    )
     facts_by_text: dict[str, list[FactualSentence]] = {}
     for fact in base_source.facts:
         if fact.document_kind == "cv":
@@ -177,7 +183,7 @@ def _source_for_editorial_draft(
     selected_slots: dict[str, StyleSlot] = {}
     sections: list[DocumentSection] = []
     for section in draft.sections:
-        if section.heading not in CV_SECTION_HEADINGS:
+        if section.heading not in allowed_headings:
             raise CVCompositionServiceError(
                 "editorial section is unsupported by the canonical renderer"
             )

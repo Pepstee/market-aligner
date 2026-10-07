@@ -1,11 +1,11 @@
 {
   "community_count": 29688,
-  "edge_count": 76204,
-  "node_count": 57276,
+  "edge_count": 76231,
+  "node_count": 57279,
   "outputs": {
     ".graphify_labels.json": "958acceca6590be59b5abe496d1da2b771cde8a75bf348c766f377db451ecf62",
     "GRAPH_REPORT.md": "ce27e7ebb64972e1172f0ab3a8534c993e4bc4efc932459e785b9017967fc201",
-    "graph.json": "9bdf700820e0767428daa2a977f8c04f40dfab5630d994c10039cacb94c6fa7c"
+    "graph.json": "1efdae1ff53a60a5a951d0b6a270545a9d1e39b8a6f8f23eb19cf87139cda84d"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "4a19886b50fb89bcad3bf77706a9a951ea05bb31",
+  "source_base_commit": "5aeb59e70f8ba718c05427c9c526b7e44783687b",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -233,7 +233,7 @@
     "internal/jaa/cv_generation/constraints.py": "fe822acb7502183db47361b108549080315b5ed0410bad5595d2779981e1d4cc",
     "internal/jaa/cv_generation/document_quality.py": "871734dce186ac773f9d5b468506e1e73963f560958502b1e9c8be9579fc21aa",
     "internal/jaa/cv_generation/editorial_composition.py": "0c71dec07cf40f30a90ff3fd8b48edbb6b2ebb2ddd89d21c8838af8a88a09312",
-    "internal/jaa/cv_generation/service.py": "d297f3a9be82c57c775117b4feef9d79915ed51a184ef8063c66a81514c16fd8",
+    "internal/jaa/cv_generation/service.py": "b4807ef1ead4deb96e72437d9b0edec5748c7977b410174515441d6188b7d8c9",
     "internal/jaa/docs/APPLICATION_SANITY_REVIEW.md": "24063e6959ec9c58870d6e793e55f209edc1cb2d44fdfbdb7749f3f396b03dda",
     "internal/jaa/docs/AUTONOMOUS_CAREER_PIPELINE.md": "6bab386a619fe56dc01d8f0865f5d0e98624d2f245cf40d43615ff4eb8d3c627",
     "internal/jaa/docs/BORROWED_PATTERNS_IMPLEMENTATION.md": "2b523f646931301a5af90801cdf996f391957f93745dc6c69ca05a1e85702a4d",
@@ -513,7 +513,7 @@
     "internal/jaa/test_cover_letter_editorial_parity.py": "662cef295c2f1a9a7f6acacd2ce7449dbb07ab42954e8ceb67c7560f2fbd3b9e",
     "internal/jaa/test_cv_adversarial_rebuild.py": "cba481c39629d15c0c52f712c66300efd9729d71bbbb5740aa115d0b70d59a93",
     "internal/jaa/test_cv_benchmark_learning.py": "8d5851cc6c2a7505ff94e612e788c290c3f5582bde481a109097d507537cb4c4",
-    "internal/jaa/test_cv_composition_service.py": "4fffd337cddc22d89e19cc24a24d0220f5f04366a3abf56b0eaa2ed301f45225",
+    "internal/jaa/test_cv_composition_service.py": "ce3c0a81d4470a708a37d0556803ee3a378edc7c74301ab3bfd4b35a29b25a20",
     "internal/jaa/test_cv_document_quality.py": "4f10d6a2317a5dbf8a13dfeff7f54071de7b5ed2ffaa94acb67091d58affdd8f",
     "internal/jaa/test_cv_editorial_composition.py": "44ed6f785d96a6925681c794dac9899d790add3e25770f935f9f92a7391de5ea",
     "internal/jaa/test_cv_generation_constraints.py": "357491d63f0aec06588fe1c51bd5fc1af6ba80f0fa245e4c4b3992ea35330b5d",

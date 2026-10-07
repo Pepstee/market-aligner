@@ -14,6 +14,7 @@ from career_automation.adversarial_recruiter import (
     assess_application_as_recruiter,
 )
 from career_automation.application_compiler import DocumentSection, StyleSlot
+from career_automation.rendering import CV_SECTION_HEADINGS, render_pdf_artifacts
 from career_automation.handoff_admission import (
     HandoffAdmissionError,
     VerifiedApplicationInput,
@@ -45,14 +46,17 @@ from cv_generation.editorial_composition import (
     CVSection,
     CandidateEditorialAuthority,
     EditorialAtom,
+    EditorialCompositionError,
     EditorialStageEvidence,
     build_editorial_draft,
     build_editorial_request,
+    editorial_section_policy,
     humanizer_request_sha256,
 )
 from cv_generation.service import (
     CVCompositionServiceError,
     _reidentify_source,
+    _source_for_editorial_draft,
     run_cv_composition_orchestration,
 )
 from llm.client import Backend, LLMClient, LLMResponse
@@ -383,6 +387,105 @@ def _fixture(tmp_path):
     )
     assessor = _InjectedAssessor(tmp_path)
     return base_source, listing, request, draft, writer, humanizer, assessor
+
+
+@pytest.mark.parametrize(
+    "heading",
+    (
+        "Highlights",
+        "Results",
+        "Outcomes",
+        "Skills",
+        "Certifications",
+    ),
+)
+def test_current_renderer_projects_and_renders_policy_headings(heading) -> None:
+    base_source, _ = _source()
+    cv_fact = next(row for row in base_source.facts if row.document_kind == "cv")
+    categories = editorial_section_policy(current_runtime=True)[heading]
+    assert len(categories) == 1
+    category = next(iter(categories))
+    authority = CandidateEditorialAuthority(
+        candidate_name=base_source.contact.full_name,
+        candidate_city=base_source.contact.city,
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+        current_runtime=True,
+    )
+    claim = ApprovedCVClaim(
+        claim_id=f"synthetic-{heading.casefold()}",
+        text=cv_fact.text,
+        text_sha256=hashlib.sha256(cv_fact.text.encode()).hexdigest(),
+        evidence_ids=(f"synthetic-evidence-{heading.casefold()}",),
+        category=category,
+    )
+    request = build_editorial_request(
+        authority=authority,
+        role_title=base_source.role_title,
+        company_name=base_source.company_name,
+        vacancy_sha256=base_source.vacancy_sha256,
+        approved_claims=(claim,),
+    )
+    draft = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        current_runtime=True,
+        sections=(
+            CVSection(
+                heading,
+                (EditorialAtom("approved_claim", cv_fact.text, claim.claim_id),),
+            ),
+        ),
+    )
+
+    projected = _source_for_editorial_draft(
+        base_source=base_source,
+        request=request,
+        draft=draft,
+    )
+
+    assert tuple(section.heading for section in projected.cv_sections) == (heading,)
+    assert projected.cv_sections[0].sentence_ids == (cv_fact.sentence_id,)
+    artifacts = render_pdf_artifacts(projected)
+    assert f"\n{heading}\n" in artifacts.editable.cv_text
+    assert any(heading in page for page in artifacts.cv_pdf.rendered_lines)
+
+
+def test_current_renderer_headings_do_not_expand_legacy_or_unknown_policy() -> None:
+    expected_legacy_headings = frozenset(
+        {
+            "Professional Summary",
+            "Core Capabilities",
+            "Projects",
+            "Education",
+            "Experience",
+            "Skills",
+        }
+    )
+    assert CV_SECTION_HEADINGS == expected_legacy_headings
+    assert "Highlights" not in editorial_section_policy()
+    assert {
+        "Highlights",
+        "Results",
+        "Outcomes",
+        "Skills",
+        "Certifications",
+    } <= set(editorial_section_policy(current_runtime=True))
+
+    atom = EditorialAtom("approved_claim", "Synthetic approved fact.", "claim")
+    with pytest.raises(EditorialCompositionError, match="section heading is unsupported"):
+        CVSection("Unregistered Heading", (atom,))
+    with pytest.raises(EditorialCompositionError, match="editorial draft layout is invalid"):
+        build_editorial_draft(
+            candidate_name="Synthetic Candidate",
+            candidate_city="Synthetic City",
+            sections=(CVSection("Highlights", (atom,)),),
+        )
+
+    legacy_source, _ = _source()
+    legacy_artifacts = render_pdf_artifacts(legacy_source)
+    assert "Professional Summary" in legacy_artifacts.editable.cv_text
 
 
 def _binding(request, recruiter_receipt: RecruiterAssessmentReceipt):
