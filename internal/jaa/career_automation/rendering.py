@@ -482,26 +482,47 @@ def _join_letter_paragraph(
 
 
 def _letter_paragraphs(source: ApplicationSource) -> tuple[str, ...]:
+    style_slot_ids_by_section = [
+        section.style_slot_ids for section in source.letter_sections
+    ]
+    typed_closing_signoff = None
+    if source.letter_sections:
+        final_style_slot_ids = style_slot_ids_by_section[-1]
+        if len(final_style_slot_ids) >= 2:
+            slots = {row.slot_id: row.text for row in source.style_slots}
+            signoff = {
+                "Kind regards": "Kind regards,",
+                "Kind regards,": "Kind regards,",
+                "Sincerely": "Sincerely,",
+                "Sincerely,": "Sincerely,",
+            }.get(slots[final_style_slot_ids[-2]])
+            if (
+                signoff is not None
+                and slots[final_style_slot_ids[-1]] == source.contact.full_name
+            ):
+                typed_closing_signoff = signoff
+                style_slot_ids_by_section[-1] = final_style_slot_ids[:-2]
     paragraphs = tuple(
         _join_letter_paragraph(
             source,
             section.sentence_ids,
-            section.style_slot_ids,
+            style_slot_ids_by_section[index],
         )
-        for section in source.letter_sections
+        for index, section in enumerate(source.letter_sections)
     )
     if source.letter_sections:
         opening = source.letter_sections[0]
-        if opening.style_slot_ids:
+        opening_style_slot_ids = style_slot_ids_by_section[0]
+        if opening_style_slot_ids:
             slots = {row.slot_id: row.text for row in source.style_slots}
-            salutation = slots[opening.style_slot_ids[0]].strip()
+            salutation = slots[opening_style_slot_ids[0]].strip()
             if salutation.casefold().startswith("dear "):
                 if not salutation.endswith((",", ".", "!", "?")):
                     salutation += ","
                 opening_body = _join_letter_paragraph(
                     source,
                     opening.sentence_ids,
-                    opening.style_slot_ids[1:],
+                    opening_style_slot_ids[1:],
                 ).strip()
                 paragraphs = (
                     salutation,
@@ -510,6 +531,13 @@ def _letter_paragraphs(source: ApplicationSource) -> tuple[str, ...]:
                 )
     if not paragraphs or not paragraphs[0].casefold().startswith("dear "):
         paragraphs = ("Dear Hiring Manager,", *paragraphs)
+    if typed_closing_signoff is not None:
+        if paragraphs and not paragraphs[-1].strip():
+            paragraphs = paragraphs[:-1]
+        return (
+            *paragraphs,
+            f"{typed_closing_signoff}\n{source.contact.full_name}",
+        )
     closing = paragraphs[-1]
     if closing.casefold().startswith(("kind regards", "sincerely")):
         if source.contact.full_name not in closing.splitlines():

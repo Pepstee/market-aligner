@@ -1,11 +1,11 @@
 {
   "community_count": 29688,
-  "edge_count": 77131,
-  "node_count": 57542,
+  "edge_count": 77150,
+  "node_count": 57549,
   "outputs": {
     ".graphify_labels.json": "958acceca6590be59b5abe496d1da2b771cde8a75bf348c766f377db451ecf62",
     "GRAPH_REPORT.md": "ce27e7ebb64972e1172f0ab3a8534c993e4bc4efc932459e785b9017967fc201",
-    "graph.json": "56d1496ce73ffed6eda735f4f26558e055e2625b2f74275076e1daa3ea474ca1"
+    "graph.json": "5ef548794936643b1cc8a51baff4ecf8f559bb8353644f147e1e9d53778f8b21"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "2727f6ca617775a9820e110bffbd8d754de7507e",
+  "source_base_commit": "bb0bd30f3033d720afccb41535b3858b0ce443c0",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -187,7 +187,7 @@
     "internal/jaa/career_automation/recruitee_live_adapter.py": "a61f17a63523a66fae169c8fc330392bf2d23ae3abfbf64c76fcbf3eba707a56",
     "internal/jaa/career_automation/release_certification.py": "603a184b928d4202d33f62403542337744bd04872180fe20ec517afe1ef04dea",
     "internal/jaa/career_automation/release_gate.py": "6a1cba7642c0e2ed6f0b4ac2158ad7c1318113999bb63ab63d83f7b57e74bb31",
-    "internal/jaa/career_automation/rendering.py": "6177d8775507ac5168286433a3583cd31b985ece8a58dd3d35f93fc30c37f51e",
+    "internal/jaa/career_automation/rendering.py": "6e0679ad2e1c995e0108220bcea9f1ed63817fb7b980b9d366527874f504b66f",
     "internal/jaa/career_automation/retrieval.py": "6f3c13558a3e5b311783447b52265dd04c56f2536fd3a730bbbcd7b961216289",
     "internal/jaa/career_automation/review_material.py": "da06ca350bd6cca05eb233a934357273041f3b4026208ec9bea837451dcabeb5",
     "internal/jaa/career_automation/runtime_compatibility.py": "9896f388d13f03925425cd8d93b07539d0e6993955eea02b84d0dbb5e657d190",

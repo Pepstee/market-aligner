@@ -822,9 +822,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/rendering.py": {
-    "mtime": 1790916467.5272331,
-    "seen": 1790917186.9893467,
-    "ast_hash": "ee2af904326dc544839606c0b9f93500",
+    "mtime": 1791360101.0377069,
+    "seen": 1791360710.8874054,
+    "ast_hash": "1f0cb56e767456cbfc30164b179c9d66",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/retrieval.py": {
@@ -4791,6 +4791,12 @@
     "mtime": 1791356150.9417639,
     "seen": 1791356640.0359402,
     "ast_hash": "a92586e97f341387ec0f194f0a5ffd8c",
+    "semantic_hash": ""
+  },
+  "internal/jaa/test_cover_letter_closing_rendering.py": {
+    "mtime": 1791360101.0737069,
+    "seen": 1791360710.8876224,
+    "ast_hash": "29238e44a988cb0d7f1fc0e96a410960",
     "semantic_hash": ""
   }
 }
