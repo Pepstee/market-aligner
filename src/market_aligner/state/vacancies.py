@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 import time
@@ -600,6 +601,8 @@ expected_content_sha256,status,started_at,old_content_sha256,
 old_canonical_content_sha256,old_fetched_at,old_raw_bytes,old_object_sha256,
 new_content_sha256,new_fetched_at,new_raw_bytes,
 new_object_sha256,receipt_basis_json,receipt_basis_sha256,transition_sha256"""
+_REFRESH_CONTEXT_PARENT_KEY = "supersedes_indeterminate_operation_id"
+_REFRESH_OPERATION_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
 
 
 def _refresh_transition_document(value: Mapping[str, object]) -> dict[str, object]:
@@ -621,6 +624,64 @@ def _refresh_transition_document(value: Mapping[str, object]) -> dict[str, objec
         "started_at": value["started_at"],
         "status": value["status"],
     }
+
+
+def _validate_refresh_context_document(
+    context: object,
+    *,
+    expected_content_sha256: str,
+    job_key: str,
+    operation_id: str,
+) -> None:
+    if not isinstance(context, dict):
+        raise VacancyRefreshConflict("refresh operation context is not an object")
+    context_schema = context.get("schema_version")
+    base_context_fields = {
+        "config_sha256",
+        "expected_content_sha256",
+        "job_key",
+        "operation_id",
+        "source_sha256",
+    }
+    if context_schema == "market-aligner.vacancy-refresh-context.v1":
+        expected_context_fields = base_context_fields | {"schema_version"}
+    elif context_schema == "market-aligner.vacancy-refresh-context.v2":
+        expected_context_fields = base_context_fields | {
+            "schema_version",
+            _REFRESH_CONTEXT_PARENT_KEY,
+        }
+        parent_operation_id = context.get(_REFRESH_CONTEXT_PARENT_KEY)
+        if (
+            type(parent_operation_id) is not str
+            or re.fullmatch(_REFRESH_OPERATION_ID_PATTERN, parent_operation_id) is None
+            or parent_operation_id == operation_id
+        ):
+            raise VacancyRefreshConflict(
+                "refresh successor parent identity is invalid"
+            )
+    else:
+        raise VacancyRefreshConflict("refresh operation context schema is unsupported")
+    if set(context) != expected_context_fields:
+        raise VacancyRefreshConflict("refresh operation context fields differ")
+    expected_fields = {
+        "expected_content_sha256": expected_content_sha256,
+        "job_key": job_key,
+        "operation_id": operation_id,
+        "schema_version": context_schema,
+    }
+    if any(
+        not _authority_equal(context.get(key), expected)
+        for key, expected in expected_fields.items()
+    ):
+        raise VacancyRefreshConflict("refresh operation context differs from journal")
+    for key in ("config_sha256", "source_sha256"):
+        identity = context.get(key)
+        if (
+            not isinstance(identity, str)
+            or len(identity) != 64
+            or any(character not in "0123456789abcdef" for character in identity)
+        ):
+            raise VacancyRefreshConflict(f"refresh operation {key} is not a SHA-256")
 
 
 def _refresh_transition_from_row(
@@ -659,29 +720,14 @@ def _refresh_transition_from_row(
 
 def _validate_refresh_transition(value: Mapping[str, object]) -> None:
     context = value["context"]
-    if not isinstance(context, dict):
-        raise VacancyRefreshConflict("refresh operation context is not an object")
     if _canonical_hash(context) != value["context_sha256"]:
         raise VacancyRefreshConflict("refresh operation context identity differs")
-    exact_context_fields = {
-        "expected_content_sha256": value["expected_content_sha256"],
-        "job_key": value["job_key"],
-        "operation_id": value["operation_id"],
-        "schema_version": "market-aligner.vacancy-refresh-context.v1",
-    }
-    if any(
-        not _authority_equal(context.get(key), expected)
-        for key, expected in exact_context_fields.items()
-    ):
-        raise VacancyRefreshConflict("refresh operation context differs from journal")
-    for key in ("config_sha256", "source_sha256"):
-        identity = context.get(key)
-        if (
-            not isinstance(identity, str)
-            or len(identity) != 64
-            or any(character not in "0123456789abcdef" for character in identity)
-        ):
-            raise VacancyRefreshConflict(f"refresh operation {key} is not a SHA-256")
+    _validate_refresh_context_document(
+        context,
+        expected_content_sha256=str(value["expected_content_sha256"]),
+        job_key=str(value["job_key"]),
+        operation_id=str(value["operation_id"]),
+    )
     expected_refresh_id = _canonical_hash(
         {
             "context_sha256": value["context_sha256"],
@@ -2419,6 +2465,7 @@ class JobDatabase:
         expected_content_sha256: str,
         started_at: str,
         old_raw_bytes: bytes,
+        supersedes_indeterminate_operation_id: str | None = None,
     ) -> dict[str, object]:
         """Persist an exact old-response intent before any official refetch."""
 
@@ -2443,6 +2490,33 @@ class JobDatabase:
         )
         if _canonical_hash(canonical_context) != context_sha256:
             raise ValueError("refresh operation context bytes differ from its identity")
+        _validate_refresh_context_document(
+            canonical_context,
+            expected_content_sha256=expected_content_sha256,
+            job_key=job_key,
+            operation_id=operation_id,
+        )
+        context_parent = canonical_context.get(_REFRESH_CONTEXT_PARENT_KEY)
+        if supersedes_indeterminate_operation_id is None:
+            if (
+                _REFRESH_CONTEXT_PARENT_KEY in canonical_context
+                or canonical_context.get("schema_version")
+                != "market-aligner.vacancy-refresh-context.v1"
+            ):
+                raise ValueError("refresh successor context requires its exact parent")
+        elif (
+            type(supersedes_indeterminate_operation_id) is not str
+            or re.fullmatch(
+                _REFRESH_OPERATION_ID_PATTERN,
+                supersedes_indeterminate_operation_id,
+            )
+            is None
+            or supersedes_indeterminate_operation_id == operation_id
+            or context_parent != supersedes_indeterminate_operation_id
+            or canonical_context.get("schema_version")
+            != "market-aligner.vacancy-refresh-context.v2"
+        ):
+            raise ValueError("refresh successor parent differs from its context")
         if old_raw.key != job_key:
             raise ValueError("old raw-cache response differs from refresh vacancy")
         old_object_sha256 = hashlib.sha256(old_raw_bytes).hexdigest()
@@ -2465,15 +2539,18 @@ class JobDatabase:
                 )
                 assert loaded is not None
                 return loaded
-            blocked = conn.execute(
-                """SELECT operation_id,status FROM vacancy_refreshes
-                   WHERE job_key=?
-                     AND status IN (
-                       'intent','fetch_started','indeterminate','fetched','object_ready'
-                     )
-                   ORDER BY created_at,operation_id LIMIT 1""",
+            refresh_rows = conn.execute(
+                f"SELECT {_REFRESH_SELECT} FROM vacancy_refreshes "
+                "WHERE job_key=? ORDER BY created_at,operation_id",
                 (job_key,),
-            ).fetchone()
+            ).fetchall()
+            refreshes = [_refresh_transition_from_row(row) for row in refresh_rows]
+            blocking = [
+                transition
+                for transition in refreshes
+                if transition["status"]
+                in ("intent", "fetch_started", "indeterminate", "fetched", "object_ready")
+            ]
             quarantined = conn.execute(
                 """SELECT operation_id,refresh_id,job_key,expected_content_sha256,
                           legacy_status,legacy_table,legacy_row_sha256
@@ -2489,16 +2566,71 @@ class JobDatabase:
                     "a legacy vacancy refresh is quarantined and requires explicit "
                     f"reconciliation: {quarantined[0]} ({quarantined[4]})"
                 )
-            if blocked is not None:
-                conn.rollback()
-                if blocked[1] in ("fetch_started", "indeterminate"):
-                    raise VacancyRefreshIndeterminate(
-                        "a prior official fetch is indeterminate and requires explicit "
-                        f"reconciliation: {blocked[0]}"
+            if supersedes_indeterminate_operation_id is None:
+                if blocking:
+                    blocked = blocking[0]
+                    conn.rollback()
+                    if blocked["status"] in ("fetch_started", "indeterminate"):
+                        raise VacancyRefreshIndeterminate(
+                            "a prior official fetch is indeterminate and requires explicit "
+                            f"reconciliation: {blocked['operation_id']}"
+                        )
+                    raise VacancyRefreshConflict(
+                        f"a prior vacancy refresh is still active: {blocked['operation_id']}"
                     )
-                raise VacancyRefreshConflict(
-                    f"a prior vacancy refresh is still active: {blocked[0]}"
-                )
+            else:
+                refreshes_by_operation = {
+                    str(transition["operation_id"]): transition
+                    for transition in refreshes
+                }
+                parent_chain: set[str] = set()
+                parent_operation_id: str | None = supersedes_indeterminate_operation_id
+                while parent_operation_id is not None:
+                    if parent_operation_id in parent_chain:
+                        conn.rollback()
+                        raise VacancyRefreshIndeterminate(
+                            "indeterminate refresh ancestry is cyclic"
+                        )
+                    parent_chain.add(parent_operation_id)
+                    parent = refreshes_by_operation.get(parent_operation_id)
+                    if (
+                        parent is None
+                        or parent["status"] != "indeterminate"
+                        or parent["job_key"] != job_key
+                        or parent["expected_content_sha256"]
+                        != expected_content_sha256
+                        or parent["new_content_sha256"] is not None
+                        or parent["new_fetched_at"] is not None
+                        or parent["new_raw_bytes"] is not None
+                        or parent["new_object_sha256"] is not None
+                        or parent["receipt_basis"] is not None
+                        or parent["receipt_basis_sha256"] is not None
+                    ):
+                        conn.rollback()
+                        raise VacancyRefreshIndeterminate(
+                            "successor parent is not an unresolved exact refresh"
+                        )
+                    parent_context = parent["context"]
+                    parent_operation_id = parent_context.get(
+                        _REFRESH_CONTEXT_PARENT_KEY
+                    )
+                if not blocking or any(
+                    str(transition["operation_id"]) not in parent_chain
+                    for transition in blocking
+                ):
+                    conn.rollback()
+                    raise VacancyRefreshIndeterminate(
+                        "successor parent is not the complete unresolved refresh chain"
+                    )
+                if any(
+                    transition["context"].get(_REFRESH_CONTEXT_PARENT_KEY)
+                    == supersedes_indeterminate_operation_id
+                    for transition in refreshes
+                ):
+                    conn.rollback()
+                    raise VacancyRefreshIndeterminate(
+                        "indeterminate refresh already has an explicit successor"
+                    )
             current = conn.execute(
                 """SELECT content_hash,fetched_at,fetch_status,url,raw_text,raw_json
                    FROM postings WHERE key=?""",

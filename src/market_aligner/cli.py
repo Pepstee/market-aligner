@@ -417,6 +417,9 @@ def _refresh_vacancy_command(args: argparse.Namespace) -> int:
         job_key=args.job_key,
         expected_content_sha256=args.expected_content_sha256,
         operation_id=args.operation_id,
+        supersedes_indeterminate_operation_id=(
+            getattr(args, "supersedes_indeterminate_operation_id", None)
+        ),
         log=lambda message: print(message, file=sys.stderr),
     )
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
@@ -1331,6 +1334,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--operation-id",
         required=True,
         help="Stable opaque ID reused only to recover/replay this exact refresh.",
+    )
+    refresh.add_argument(
+        "--supersedes-indeterminate-operation-id",
+        help=(
+            "Explicitly start one distinct refresh linked to an exact unresolved "
+            "indeterminate operation; never replays that operation."
+        ),
     )
     _add_data_home(refresh)
     refresh.set_defaults(handler=_refresh_vacancy_command)

@@ -6,8 +6,10 @@ import json
 import os
 import sqlite3
 import stat
+import threading
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1844,7 +1846,7 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(old_hash, database.fetched_posting("injected:tenant:1")[1])
             self.assertFalse((root / "state" / "collection-refresh-receipts").exists())
 
-    def test_exact_refresh_never_refetches_an_unresolved_fetch_window(self) -> None:
+    def test_exact_refresh_requires_explicit_link_for_unresolved_fetch_successor(self) -> None:
         class ReturnedAdapter:
             board = "injected"
 
@@ -1923,6 +1925,223 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(1, calls["fetch"])
             self.assertEqual(old_hash, database.fetched_posting("injected:tenant:1")[1])
             self.assertFalse((root / "state" / "collection-refresh-receipts").exists())
+
+            with sqlite3.connect(root / "state" / "vacancies.sqlite3") as conn:
+                parent_context_sha256, parent_transition_sha256 = conn.execute(
+                    "SELECT context_sha256,transition_sha256 FROM vacancy_refreshes "
+                    "WHERE operation_id=?",
+                    ("irreducible-window",),
+                ).fetchone()
+            parent_before = database.refresh_transition(
+                "irreducible-window", context_sha256=parent_context_sha256
+            )
+
+            with self.assertRaisesRegex(VacancyRefreshIndeterminate, "successor parent"):
+                CollectionService(root, collector_factory=factory).refresh_vacancy(
+                    config,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    operation_id="successor-missing-parent",
+                    supersedes_indeterminate_operation_id="missing-parent",
+                    log=lambda _message: None,
+                )
+            self.assertEqual(1, calls["fetch"])
+
+            receipt = CollectionService(root, collector_factory=factory).refresh_vacancy(
+                config,
+                job_key="injected:tenant:1",
+                expected_content_sha256=old_hash,
+                operation_id="explicit-successor",
+                supersedes_indeterminate_operation_id="irreducible-window",
+                log=lambda _message: None,
+            )
+            self.assertEqual(2, calls["fetch"])
+            self.assertEqual(
+                "market-aligner.vacancy-refresh-receipt.v3",
+                receipt["schema_version"],
+            )
+            self.assertFalse(receipt["application_authority"])
+            self.assertEqual("collection_only", receipt["authority_scope"])
+            database.verify_vacancy_refresh_receipt(
+                receipt["receipt_path"], job_key="injected:tenant:1"
+            )
+            child = database.refresh_transition(
+                "explicit-successor",
+                context_sha256=receipt["context_sha256"],
+            )
+            self.assertEqual("committed", child["status"])
+            self.assertEqual(
+                "market-aligner.vacancy-refresh-context.v2",
+                child["context"]["schema_version"],
+            )
+            self.assertEqual(
+                "irreducible-window",
+                child["context"]["supersedes_indeterminate_operation_id"],
+            )
+            parent_after = database.refresh_transition(
+                "irreducible-window", context_sha256=parent_context_sha256
+            )
+            self.assertEqual(parent_before, parent_after)
+            self.assertEqual(parent_transition_sha256, parent_after["transition_sha256"])
+            self.assertEqual("indeterminate", parent_after["status"])
+            self.assertIsNone(parent_after["new_raw_bytes"])
+            self.assertIsNone(parent_after["receipt_basis"])
+
+            duplicate_context = dict(child["context"])
+            duplicate_context["operation_id"] = "duplicate-successor"
+            duplicate_context_sha256 = self._canonical_hash(duplicate_context)
+            duplicate_refresh_id = self._canonical_hash(
+                {
+                    "context_sha256": duplicate_context_sha256,
+                    "schema_version": "market-aligner.vacancy-refresh-id.v1",
+                }
+            )
+            with self.assertRaisesRegex(VacancyRefreshIndeterminate, "already has"):
+                database.begin_vacancy_refresh(
+                    refresh_id=duplicate_refresh_id,
+                    operation_id="duplicate-successor",
+                    context_sha256=duplicate_context_sha256,
+                    context_document=duplicate_context,
+                    job_key="injected:tenant:1",
+                    expected_content_sha256=old_hash,
+                    started_at="2026-08-20T04:00:00Z",
+                    old_raw_bytes=bytes(parent_before["old_raw_bytes"]),
+                    supersedes_indeterminate_operation_id="irreducible-window",
+                )
+            self.assertEqual(2, calls["fetch"])
+            with sqlite3.connect(root / "state" / "vacancies.sqlite3") as conn:
+                parent_status, parent_transition_after, child_count = conn.execute(
+                    """SELECT p.status,p.transition_sha256,
+                              (SELECT COUNT(*) FROM vacancy_refreshes c
+                               WHERE c.job_key=p.job_key)
+                       FROM vacancy_refreshes p WHERE p.operation_id=?""",
+                    ("irreducible-window",),
+                ).fetchone()
+            self.assertEqual("indeterminate", parent_status)
+            self.assertEqual(parent_transition_sha256, parent_transition_after)
+            self.assertEqual(2, child_count)
+
+    def test_concurrent_indeterminate_refresh_successors_claim_parent_once(
+        self,
+    ) -> None:
+        class UnusedAdapter:
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _config, database, old_hash, _calls, _factory = self._refresh_fixture(
+                root, UnusedAdapter()
+            )
+            old_raw_bytes = (
+                root / "raw" / "vacancies" / "injected" / "tenant_1.json"
+            ).read_bytes()
+            job_key = "injected:tenant:1"
+            parent_operation_id = "concurrent-parent"
+
+            def begin_operation(
+                operation_id: str,
+                *,
+                supersedes_operation_id: str | None = None,
+            ) -> dict[str, object]:
+                context: dict[str, object] = {
+                    "config_sha256": "a" * 64,
+                    "expected_content_sha256": old_hash,
+                    "job_key": job_key,
+                    "operation_id": operation_id,
+                    "schema_version": (
+                        "market-aligner.vacancy-refresh-context.v1"
+                        if supersedes_operation_id is None
+                        else "market-aligner.vacancy-refresh-context.v2"
+                    ),
+                    "source_sha256": "b" * 64,
+                }
+                if supersedes_operation_id is not None:
+                    context["supersedes_indeterminate_operation_id"] = (
+                        supersedes_operation_id
+                    )
+                context_sha256 = self._canonical_hash(context)
+                refresh_id = self._canonical_hash(
+                    {
+                        "context_sha256": context_sha256,
+                        "schema_version": "market-aligner.vacancy-refresh-id.v1",
+                    }
+                )
+                return database.begin_vacancy_refresh(
+                    refresh_id=refresh_id,
+                    operation_id=operation_id,
+                    context_sha256=context_sha256,
+                    context_document=context,
+                    job_key=job_key,
+                    expected_content_sha256=old_hash,
+                    started_at="2026-08-20T00:00:00Z",
+                    old_raw_bytes=old_raw_bytes,
+                    supersedes_indeterminate_operation_id=supersedes_operation_id,
+                )
+
+            parent = begin_operation(parent_operation_id)
+            database.start_vacancy_refresh_fetch(parent["refresh_id"])
+            database.mark_vacancy_refresh_indeterminate(parent["refresh_id"])
+            parent_before = database.refresh_transition(
+                parent_operation_id, context_sha256=parent["context_sha256"]
+            )
+            self.assertIsNotNone(parent_before)
+
+            start_barrier = threading.Barrier(3)
+
+            def claim_successor(operation_id: str) -> object:
+                start_barrier.wait(timeout=5)
+                try:
+                    return begin_operation(
+                        operation_id,
+                        supersedes_operation_id=parent_operation_id,
+                    )
+                except VacancyRefreshIndeterminate as exc:
+                    return exc
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(claim_successor, "concurrent-successor-a"),
+                    executor.submit(claim_successor, "concurrent-successor-b"),
+                ]
+                start_barrier.wait(timeout=5)
+                outcomes = [future.result(timeout=10) for future in futures]
+
+            successors = [outcome for outcome in outcomes if isinstance(outcome, dict)]
+            refusals = [
+                outcome
+                for outcome in outcomes
+                if isinstance(outcome, VacancyRefreshIndeterminate)
+            ]
+            self.assertEqual(1, len(successors))
+            self.assertEqual(1, len(refusals))
+            self.assertEqual("intent", successors[0]["status"])
+            self.assertEqual(
+                parent_operation_id,
+                successors[0]["context"][
+                    "supersedes_indeterminate_operation_id"
+                ],
+            )
+
+            parent_after = database.refresh_transition(
+                parent_operation_id, context_sha256=parent["context_sha256"]
+            )
+            self.assertEqual(parent_before, parent_after)
+            with sqlite3.connect(database.path) as conn:
+                rows = conn.execute(
+                    "SELECT operation_id,context_json FROM vacancy_refreshes "
+                    "WHERE job_key=? ORDER BY operation_id",
+                    (job_key,),
+                ).fetchall()
+            linked_children = [
+                operation_id
+                for operation_id, context_json in rows
+                if json.loads(context_json).get(
+                    "supersedes_indeterminate_operation_id"
+                )
+                == parent_operation_id
+            ]
+            self.assertEqual(2, len(rows))
+            self.assertEqual([successors[0]["operation_id"]], linked_children)
 
     def test_exact_refresh_replay_rejects_journal_and_object_tampering(self) -> None:
         class StableAdapter:
@@ -2279,20 +2498,33 @@ class CollectionTests(unittest.TestCase):
         )
         self.assertTrue(parsed.once)
         self.assertIsNone(parsed.hours)
-        refresh = parser.parse_args(
+        refresh_args = [
+            "refresh-vacancy",
+            "--config",
+            "collect.yaml",
+            "--job-key",
+            "workable:cogna:847CFBC5F4",
+            "--expected-content-sha256",
+            "a" * 64,
+            "--operation-id",
+            "cogna-refresh-20260820T180000Z",
+        ]
+        refresh = parser.parse_args(refresh_args)
+        self.assertEqual("workable:cogna:847CFBC5F4", refresh.job_key)
+        self.assertIsNone(
+            getattr(refresh, "supersedes_indeterminate_operation_id", None)
+        )
+        linked_refresh = parser.parse_args(
             [
-                "refresh-vacancy",
-                "--config",
-                "collect.yaml",
-                "--job-key",
-                "workable:cogna:847CFBC5F4",
-                "--expected-content-sha256",
-                "a" * 64,
-                "--operation-id",
-                "cogna-refresh-20260820T180000Z",
+                *refresh_args,
+                "--supersedes-indeterminate-operation-id",
+                "indeterminate-parent",
             ]
         )
-        self.assertEqual("workable:cogna:847CFBC5F4", refresh.job_key)
+        self.assertEqual(
+            "indeterminate-parent",
+            linked_refresh.supersedes_indeterminate_operation_id,
+        )
 
     def test_collection_service_rejects_unbounded_run_and_data_home_escape(
         self,

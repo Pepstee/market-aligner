@@ -815,6 +815,7 @@ class Collector:
         started_at: str,
         receipt_context: Mapping[str, object],
         finished_at: Callable[[], str],
+        supersedes_indeterminate_operation_id: str | None = None,
     ) -> dict[str, object]:
         """Journal, fetch once, CAS, and reconcile one exact vacancy refresh."""
 
@@ -855,6 +856,9 @@ class Collector:
                 expected_content_sha256=expected_content_sha256,
                 started_at=started_at,
                 old_raw_bytes=old_raw_bytes,
+                supersedes_indeterminate_operation_id=(
+                    supersedes_indeterminate_operation_id
+                ),
             )
 
         old_object_sha256 = str(transition["old_object_sha256"])

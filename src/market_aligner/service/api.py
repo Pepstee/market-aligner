@@ -330,6 +330,7 @@ class CollectionService:
         job_key: str,
         expected_content_sha256: str,
         operation_id: str,
+        supersedes_indeterminate_operation_id: str | None = None,
         log=print,
     ) -> dict[str, object]:
         """Refresh exactly one configured existing vacancy under a SQLite CAS."""
@@ -355,7 +356,7 @@ class CollectionService:
                 "job_key": job_key,
             }
         )
-        refresh_context = {
+        refresh_context: dict[str, object] = {
             "config_sha256": config_sha256,
             "expected_content_sha256": expected_content_sha256,
             "job_key": job_key,
@@ -363,6 +364,13 @@ class CollectionService:
             "schema_version": "market-aligner.vacancy-refresh-context.v1",
             "source_sha256": source_sha256,
         }
+        if supersedes_indeterminate_operation_id is not None:
+            refresh_context["schema_version"] = (
+                "market-aligner.vacancy-refresh-context.v2"
+            )
+            refresh_context["supersedes_indeterminate_operation_id"] = (
+                supersedes_indeterminate_operation_id
+            )
         context_sha256 = _sha256(refresh_context)
         refresh_id = _sha256(
             {
@@ -399,6 +407,9 @@ class CollectionService:
             receipt_context=receipt_context,
             finished_at=lambda: self.now().astimezone(timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            supersedes_indeterminate_operation_id=(
+                supersedes_indeterminate_operation_id
             ),
         )
         raw_path = Path(str(refreshed.pop("raw_cache_path_absolute"))).resolve()
