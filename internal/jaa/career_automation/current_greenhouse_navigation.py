@@ -379,25 +379,17 @@ def bind_current_greenhouse_navigation(
     navigation_event_sha256: str,
     vacancy,
 ) -> CurrentGreenhouseNavigationProof:
+    token = _validate_capture_attempt_binding(
+        capture, attempt_id=attempt_id, vacancy=vacancy
+    )
     if (
-        type(capture) is not CurrentGreenhouseNavigationCapture
-        or capture._issuer is not _CAPTURE_ISSUER
-        or type(capture._binding_token) is not _CaptureBindingToken
-        or type(attempt_id) is not str
-        or not attempt_id
-        or type(navigation_event_sha256) is not str
+        type(navigation_event_sha256) is not str
         or not _HEX_64.fullmatch(navigation_event_sha256)
-        or vacancy.source_url != capture.source_url
-        or vacancy.vacancy_sha256
-        != dict(capture.market_binding)["raw_listing_sha256"]
-        or vacancy.job_key != dict(capture.market_binding)["source_job_key"]
     ):
         raise ValueError("current Greenhouse capture cannot bind to this attempt")
-    capture._binding_token.consume(attempt_id)
+    token.consume(attempt_id)
     binding = dict(capture.market_binding)
     application_id = str(binding["application_id"])
-    if not application_id.startswith("app_"):
-        raise ValueError("current Greenhouse capture lacks its admitted application")
     base = {
         "schema_version": "jaa.greenhouse-current-navigation-proof.v1",
         "authority_kind": "owned_current_navigation_observation",
@@ -476,18 +468,53 @@ def bind_current_greenhouse_navigation(
 
 
 def reserve_current_greenhouse_navigation_capture(
-    capture: CurrentGreenhouseNavigationCapture, *, attempt_id: str, page
+    capture: CurrentGreenhouseNavigationCapture, *, attempt_id: str, page, vacancy
 ) -> None:
+    token = _validate_capture_attempt_binding(
+        capture, attempt_id=attempt_id, vacancy=vacancy
+    )
+    if capture.page_identity != id(page):
+        raise ValueError("current navigation capture is not owned by this attempt")
+    token.reserve(attempt_id)
+
+
+def consume_current_greenhouse_navigation_capture(
+    capture: CurrentGreenhouseNavigationCapture,
+    *,
+    attempt_id: str,
+    page,
+    vacancy,
+) -> None:
+    token = _validate_capture_attempt_binding(
+        capture, attempt_id=attempt_id, vacancy=vacancy
+    )
+    if capture.page_identity != id(page):
+        raise ValueError("current navigation capture is not owned by this attempt")
+    token.consume(attempt_id)
+
+
+def _validate_capture_attempt_binding(
+    capture: CurrentGreenhouseNavigationCapture, *, attempt_id: str, vacancy
+) -> _CaptureBindingToken:
     if (
         type(capture) is not CurrentGreenhouseNavigationCapture
         or capture._issuer is not _CAPTURE_ISSUER
         or type(capture._binding_token) is not _CaptureBindingToken
         or type(attempt_id) is not str
         or not attempt_id
-        or capture.page_identity != id(page)
     ):
         raise ValueError("current navigation capture is not owned by this attempt")
-    capture._binding_token.reserve(attempt_id)
+    binding = dict(capture.market_binding)
+    application_id = str(binding.get("application_id", ""))
+    if not application_id.startswith("app_"):
+        raise ValueError("current Greenhouse capture lacks its admitted application")
+    if (
+        vacancy.source_url != capture.source_url
+        or vacancy.vacancy_sha256 != binding.get("raw_listing_sha256")
+        or vacancy.job_key != binding.get("source_job_key")
+    ):
+        raise ValueError("current Greenhouse capture cannot bind to this vacancy")
+    return capture._binding_token
 
 
 def verify_live_current_greenhouse_navigation(
@@ -597,6 +624,7 @@ __all__ = [
     "CurrentGreenhouseNavigationProof",
     "bind_current_greenhouse_navigation",
     "capture_current_greenhouse_navigation",
+    "consume_current_greenhouse_navigation_capture",
     "reserve_current_greenhouse_navigation_capture",
     "verify_current_greenhouse_navigation_proof",
     "verify_live_current_greenhouse_navigation",

@@ -53,6 +53,7 @@ from .current_greenhouse_navigation import (
     CurrentGreenhouseNavigationCapture,
     CurrentGreenhouseNavigationProof,
     bind_current_greenhouse_navigation,
+    consume_current_greenhouse_navigation_capture,
     reserve_current_greenhouse_navigation_capture,
     verify_current_greenhouse_navigation_proof,
 )
@@ -407,11 +408,10 @@ class GreenhouseAttemptRecorder:
     ) -> str:
         row = dict(evidence or {})
         capture = row.pop("_current_navigation_capture", None)
+        navigation_url = str(row.get("url") or self.attempt.vacancy.source_url)
         details: dict[str, object] = {
             "method": str(row.get("method", "GET")).upper(),
-            "url_sha256": self._url_sha256(
-                str(row.get("url") or self.attempt.vacancy.source_url)
-            ),
+            "url_sha256": self._url_sha256(navigation_url),
         }
         if isinstance(row.get("status"), int):
             details["status"] = int(row["status"])
@@ -422,8 +422,86 @@ class GreenhouseAttemptRecorder:
                 or page is None
                 or capture.page_identity != id(page)
                 or self.current_provider_proof is not None
+                or details["method"] != capture.method
+                or navigation_url != capture.source_url
+                or details.get("status") != capture.status
             ):
                 raise ValueError("current navigation capture is not bound to this page")
+            if self._review_only_active:
+                reserve_current_greenhouse_navigation_capture(
+                    capture,
+                    attempt_id=self.attempt.attempt_id,
+                    page=page,
+                    vacancy=self.attempt.vacancy,
+                )
+                objects = self.attempt._objects(self.attempt._events())
+                existing_role_names = {artifact.role for artifact in objects}
+                passive_count = 1
+                while (
+                    f"provider.passive_navigation_response.{passive_count:04d}"
+                    in existing_role_names
+                    or f"provider.passive_navigation_config.{passive_count:04d}"
+                    in existing_role_names
+                ):
+                    passive_count += 1
+                response_role = (
+                    f"provider.passive_navigation_response.{passive_count:04d}"
+                )
+                config_role = (
+                    f"provider.passive_navigation_config.{passive_count:04d}"
+                )
+                response_artifact = self.attempt.add_artifact(
+                    response_role,
+                    capture.redacted_response,
+                    media_type="text/html",
+                    lineage=(self.attempt.vacancy.vacancy_sha256,),
+                    disposition="observed",
+                    metadata={
+                        "capture": "observed_passive_current_primary_navigation_response",
+                        "primary_response_sha256": capture.primary_response_sha256,
+                    },
+                )
+                config_artifact = self.attempt.add_artifact(
+                    config_role,
+                    capture.loader_config,
+                    media_type="application/json",
+                    lineage=(response_artifact.sha256,),
+                    disposition="observed",
+                    metadata={"capture": "observed_passive_current_navigation_loader"},
+                )
+                members.update(
+                    {
+                        response_role: response_artifact.sha256,
+                        config_role: config_artifact.sha256,
+                    }
+                )
+                details.update(
+                    {
+                        "provider_response_sha256": capture.primary_response_sha256,
+                        "provider_redacted_response_sha256": (
+                            capture.redacted_response_sha256
+                        ),
+                        "provider_loader_config_sha256": (
+                            capture.loader_config_sha256
+                        ),
+                        "current_market_context_sha256": (
+                            capture.market_context_sha256
+                        ),
+                    }
+                )
+                event_sha256 = self._record_evidence(
+                    "navigation",
+                    result="completed",
+                    members=members,
+                    details=details,
+                )
+                consume_current_greenhouse_navigation_capture(
+                    capture,
+                    attempt_id=self.attempt.attempt_id,
+                    page=page,
+                    vacancy=self.attempt.vacancy,
+                )
+                return event_sha256
             existing_roles = {
                 artifact.role
                 for artifact in self.attempt._objects(self.attempt._events())
@@ -432,11 +510,14 @@ class GreenhouseAttemptRecorder:
                 "provider.current_loader_response",
                 "provider.current_loader_config",
             } & existing_roles:
-                raise ValueError("current navigation proof already exists for this attempt")
+                raise ValueError(
+                    "current navigation proof already exists for this attempt"
+                )
             reserve_current_greenhouse_navigation_capture(
                 capture,
                 attempt_id=self.attempt.attempt_id,
                 page=page,
+                vacancy=self.attempt.vacancy,
             )
             response_artifact = self.attempt.add_artifact(
                 "provider.current_loader_response",

@@ -174,6 +174,7 @@ def test_navigation_capture_can_bind_to_only_one_attempt():
         recorder = object.__new__(GreenhouseAttemptRecorder)
         recorder.attempt = _Attempt(attempt_id)
         recorder.current_provider_proof = None
+        recorder._review_only_active = False
         return recorder
 
     capture = make_capture()
@@ -278,6 +279,7 @@ def test_current_navigation_details_use_real_closed_archive_schema(tmp_path):
     recorder = object.__new__(GreenhouseAttemptRecorder)
     recorder.attempt = attempt
     recorder.current_provider_proof = None
+    recorder._review_only_active = False
 
     recorder.record_navigation(
         {
@@ -311,6 +313,318 @@ def test_current_navigation_details_use_real_closed_archive_schema(tmp_path):
             result="completed",
             details={"unapproved_detail": "still rejected"},
         )
+
+
+def test_review_only_resume_appends_passive_navigation_without_reissuing_proof(
+    tmp_path,
+):
+    source_url = "https://job-boards.eu.greenhouse.io/example/jobs/12345"
+    vacancy_bytes = b"<html>synthetic public vacancy</html>"
+    vacancy = VacancyArchiveIdentity(
+        job_key="greenhouse:example:12345",
+        vacancy_sha256=hashlib.sha256(vacancy_bytes).hexdigest(),
+        role_title="Synthetic role",
+        company_name="Synthetic employer",
+        source_url=source_url,
+    )
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+    archive_root = tmp_path / "archive"
+    market_binding = {
+        "application_id": "app_" + "1" * 32,
+        "raw_listing_sha256": vacancy.vacancy_sha256,
+        "source_job_key": vacancy.job_key,
+        "source_url": source_url,
+    }
+    page = object()
+    loader_payload = {
+        "state": {
+            "loaderData": {
+                "routes/$url_token_.jobs_.$job_post_id": {
+                    "jobPostId": "12345",
+                    "urlToken": "synthetic-passive-token",
+                    "jobPost": {
+                        "public_url": source_url,
+                        "confirmation_message": "Received.",
+                    },
+                    "submitPath": "https://boards.eu.greenhouse.io/example/jobs/12345",
+                    "confirmationPath": "/example/jobs/12345/confirmation",
+                }
+            }
+        }
+    }
+    original_response = (
+        "<html><script>window.__remixContext = "
+        + json.dumps(loader_payload)
+        + ";</script></html>"
+    ).encode("utf-8")
+    original_sha256, redacted_response, loader_config = _redacted_loader_capture(
+        original_response, source_url=source_url
+    )
+
+    def make_capture(
+        *,
+        binding=market_binding,
+        capture_page=page,
+        capture_source_url=source_url,
+        observed_at="2026-10-07T13:00:00Z",
+    ):
+        return CurrentGreenhouseNavigationCapture(
+            page_identity=id(capture_page),
+            source_url=capture_source_url,
+            response_url=capture_source_url,
+            method="GET",
+            status=200,
+            observed_at=observed_at,
+            primary_response_sha256=original_sha256,
+            redacted_response=redacted_response,
+            redacted_response_sha256=hashlib.sha256(redacted_response).hexdigest(),
+            loader_config=loader_config,
+            loader_config_sha256=hashlib.sha256(loader_config).hexdigest(),
+            market_context_sha256="b" * 64,
+            market_binding=tuple(sorted(binding.items())),
+            repository_head="c" * 40,
+            code_source_sha256s=(("current_greenhouse_navigation.py", "d" * 64),),
+            _issuer=navigation._CAPTURE_ISSUER,
+        )
+
+    def make_navigation_event(capture, *, url=source_url):
+        return {
+            "url": url,
+            "method": "GET",
+            "status": 200,
+            "_current_navigation_capture": capture,
+        }
+
+    fresh = GreenhouseAttemptRecorder.create(
+        archive_root=tmp_path / "fresh-archive",
+        repository_root=repository_root,
+        vacancy=vacancy,
+        complete_vacancy=vacancy_bytes,
+        structured_vacancy={"source_url": source_url},
+        assessment={"result": "synthetic"},
+    )
+    fresh.begin_review_only()
+    fresh.record_navigation(make_navigation_event(make_capture()), page=page)
+    assert fresh.current_provider_proof is None
+    fresh_rows = fresh.attempt._objects(fresh.attempt._events())
+    assert any(row.role == "provider.passive_navigation_response.0001" for row in fresh_rows)
+    assert not any(
+        row.role in {
+            "provider.current_loader_response",
+            "provider.current_loader_config",
+        }
+        for row in fresh_rows
+    )
+    fresh.begin_review_only()
+
+    initial = GreenhouseAttemptRecorder.create(
+        archive_root=archive_root,
+        repository_root=repository_root,
+        vacancy=vacancy,
+        complete_vacancy=vacancy_bytes,
+        structured_vacancy={"source_url": source_url},
+        assessment={"result": "synthetic"},
+    )
+    initial.begin_review_only()
+    legacy_capture = make_capture()
+    legacy_response = initial.attempt.add_artifact(
+        "provider.current_loader_response",
+        legacy_capture.redacted_response,
+        media_type="text/html",
+        lineage=(vacancy.vacancy_sha256,),
+        disposition="approved",
+        metadata={
+            "capture": "redacted_current_primary_navigation_response",
+            "primary_response_sha256": legacy_capture.primary_response_sha256,
+        },
+    )
+    legacy_config = initial.attempt.add_artifact(
+        "provider.current_loader_config",
+        legacy_capture.loader_config,
+        media_type="application/json",
+        lineage=(legacy_response.sha256,),
+        disposition="approved",
+        metadata={"capture": "parsed_current_navigation_loader"},
+    )
+    initial._record_evidence(
+        "navigation",
+        result="completed",
+        members={
+            "provider.current_loader_response": legacy_response.sha256,
+            "provider.current_loader_config": legacy_config.sha256,
+        },
+        details={
+            "method": "GET",
+            "status": 200,
+            "url_sha256": initial._url_sha256(source_url),
+            "provider_response_sha256": legacy_capture.primary_response_sha256,
+            "provider_redacted_response_sha256": legacy_capture.redacted_response_sha256,
+            "provider_loader_config_sha256": legacy_capture.loader_config_sha256,
+            "current_market_context_sha256": legacy_capture.market_context_sha256,
+        },
+    )
+    assert initial.current_provider_proof is None
+    prior_provider_rows = {
+        row.role: row.sha256
+        for row in initial.attempt._objects(initial.attempt._events())
+        if row.role
+        in {
+            "provider.current_loader_response",
+            "provider.current_loader_config",
+        }
+    }
+    assert set(prior_provider_rows) == {
+        "provider.current_loader_response",
+        "provider.current_loader_config",
+    }
+    prior_provider_bytes = {
+        row.role: initial.attempt.read_artifact(row)
+        for row in initial.attempt._objects(initial.attempt._events())
+        if row.role in prior_provider_rows
+    }
+
+    resumed = GreenhouseAttemptRecorder.resume(
+        archive_root=archive_root,
+        repository_root=repository_root,
+        attempt_id=initial.attempt.attempt_id,
+    )
+    resumed.begin_review_only()
+    assert resumed.current_provider_proof is None
+    fresh_capture = make_capture()
+    event_sha256 = resumed.record_navigation(
+        make_navigation_event(fresh_capture), page=page
+    )
+    assert resumed.current_provider_proof is None
+
+    rows = resumed.attempt._objects(resumed.attempt._events())
+    assert {
+        row.role: row.sha256
+        for row in rows
+        if row.role
+        in {
+            "provider.current_loader_response",
+            "provider.current_loader_config",
+        }
+    } == prior_provider_rows
+    assert {
+        row.role: resumed.attempt.read_artifact(row)
+        for row in rows
+        if row.role in prior_provider_rows
+    } == prior_provider_bytes
+    passive_response = [
+        row for row in rows if row.role == "provider.passive_navigation_response.0001"
+    ]
+    passive_config = [
+        row for row in rows if row.role == "provider.passive_navigation_config.0001"
+    ]
+    assert len(passive_response) == len(passive_config) == 1
+    assert passive_response[0].disposition == passive_config[0].disposition == "observed"
+    assert resumed.attempt.read_artifact(passive_response[0]) == redacted_response
+    assert resumed.attempt.read_artifact(passive_config[0]) == loader_config
+    passive_event = next(
+        event
+        for event in resumed.attempt._events()
+        if event.get("event_sha256") == event_sha256
+    )
+    assert passive_event["payload"]["member_sha256s"] == {
+        "provider.passive_navigation_config.0001": passive_config[0].sha256,
+        "provider.passive_navigation_response.0001": passive_response[0].sha256,
+    }
+    assert passive_event["payload"]["details"]["current_market_context_sha256"] == "b" * 64
+    resumed.begin_review_only()
+
+    before_reuse = len(resumed.attempt._events())
+    with pytest.raises(ValueError, match="already bound"):
+        resumed.record_navigation(make_navigation_event(fresh_capture), page=page)
+    assert len(resumed.attempt._events()) == before_reuse
+
+    mismatched_binding = {
+        **market_binding,
+        "raw_listing_sha256": "e" * 64,
+        "source_job_key": "greenhouse:other:99999",
+    }
+    with pytest.raises(ValueError, match="cannot bind to this vacancy"):
+        resumed.record_navigation(
+            make_navigation_event(make_capture(binding=mismatched_binding)), page=page
+        )
+    with pytest.raises(ValueError, match="lacks its admitted application"):
+        resumed.record_navigation(
+            make_navigation_event(
+                make_capture(binding={**market_binding, "application_id": "invalid"})
+            ),
+            page=page,
+        )
+    with pytest.raises(ValueError, match="not bound to this page"):
+        resumed.record_navigation(
+            make_navigation_event(make_capture(capture_page=object())), page=page
+        )
+    mismatched_source = "https://job-boards.eu.greenhouse.io/other/jobs/99999"
+    with pytest.raises(ValueError, match="cannot bind to this vacancy"):
+        resumed.record_navigation(
+            make_navigation_event(
+                make_capture(
+                    binding={**market_binding, "source_url": mismatched_source},
+                    capture_source_url=mismatched_source,
+                ),
+                url=mismatched_source,
+            ),
+            page=page,
+        )
+    assert len(resumed.attempt._events()) == before_reuse
+
+    second_event_sha256 = resumed.record_navigation(
+        make_navigation_event(
+            make_capture(observed_at="2026-10-07T13:01:00Z")
+        ),
+        page=page,
+    )
+    rows = resumed.attempt._objects(resumed.attempt._events())
+    assert any(row.role == "provider.passive_navigation_response.0002" for row in rows)
+    assert any(row.role == "provider.passive_navigation_config.0002" for row in rows)
+    assert {
+        row.role: row.sha256
+        for row in rows
+        if row.role
+        in {
+            "provider.current_loader_response",
+            "provider.current_loader_config",
+        }
+    } == prior_provider_rows
+    assert {
+        row.role: resumed.attempt.read_artifact(row)
+        for row in rows
+        if row.role in prior_provider_rows
+    } == prior_provider_bytes
+    assert any(
+        event.get("event_sha256") == second_event_sha256
+        for event in resumed.attempt._events()
+    )
+    resumed.begin_review_only()
+
+    live = GreenhouseAttemptRecorder.create(
+        archive_root=tmp_path / "live-archive",
+        repository_root=repository_root,
+        vacancy=vacancy,
+        complete_vacancy=vacancy_bytes,
+        structured_vacancy={"source_url": source_url},
+        assessment={"result": "synthetic"},
+    )
+    live.record_navigation(make_navigation_event(make_capture()), page=page)
+    live_proof = live.current_provider_proof
+    live_resumed = GreenhouseAttemptRecorder.resume(
+        archive_root=tmp_path / "live-archive",
+        repository_root=repository_root,
+        attempt_id=live.attempt.attempt_id,
+    )
+    before_live_duplicate = live_resumed.attempt._events()
+    with pytest.raises(ValueError, match="proof already exists"):
+        live_resumed.record_navigation(
+            make_navigation_event(make_capture()), page=page
+        )
+    assert live.current_provider_proof is live_proof
+    assert live_resumed.current_provider_proof is None
+    assert live_resumed.attempt._events() == before_live_duplicate
 
 
 def test_current_proof_is_consumed_by_release_and_archive_boundaries(
