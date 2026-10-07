@@ -2921,6 +2921,7 @@ def run_editorial_composition_runtime(
             "Return only one canonical JSON object matching the supplied response schema.",
             "Select relevant, useful, supported approved claims as whole claims and retain each selected claim ID.",
             "Rephrase a selected candidate claim professionally, preserving its supported meaning, quantities, dates, qualifiers and negation; never strengthen a limited statement.",
+            "In Education, never emit day-level dates. For a graduation date, use only the exact graduation_month_year supplied in candidate authority; if it is absent, omit the graduation date rather than infer or invent one. If another Education claim cannot be retained without a day-level date while preserving its supported meaning, omit that whole claim rather than removing only the date or a limitation. This Education-specific rule overrides the general instruction to preserve dates.",
             "Omit an unsuitable claim as a whole rather than removing its material caveat.",
             *shared_instructions,
             "Do not add internal process commentary or meta-signposts to employer-facing text.",

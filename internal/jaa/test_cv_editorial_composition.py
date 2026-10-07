@@ -84,16 +84,27 @@ def test_cover_response_parser_keeps_canonical_mode_and_allows_current_formattin
     canonical = _cover_response_bytes(document)
     pretty = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
 
-    for current_runtime in (False, True):
-        parsed = editorial_module._cover_letter_draft_from_response(
-            canonical, current_runtime=current_runtime
-        )
-        assert parsed.document(include_identity=False) == document
+    legacy = editorial_module._cover_letter_draft_from_response(
+        canonical, current_runtime=False
+    )
+    assert legacy.document(include_identity=False) == document
+
+    expected_current = {
+        **document,
+        "current_runtime": True,
+        "sections": [
+            {**section, "current_runtime": True} for section in document["sections"]
+        ],
+    }
+    canonical_current = editorial_module._cover_letter_draft_from_response(
+        canonical, current_runtime=True
+    )
+    assert canonical_current.document(include_identity=False) == expected_current
 
     parsed = editorial_module._cover_letter_draft_from_response(
         pretty, current_runtime=True
     )
-    assert parsed.document(include_identity=False) == document
+    assert parsed.document(include_identity=False) == expected_current
     with pytest.raises(EditorialCompositionError, match="not canonical JSON"):
         editorial_module._cover_letter_draft_from_response(
             pretty, current_runtime=False
@@ -332,7 +343,7 @@ def test_current_claim_assignment_uses_unique_primary_headings() -> None:
         )
 
 
-def test_current_cv_draft_requires_each_bound_claim_once_in_its_primary_section() -> None:
+def test_current_cv_draft_allows_whole_claim_omission_but_rejects_repeats() -> None:
     request, draft = _current_fixture()
     validate_editorial_draft(request, draft, current_runtime=True)
     highlight_claim, project_claim = request.approved_claims
@@ -352,10 +363,7 @@ def test_current_cv_draft_requires_each_bound_claim_once_in_its_primary_section(
         ),
         current_runtime=True,
     )
-    with pytest.raises(
-        EditorialCompositionError, match="must use every approved claim exactly once"
-    ):
-        validate_editorial_draft(request, omitted, current_runtime=True)
+    validate_editorial_draft(request, omitted, current_runtime=True)
 
     repeated = build_editorial_draft(
         candidate_name=request.authority.candidate_name,
@@ -721,6 +729,15 @@ def test_runtime_invokes_explicit_writer_and_humanizer_then_admits_outputs() -> 
         "project": ["Professional Summary", "Projects"],
         "summary": ["Professional Summary"],
     }
+    assert writer_request["instructions"] == [
+        "Return only one canonical JSON object matching the supplied response schema.",
+        "Use approved_claim atoms verbatim; never paraphrase, split, or invent facts.",
+        "Place every approved_claim atom only in a section listed for its claim ID in claim_section_policy.",
+        "Omit connective atoms or select them only from the supplied finite rhetorical catalog.",
+        "Do not add Curriculum Vitae/CV labels, work-rights text, or unsupported capabilities.",
+        "Do not add AI-authorship disclosure or em/en dashes, including inside approved facts.",
+        "Keep formats and datastores out of Core Capabilities.",
+    ]
     assert "required_claim_ids" not in writer_request
     assert not any(
         "exactly once globally" in instruction
@@ -728,7 +745,7 @@ def test_runtime_invokes_explicit_writer_and_humanizer_then_admits_outputs() -> 
     )
 
 
-def test_current_runtime_writer_request_assigns_all_claims_once() -> None:
+def test_current_runtime_writer_request_exposes_available_claims() -> None:
     request, draft = _current_fixture()
     writer_adapter = _ScriptedStageAdapter(
         "fixture-current-writer", "writer-v2", draft
@@ -745,19 +762,95 @@ def test_current_runtime_writer_request_assigns_all_claims_once() -> None:
     run_editorial_composition_runtime(request, runtime=runtime)
 
     writer_request = json.loads(writer_adapter.calls[0][0])
+    education_date_instruction = next(
+        instruction
+        for instruction in writer_request["instructions"]
+        if instruction.startswith("In Education, never emit day-level dates.")
+    )
+    assert "exact graduation_month_year supplied in candidate authority" in education_date_instruction
+    assert "if it is absent, omit the graduation date" in education_date_instruction
+    assert "overrides the general instruction to preserve dates" in education_date_instruction
+    assert writer_request["editorial_request"]["authority"]["graduation_month_year"] is None
     assert writer_request["claim_section_policy"] == {
         "highlight": ["Highlights"],
         "project": ["Projects"],
     }
-    assert writer_request["required_claim_ids"] == ["highlight", "project"]
-    assert any(
+    assert writer_request["available_claim_ids"] == ["highlight", "project"]
+    assert "required_claim_ids" not in writer_request
+    assert not any(
         "exactly once globally" in instruction
         for instruction in writer_request["instructions"]
     )
-    assert any(
+    assert not any(
         "second copy" in instruction
         for instruction in writer_request["instructions"]
     )
+
+
+def _current_education_fixture(education_text: str, graduation_month_year: str | None):
+    request, draft = _current_fixture()
+    authority = replace(
+        request.authority,
+        graduation_month_year=graduation_month_year,
+    )
+    education_claim = _claim("education", education_text, "education")
+    request = build_editorial_request(
+        authority=authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(*request.approved_claims, education_claim),
+    )
+    draft = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        sections=(
+            *draft.sections,
+            CVSection(
+                "Education",
+                (
+                    EditorialAtom(
+                        "approved_claim", education_claim.text, education_claim.claim_id
+                    ),
+                ),
+            ),
+        ),
+        current_runtime=True,
+    )
+    return request, draft
+
+
+def test_current_education_dates_remain_bound_to_authorized_month_and_year() -> None:
+    no_authority_request, no_authority_draft = _current_education_fixture(
+        "Synthetic degree.", None
+    )
+    validate_editorial_draft(
+        no_authority_request, no_authority_draft, current_runtime=True
+    )
+
+    day_request, day_draft = _current_education_fixture(
+        "Synthetic degree, 2 July 2026.", "July 2026"
+    )
+    with pytest.raises(EditorialCompositionError, match="month and year only"):
+        validate_editorial_draft(day_request, day_draft, current_runtime=True)
+
+    month_year_request, month_year_draft = _current_education_fixture(
+        "Synthetic degree, July 2026.", "July 2026"
+    )
+    validate_editorial_draft(
+        month_year_request, month_year_draft, current_runtime=True
+    )
+
+    mismatched_request, mismatched_draft = _current_education_fixture(
+        "Synthetic degree, June 2026.", "July 2026"
+    )
+    with pytest.raises(
+        EditorialCompositionError,
+        match="authoritative graduation month and year are absent",
+    ):
+        validate_editorial_draft(
+            mismatched_request, mismatched_draft, current_runtime=True
+        )
 
 
 def test_production_runtime_requires_exact_source_materialization() -> None:
