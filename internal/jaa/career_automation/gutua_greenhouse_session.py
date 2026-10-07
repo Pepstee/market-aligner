@@ -1730,6 +1730,7 @@ class GutuaGreenhouseSession:
                 planned_form_fields=form_plan.review_form_fields,
                 form_field_authorities=form_plan.form_field_authorities,
                 form_inventory_sha256=inventory_sha256 if review_only else None,
+                current_runtime_context=market_context if current_runtime else None,
             )
             local_synthetic_context = None
             local_fixture_sha256 = getattr(

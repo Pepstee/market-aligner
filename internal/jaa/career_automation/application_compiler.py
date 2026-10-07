@@ -913,6 +913,53 @@ class VacancyFactAuthority:
 
 
 @dataclass(frozen=True)
+class PendingCurrentOutwardDraft:
+    """Non-authorizing link from one current draft span to its exact source."""
+
+    sentence_id: str
+    document_kind: str
+    materialization_receipt_sha256: str
+    editorial_request_sha256: str
+    original_text_sha256: str
+    outward_text_sha256: str
+    schema_version: str = "jaa.current-pending-outward-draft.v1"
+    status: str = "pending_semantic_review"
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.schema_version) is not str
+            or self.schema_version != "jaa.current-pending-outward-draft.v1"
+            or type(self.status) is not str
+            or self.status != "pending_semantic_review"
+            or type(self.sentence_id) is not str
+            or not self.sentence_id.strip()
+            or self.document_kind not in {"cv", "cover_letter"}
+        ):
+            raise ValueError("current outward draft binding is malformed")
+        for value in (
+            self.materialization_receipt_sha256,
+            self.editorial_request_sha256,
+            self.original_text_sha256,
+            self.outward_text_sha256,
+        ):
+            _digest(value, "current outward draft binding hash")
+        if self.original_text_sha256 == self.outward_text_sha256:
+            raise ValueError("verbatim current text cannot be a pending rewrite")
+
+    def document(self) -> dict[str, str]:
+        return {
+            "document_kind": self.document_kind,
+            "editorial_request_sha256": self.editorial_request_sha256,
+            "materialization_receipt_sha256": self.materialization_receipt_sha256,
+            "original_text_sha256": self.original_text_sha256,
+            "outward_text_sha256": self.outward_text_sha256,
+            "schema_version": self.schema_version,
+            "sentence_id": self.sentence_id,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
 class FactualSentence:
     """One approved fact, with any exact outward rewrite bound to its authority."""
 
@@ -923,6 +970,7 @@ class FactualSentence:
     document_kind: str
     authority: FactAuthority | ProfileFactAuthority | VacancyFactAuthority
     employer_fact_json: str | None = None
+    pending_current_outward_draft: PendingCurrentOutwardDraft | None = None
 
     def __post_init__(self) -> None:
         _digest(self.sentence_id, "sentence ID")
@@ -932,8 +980,23 @@ class FactualSentence:
         rewrite_policy_sha256 = getattr(
             self.authority, "rewrite_policy_sha256", None
         )
+        pending = self.pending_current_outward_draft
         if text != source:
-            if (
+            if pending is not None:
+                if (
+                    type(pending) is not PendingCurrentOutwardDraft
+                    or self.fact_kind != "candidate"
+                    or self.document_kind not in {"cv", "cover_letter"}
+                    or pending.sentence_id != self.sentence_id
+                    or pending.document_kind != self.document_kind
+                    or pending.original_text_sha256
+                    != hashlib.sha256(source.encode("utf-8")).hexdigest()
+                    or pending.outward_text_sha256
+                    != hashlib.sha256(text.encode("utf-8")).hexdigest()
+                    or getattr(self.authority, "rewrite_authority", None) is not None
+                ):
+                    raise ValueError("pending current rewrite differs from its exact source")
+            elif (
                 not isinstance(self.authority, (FactAuthority, ProfileFactAuthority))
                 or outward_text_sha256 != hashlib.sha256(text.encode()).hexdigest()
                 or rewrite_policy_sha256 is None
@@ -942,26 +1005,29 @@ class FactualSentence:
                     "factual sentence must equal its approved source text unless "
                     "it has exact outward authority"
                 )
-            if self.authority.rewrite_authority is None:
+            elif self.authority.rewrite_authority is None:
                 raise ValueError("outward rewrite resolution is missing")
-            verify_authenticated_outward_rewrite(
-                self.authority.rewrite_authority,
-                candidate_evidence_id=self.authority.candidate_evidence_id,
-                candidate_evidence_version=self.authority.candidate_evidence_version,
-                approved_source_text=source,
-                outward_text=text,
-                document_kind=self.document_kind,
-                approved_evidence_source=getattr(
+            else:
+                verify_authenticated_outward_rewrite(
                     self.authority.rewrite_authority,
-                    "source_context",
-                    None,
-                ),
-                candidate_profile_hash=(
-                    self.authority.candidate_profile_hash
-                    if isinstance(self.authority, ProfileFactAuthority)
-                    else None
-                ),
-            )
+                    candidate_evidence_id=self.authority.candidate_evidence_id,
+                    candidate_evidence_version=self.authority.candidate_evidence_version,
+                    approved_source_text=source,
+                    outward_text=text,
+                    document_kind=self.document_kind,
+                    approved_evidence_source=getattr(
+                        self.authority.rewrite_authority,
+                        "source_context",
+                        None,
+                    ),
+                    candidate_profile_hash=(
+                        self.authority.candidate_profile_hash
+                        if isinstance(self.authority, ProfileFactAuthority)
+                        else None
+                    ),
+                )
+        elif pending is not None:
+            raise ValueError("verbatim current text cannot carry a pending rewrite")
         elif isinstance(self.authority, (FactAuthority, ProfileFactAuthority)) and (
             outward_text_sha256 is not None or rewrite_policy_sha256 is not None
         ):
@@ -1006,7 +1072,7 @@ class FactualSentence:
                 )
 
     def document(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "sentence_id": self.sentence_id,
             "text": self.text,
             "approved_source_text": self.approved_source_text,
@@ -1015,6 +1081,11 @@ class FactualSentence:
             "authority": self.authority.document(),
             "employer_fact_json": self.employer_fact_json,
         }
+        if self.pending_current_outward_draft is not None:
+            value["pending_current_outward_draft"] = (
+                self.pending_current_outward_draft.document()
+            )
+        return value
 
 
 def _employer_fact_is_new(fact_sha256: str, seen_hashes: set[str]) -> bool:

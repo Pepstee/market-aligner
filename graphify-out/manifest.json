@@ -246,9 +246,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/application_compiler.py": {
-    "mtime": 1791317544.8223753,
-    "seen": 1791318855.7498934,
-    "ast_hash": "ddad361573d0dd547d4f74e21c988a0b",
+    "mtime": 1791362576.3496604,
+    "seen": 1791364958.1538696,
+    "ast_hash": "20c4b413a11a594a23f59c6fe759d135",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/application_preview.py": {
@@ -258,9 +258,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/application_sanity_review.py": {
-    "mtime": 1790945043.8027794,
-    "seen": 1790945216.2706442,
-    "ast_hash": "8b8a9e5e24b6884a186ccdeae35bc357",
+    "mtime": 1791364121.4256444,
+    "seen": 1791364958.153876,
+    "ast_hash": "225ec4b1287cf0e8c532851998b33113",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/application_strategy.py": {
@@ -552,9 +552,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/gutua_greenhouse_session.py": {
-    "mtime": 1791356359.1657665,
-    "seen": 1791356640.0356362,
-    "ast_hash": "838820ac6ba1d3df05a0dd9712f3b550",
+    "mtime": 1791363950.841641,
+    "seen": 1791364958.1539419,
+    "ast_hash": "967df7d4c51c1173371201d7a2af5336",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/hard_metrics_evaluation.py": {
@@ -1044,9 +1044,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/cv_generation/service.py": {
-    "mtime": 1791349524.3058693,
-    "seen": 1791350739.226894,
-    "ast_hash": "a2ef628322930972a7bc9fa7acaa627d",
+    "mtime": 1791363439.5536506,
+    "seen": 1791364958.1540363,
+    "ast_hash": "838ea1790fb69e46d672f31509ac523b",
     "semantic_hash": ""
   },
   "internal/jaa/docs/APPLICATION_SANITY_REVIEW.md": {
@@ -2280,9 +2280,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_application_sanity_review.py": {
-    "mtime": 1790945043.8387794,
-    "seen": 1790945216.2709472,
-    "ast_hash": "a4f835a716093274be6846fea3955ccc",
+    "mtime": 1791364255.217649,
+    "seen": 1791364958.1542037,
+    "ast_hash": "962ebae9f146b67f4a728deac5a59202",
     "semantic_hash": ""
   },
   "internal/jaa/test_archive_observation_bundle.py": {
@@ -4068,9 +4068,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/cv_generation/editorial_composition.py": {
-    "mtime": 1791351766.921839,
-    "seen": 1791352282.910694,
-    "ast_hash": "ff7d6e16b12029bcdc93a9073b3a0edd",
+    "mtime": 1791364849.7736216,
+    "seen": 1791364958.154035,
+    "ast_hash": "56750e5f88622e7a41d262aa4adf095d",
     "semantic_hash": ""
   },
   "internal/jaa/form_filling/ats_forensics.py": {
@@ -4164,9 +4164,9 @@
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_composition_service.py": {
-    "mtime": 1791337410.1020656,
-    "seen": 1791337621.206462,
-    "ast_hash": "fee7f64b4b6f174d51d4931d15fda177",
+    "mtime": 1791364890.809657,
+    "seen": 1791364958.1542208,
+    "ast_hash": "77e45f600c50a6cc17d72214839ab091",
     "semantic_hash": ""
   },
   "internal/jaa/test_cv_document_quality.py": {
@@ -4797,6 +4797,12 @@
     "mtime": 1791361070.3057058,
     "seen": 1791361121.7617629,
     "ast_hash": "dc95d2d3788c669c9645776f4f44bf4c",
+    "semantic_hash": ""
+  },
+  "internal/jaa/test_current_editorial_request_contract.py": {
+    "mtime": 1791364849.8056216,
+    "seen": 1791364958.1542163,
+    "ast_hash": "33646301440788ac4bb24ff636df6065",
     "semantic_hash": ""
   }
 }

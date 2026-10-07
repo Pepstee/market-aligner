@@ -25,6 +25,7 @@ from career_automation.application_compiler import (
     ApplicationSource,
     DocumentSection,
     FactualSentence,
+    PendingCurrentOutwardDraft,
     StyleSlot,
     verify_application_source,
 )
@@ -150,6 +151,7 @@ def _source_for_editorial_draft(
     base_source: ApplicationSource,
     request: CVEditorialRequest,
     draft: CVEditorialDraft,
+    materialization_receipt: CandidateApplicationMaterializationReceipt | None = None,
 ) -> ApplicationSource:
     """Project an admitted draft onto existing authority-backed source atoms."""
 
@@ -171,10 +173,30 @@ def _source_for_editorial_draft(
         if request.authority.current_runtime
         else CV_SECTION_HEADINGS
     )
+    facts_by_id: dict[str, FactualSentence] = {}
     facts_by_text: dict[str, list[FactualSentence]] = {}
     for fact in base_source.facts:
         if fact.document_kind == "cv":
+            facts_by_id[fact.sentence_id] = fact
             facts_by_text.setdefault(fact.text, []).append(fact)
+    claims_by_id = {claim.claim_id: claim for claim in request.approved_claims}
+    current_runtime = request.authority.current_runtime
+    if current_runtime:
+        if type(materialization_receipt) is not CandidateApplicationMaterializationReceipt:
+            raise CVCompositionServiceError(
+                "current draft requires its exact materialization receipt"
+            )
+        materialization_receipt.__post_init__()
+        if (
+            materialization_receipt.deployment_binding.environment
+            != CURRENT_RUNTIME_ENVIRONMENT
+            or materialization_receipt.application_source_id != base_source.source_id
+            or materialization_receipt.application_source_sha256
+            != base_source.content_sha256
+        ):
+            raise CVCompositionServiceError(
+                "current draft differs from its admitted materialization"
+            )
     style_by_text = {
         slot.text: slot
         for slot in base_source.style_slots
@@ -214,12 +236,56 @@ def _source_for_editorial_draft(
                 slot_ids.append(slot.slot_id)
                 continue
             factual_span_seen = True
-            candidates = facts_by_text.get(atom.text, ())
-            if not candidates:
-                raise CVCompositionServiceError(
-                    "editorial claim has no canonical artifact fact"
+            claim = claims_by_id.get(atom.claim_id or "")
+            if current_runtime:
+                fact = facts_by_id.get(atom.claim_id or "")
+                if fact is None or claim is None or fact.text != claim.text:
+                    raise CVCompositionServiceError(
+                        "editorial claim has no canonical artifact fact"
+                    )
+                if hashlib.sha256(claim.text.encode("utf-8")).hexdigest() != claim.text_sha256:
+                    raise CVCompositionServiceError("editorial claim source hash differs")
+            else:
+                candidates = facts_by_text.get(atom.text, ())
+                if not candidates:
+                    raise CVCompositionServiceError(
+                        "editorial claim has no canonical artifact fact"
+                    )
+                fact = sorted(candidates, key=lambda row: row.sentence_id)[0]
+            if current_runtime:
+                if fact.fact_kind != "candidate":
+                    raise CVCompositionServiceError(
+                        "current editorial rewrites require candidate facts"
+                    )
+                authority = fact.authority
+                if getattr(authority, "rewrite_authority", None) is not None:
+                    authority = replace(authority, rewrite_authority=None)
+                pending = None
+                if atom.text != fact.approved_source_text:
+                    pending = PendingCurrentOutwardDraft(
+                        sentence_id=fact.sentence_id,
+                        document_kind="cv",
+                        materialization_receipt_sha256=(
+                            materialization_receipt.receipt_sha256
+                        ),
+                        editorial_request_sha256=request.request_sha256,
+                        original_text_sha256=hashlib.sha256(
+                            fact.approved_source_text.encode("utf-8")
+                        ).hexdigest(),
+                        outward_text_sha256=hashlib.sha256(
+                            atom.text.encode("utf-8")
+                        ).hexdigest(),
+                    )
+                fact = replace(
+                    fact,
+                    text=atom.text,
+                    authority=authority,
+                    pending_current_outward_draft=pending,
                 )
-            fact = sorted(candidates, key=lambda row: row.sentence_id)[0]
+            elif atom.text != fact.text:
+                raise CVCompositionServiceError(
+                    "editorial claim differs from its exact source text"
+                )
             selected_facts[fact.sentence_id] = fact
             sentence_ids.append(fact.sentence_id)
         sections.append(
@@ -250,6 +316,8 @@ def _source_for_cover_letter_draft(
     base_source: ApplicationSource,
     request: CoverLetterEditorialRequest,
     draft: CoverLetterEditorialDraft,
+    materialization_receipt: CandidateApplicationMaterializationReceipt | None = None,
+    materialized_source: ApplicationSource | None = None,
 ) -> ApplicationSource:
     """Project an admitted cover letter onto canonical evidence-backed atoms."""
     verify_application_source(base_source)
@@ -266,6 +334,27 @@ def _source_for_cover_letter_draft(
         for fact in base_source.facts
         if fact.document_kind == "cover_letter"
     }
+    if request.authority.current_runtime:
+        if type(materialization_receipt) is not CandidateApplicationMaterializationReceipt:
+            raise CVCompositionServiceError(
+                "current cover draft requires its exact materialization receipt"
+            )
+        materialization_receipt.__post_init__()
+        if type(materialized_source) is not ApplicationSource:
+            raise CVCompositionServiceError(
+                "current cover draft lacks its original materialized source"
+            )
+        verify_application_source(materialized_source)
+        if (
+            materialization_receipt.deployment_binding.environment
+            != CURRENT_RUNTIME_ENVIRONMENT
+            or materialization_receipt.application_source_id != materialized_source.source_id
+            or materialization_receipt.application_source_sha256
+            != materialized_source.content_sha256
+        ):
+            raise CVCompositionServiceError(
+                "current cover draft differs from its admitted materialization"
+            )
     style_by_text = {
         slot.text: slot
         for slot in base_source.style_slots
@@ -302,19 +391,65 @@ def _source_for_cover_letter_draft(
                 continue
             factual_span_seen = True
             fact = facts_by_id.get(atom.claim_id or "")
-            if fact is None or fact.text != atom.text:
+            if fact is None:
                 raise CVCompositionServiceError(
                     "cover-letter claim has no canonical artifact fact"
                 )
+            if request.authority.current_runtime:
+                if fact.fact_kind == "employer":
+                    if (
+                        atom.text != fact.text
+                        or atom.text != fact.approved_source_text
+                        or fact.pending_current_outward_draft is not None
+                    ):
+                        raise CVCompositionServiceError(
+                            "current employer facts must remain exact"
+                        )
+                elif fact.fact_kind != "candidate":
+                    raise CVCompositionServiceError(
+                        "current cover claims have an unsupported fact kind"
+                    )
+                else:
+                    authority = fact.authority
+                    if getattr(authority, "rewrite_authority", None) is not None:
+                        authority = replace(authority, rewrite_authority=None)
+                    original = fact.approved_source_text
+                    pending = None
+                    if atom.text != original:
+                        pending = PendingCurrentOutwardDraft(
+                            sentence_id=fact.sentence_id,
+                            document_kind="cover_letter",
+                            materialization_receipt_sha256=(
+                                materialization_receipt.receipt_sha256
+                            ),
+                            editorial_request_sha256=request.request_sha256,
+                            original_text_sha256=hashlib.sha256(
+                                original.encode("utf-8")
+                            ).hexdigest(),
+                            outward_text_sha256=hashlib.sha256(
+                                atom.text.encode("utf-8")
+                            ).hexdigest(),
+                        )
+                    fact = replace(
+                        fact,
+                        text=atom.text,
+                        authority=authority,
+                        pending_current_outward_draft=pending,
+                    )
+            elif fact.text != atom.text:
+                raise CVCompositionServiceError(
+                    "cover-letter claim differs from its exact source text"
+                )
             selected_facts[fact.sentence_id] = fact
             sentence_ids.append(fact.sentence_id)
-        sections.append(
-            DocumentSection(
-                heading=section.heading,
-                sentence_ids=tuple(sentence_ids),
-                style_slot_ids=tuple(slot_ids),
+        if sentence_ids or slot_ids:
+            sections.append(
+                DocumentSection(
+                    heading=section.heading,
+                    sentence_ids=tuple(sentence_ids),
+                    style_slot_ids=tuple(slot_ids),
+                )
             )
-        )
     non_letter_facts = tuple(
         fact for fact in base_source.facts if fact.document_kind != "cover_letter"
     )
@@ -922,12 +1057,23 @@ def run_cv_composition_orchestration(
         base_source=base_source,
         request=request,
         draft=humanized_draft,
+        materialization_receipt=(
+            materialization_receipt
+            if current_runtime_pre_review
+            else None
+        ),
     )
     if cover_letter_request is not None:
         initial_source = _source_for_cover_letter_draft(
             base_source=initial_source,
             request=cover_letter_request,
             draft=cover_letter_humanized_draft,
+            materialization_receipt=(
+                materialization_receipt
+                if current_runtime_pre_review
+                else None
+            ),
+            materialized_source=base_source,
         )
     initial_artifacts = render_pdf_artifacts(initial_source)
     initial_constraint = _validate_artifact_cv(

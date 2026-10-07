@@ -6,6 +6,7 @@ import stat
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -198,6 +199,44 @@ def package(
     )
 
 
+def current_review_package(monkeypatch) -> SanityReviewPackage:
+    candidate = package()
+    evidence = review_module.CurrentClaimReviewEvidence(
+        sentence_id="a" * 64,
+        evidence_identity=candidate.approved_evidence_ids[0],
+        document_kind="cv",
+        original_source_text="Built a synthetic parsing workflow.",
+        outward_text="Built a synthetic parsing workflow.",
+        original_source_sha256=hashlib.sha256(
+            b"Built a synthetic parsing workflow."
+        ).hexdigest(),
+        outward_sha256=hashlib.sha256(
+            b"Built a synthetic parsing workflow."
+        ).hexdigest(),
+    )
+    binding = review_module.CurrentClaimReviewBinding(
+        application_id="app_" + "b" * 64,
+        materialization_receipt_sha256="c" * 64,
+        candidate_projection_sha256="d" * 64,
+        original_source_identity="e" * 64,
+        original_source_sha256="f" * 64,
+        emitted_source_identity=candidate.application_source_identity,
+        emitted_source_sha256=hashlib.sha256(b"emitted source").hexdigest(),
+    )
+    monkeypatch.setattr(
+        review_module,
+        "_current_review_binding_and_evidence",
+        lambda **_kwargs: (binding, (evidence,)),
+    )
+    return replace(
+        candidate,
+        current_claim_review_evidence=(evidence,),
+        current_claim_review_binding=binding,
+        _current_runtime_context=object(),
+        _current_emitted_source=object(),
+    )
+
+
 def client(backend: Backend, tmp_path) -> LLMClient:
     return LLMClient(
         backend=backend,
@@ -232,6 +271,90 @@ def test_clean_relevant_canary_passes_and_legitimate_llm_claim_is_quoted(
         receipt.package_hashes["raw_listing_sha256"]
         == hashlib.sha256(b"vacancy").hexdigest()
     )
+    assert not review_module._current_review_mode(receipt.package_hashes)
+
+
+def test_current_review_binds_original_claims_and_policy_for_standalone_replay(
+    tmp_path, monkeypatch
+) -> None:
+    candidate = current_review_package(monkeypatch)
+    backend = ScriptedBackend(PASS, model="gpt-6-luna")
+    receipt = review_application_package(candidate, client=client(backend, tmp_path))
+
+    assert review_module._current_review_mode(receipt.package_hashes)
+    assert receipt.prompt_sha256 == review_module.CURRENT_PROMPT_SHA256
+    assert receipt.policy_sha256 == review_module.CURRENT_POLICY_SHA256
+    assert "CURRENT CLAIM EVIDENCE" in backend.last_system
+    assert "Built a synthetic parsing workflow." in backend.last_user
+    assert receipt.package_hashes["current_claim_review_binding_sha256"]
+    assert receipt.package_hashes["current_claim_review_evidence_sha256"]
+    verify_sanity_review_receipt(receipt, candidate)
+
+    with pytest.raises(ValueError, match="policy binding"):
+        replace(receipt, policy_sha256=review_module.POLICY_SHA256)
+
+
+def test_current_combined_review_uses_current_base_policy_for_replay(
+    tmp_path, monkeypatch
+) -> None:
+    candidate = current_review_package(monkeypatch)
+    backend = ScriptedBackend(_combined_result(), model="gpt-6-luna")
+    criteria = (
+        {"criterion_id": "resume-cover-letter", "version": "1", "sha256": "a" * 64},
+        {"criterion_id": "humanizer", "version": "2", "sha256": "b" * 64},
+    )
+    receipt = review_application_package_with_criteria(
+        candidate,
+        client=client(backend, tmp_path),
+        criteria_prompt="Apply the synthetic criterion.",
+        criteria=criteria,
+    )
+
+    assert "CURRENT CLAIM EVIDENCE" in backend.last_system
+    expected_policy = review_module.content_hash(
+        {
+            "base_sanity_policy_sha256": review_module.CURRENT_POLICY_SHA256,
+            "combined_prompt_sha256": receipt.prompt_sha256,
+            "combined_schema_sha256": receipt.schema_sha256,
+            "coverage": dict(receipt.review_coverage),
+        }
+    )
+    assert receipt.policy_sha256 == expected_policy
+    verify_sanity_review_receipt(receipt, candidate)
+
+
+def test_current_claim_rows_are_rederived_before_package_replay(monkeypatch) -> None:
+    candidate = current_review_package(monkeypatch)
+    original = candidate.current_claim_review_evidence[0]
+    changed_text = "Changed synthetic outward statement."
+    changed = replace(
+        original,
+        outward_text=changed_text,
+        outward_sha256=hashlib.sha256(changed_text.encode()).hexdigest(),
+    )
+
+    with pytest.raises(ValueError, match="retained native sources"):
+        replace(candidate, current_claim_review_evidence=(changed,))
+
+
+def test_pending_current_draft_cannot_enter_legacy_review_builder() -> None:
+    source = SimpleNamespace(
+        facts=(SimpleNamespace(pending_current_outward_draft=object()),)
+    )
+
+    with pytest.raises(ValueError, match="require original-source review"):
+        review_module.package_from_application(
+            source=source,
+            artifacts=None,
+            questions=None,
+        )
+
+
+def test_current_review_hash_pair_is_atomic() -> None:
+    with pytest.raises(ValueError, match="binding is incomplete"):
+        review_module._current_review_mode(
+            {"current_claim_review_binding_sha256": "a" * 64}
+        )
 
 
 def test_standalone_malformed_response_is_invalid_result_not_backend_failure(
