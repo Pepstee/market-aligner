@@ -195,10 +195,19 @@ def _store_market_candidate_authority(archive_root: Path, value: bytes) -> Path:
 def _require_lowest_ranked_market_handoff(
     context: MarketApplicationMaterializationContext,
     rows: list[dict[str, object]],
+    *,
+    current_runtime: bool = False,
 ) -> dict[str, object]:
     from market_aligner.assessment.geography import selection_sort_key
 
-    if len(rows) < 2:
+    if type(current_runtime) is not bool:
+        raise TypeError("current_runtime must be an exact bool")
+    minimum_handoffs = 1 if current_runtime else 2
+    if len(rows) < minimum_handoffs:
+        if current_runtime:
+            raise ValueError(
+                "a current-runtime Market canary requires at least one verified selected handoff"
+            )
         raise ValueError(
             "a Market canary requires at least two verified selected handoffs"
         )
@@ -207,18 +216,36 @@ def _require_lowest_ranked_market_handoff(
         set(application_ids)
     ) != len(application_ids):
         raise ValueError("verified Market selections contain ambiguous application IDs")
+
+    def _legacy_sort_key(row: dict[str, object]) -> tuple[object, ...]:
+        return (
+            *selection_sort_key(
+                row["geography_rank"],
+                row["final_score"],
+                row["opportunity"],
+                row["job_key"],
+            ),
+            row["application_id"],
+        )
+
+    def _current_sort_key(row: dict[str, object]) -> tuple[object, ...]:
+        rank = row["geography_rank"]
+        validation_only_unknown_rank = 1
+        return (
+            rank is None,
+            *selection_sort_key(
+                validation_only_unknown_rank if rank is None else rank,
+                row["final_score"],
+                row["opportunity"],
+                row["job_key"],
+            ),
+            row["application_id"],
+        )
+
     try:
         expected_order = sorted(
             rows,
-            key=lambda row: (
-                *selection_sort_key(
-                    row["geography_rank"],
-                    row["final_score"],
-                    row["opportunity"],
-                    row["job_key"],
-                ),
-                row["application_id"],
-            ),
+            key=_current_sort_key if current_runtime else _legacy_sort_key,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("verified Market selection ranking is malformed") from exc
@@ -714,7 +741,11 @@ class GutuaGreenhouseSession:
             candidate_intent_sha256=context.candidate_intent_sha256,
             **runtime_options["selection_kwargs"],
         )
-        selected = _require_lowest_ranked_market_handoff(context, selected_rows)
+        selected = _require_lowest_ranked_market_handoff(
+            context,
+            selected_rows,
+            current_runtime=runtime_options["current_runtime"],
+        )
 
         authority_path = _store_market_candidate_authority(
             self.archive_root, context.candidate_authority_bytes

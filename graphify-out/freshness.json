@@ -1,11 +1,11 @@
 {
   "community_count": 29688,
-  "edge_count": 76501,
-  "node_count": 57371,
+  "edge_count": 76549,
+  "node_count": 57386,
   "outputs": {
     ".graphify_labels.json": "958acceca6590be59b5abe496d1da2b771cde8a75bf348c766f377db451ecf62",
     "GRAPH_REPORT.md": "ce27e7ebb64972e1172f0ab3a8534c993e4bc4efc932459e785b9017967fc201",
-    "graph.json": "484d73bdb5404a47ed4d8d0288f8ae10b5ec00183996ad053de9a12fc1126421"
+    "graph.json": "59d6617216905d0f2bf7299b41e721e716beb1d11a63773a2ef1c5fa6f4ebbba"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "c5db7a3d4525bc7dd9cb72458e10e2fb82aacb1e",
+  "source_base_commit": "2ed23bccb4243763d5b80eeb1864b21ac1bab6cf",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -131,7 +131,7 @@
     "internal/jaa/career_automation/gap_optimizer.py": "f8f56663846b33d7058ac37595469a929b4147a0cffae05ebfbe125b6b2fe48c",
     "internal/jaa/career_automation/gmail_confirmation.py": "91e30759f21abe4c6ebe1eafb03c92d2025004cdf577d7f8792a3f11edb93df4",
     "internal/jaa/career_automation/greenhouse_live_discovery.py": "f5d64f6bab19033268e8bcc681f3aeabd126542f1fbb7a908fac0bc1acda9499",
-    "internal/jaa/career_automation/gutua_greenhouse_session.py": "d44fa1bab050ce35c4e8d885f3bf97c130ffb68e421bb98b78d8c1e83d2040b4",
+    "internal/jaa/career_automation/gutua_greenhouse_session.py": "2d7aa479e19e546b7076c434c6770014cb28f027a007d7d212aa8364ccbe3fe6",
     "internal/jaa/career_automation/handoff_admission.py": "bd3cc2ac62049fd718cc626996fca9f160fd7b10db66079c09c75f5c5181923d",
     "internal/jaa/career_automation/handoff_cli.py": "2b75d535ad718e18829ff70b689a57658852e9feb389dd1e9ecd543d4c605720",
     "internal/jaa/career_automation/hard_metrics_evaluation.py": "dd19d55ded5ce7b2df99e0d7a1dcd8851a59ae172bf047598c5fdf339c083218",
@@ -529,7 +529,7 @@
     "internal/jaa/test_gigabyte_current_time_service.py": "7d77ccca9a84a6d11343e0b28dcc7dde6c1d0ba9513b7890d78d5e29b0e029c1",
     "internal/jaa/test_gmail_confirmation.py": "a1ad2ec2ec5ce9bc04ebec9bf6d168fa62ea633ef9b5fc24074dc63e1ccdf584",
     "internal/jaa/test_greenhouse_live_discovery.py": "a67169754a402f974962843215348e920d9aecac87ab5af7c02d1944da05435c",
-    "internal/jaa/test_gutua_greenhouse_session.py": "8f0a074b0fbe0288ec88b0c3eea37d6ba855f98be8dd3dd43104b9ce48ec6961",
+    "internal/jaa/test_gutua_greenhouse_session.py": "7f295e708362e3f8cc9b8e4d0850cac5b410e900388c546cd85b0d4b202a67eb",
     "internal/jaa/test_import_legacy_application_archive.py": "6c868c50c7a3011e77d5de62cb4cd6e2b9461d29c10eb9255eb5425a80c0197a",
     "internal/jaa/test_install_market_handoff_config.py": "8c8f4a9f2032bdd541db38069b8bab7f7b96917fd5a225e5273f1fe1cc96afb3",
     "internal/jaa/test_jaa01_adversarial_runtime.py": "05f1bc558d7bdee2bc47d9e5b9d3057fd34583a703f5e8ac7be2067d579bcbef",

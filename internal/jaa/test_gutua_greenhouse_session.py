@@ -95,6 +95,185 @@ def _enrol_test_contact_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv(contact_module.REGISTRY_ENV, str(registry))
 
 
+def _market_selection_context(
+    *,
+    application_id: str = "app-target",
+    rank: int | None = 2,
+    final_score: float = 50.0,
+    opportunity: float = 0.5,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        application_id=application_id,
+        candidate_intent_sha256="intent-target",
+        geography_priority_rank=rank,
+        final_score=final_score,
+        opportunity_score=opportunity,
+        market_decision_authority=SimpleNamespace(
+            handoff_root_sha256="root-target"
+        ),
+    )
+
+
+def _market_selection_row(
+    *,
+    application_id: str = "app-target",
+    rank: int | None = 2,
+    final_score: float = 50.0,
+    opportunity: float = 0.5,
+    job_key: str = "job-target",
+    **overrides: object,
+) -> dict[str, object]:
+    row = {
+        "application_id": application_id,
+        "handoff_root_sha256": "root-target",
+        "candidate_intent_sha256": "intent-target",
+        "geography_rank": rank,
+        "final_score": final_score,
+        "opportunity": opportunity,
+        "job_key": job_key,
+        "release_authority": False,
+        "submission_authority": False,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_current_market_selection_accepts_one_verified_known_rank() -> None:
+    row = _market_selection_row()
+    selected = session_module._require_lowest_ranked_market_handoff(
+        _market_selection_context(), [row], current_runtime=True
+    )
+    assert selected is row
+
+
+def test_current_market_selection_accepts_one_unknown_rank_without_rewriting() -> None:
+    row = _market_selection_row(rank=None)
+    context = _market_selection_context(rank=None)
+    original = dict(row)
+    selected = session_module._require_lowest_ranked_market_handoff(
+        context, [row], current_runtime=True
+    )
+    assert selected is row
+    assert selected["geography_rank"] is None
+    assert row == original
+
+
+def test_legacy_market_selection_still_requires_two_rows() -> None:
+    with pytest.raises(ValueError, match="at least two verified selected handoffs"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(), [_market_selection_row()]
+        )
+
+
+def test_current_market_selection_orders_unknown_geography_last() -> None:
+    known_row = _market_selection_row(
+        application_id="app-known",
+        rank=3,
+        final_score=80.0,
+        opportunity=0.8,
+        job_key="job-known",
+    )
+    unknown_row = _market_selection_row(
+        rank=None,
+        final_score=50.0,
+        opportunity=0.5,
+        job_key="job-unknown",
+    )
+    selected = session_module._require_lowest_ranked_market_handoff(
+        _market_selection_context(rank=None),
+        [known_row, unknown_row],
+        current_runtime=True,
+    )
+    assert selected is unknown_row
+
+
+def test_current_market_selection_rejects_noncanonical_unknown_order() -> None:
+    known_row = _market_selection_row(
+        application_id="app-known", rank=3, job_key="job-known"
+    )
+    unknown_row = _market_selection_row(rank=None, job_key="job-unknown")
+    with pytest.raises(ValueError, match="not in canonical rank order"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(rank=None),
+            [unknown_row, known_row],
+            current_runtime=True,
+        )
+
+
+def test_legacy_market_selection_rejects_unknown_geography_rank() -> None:
+    rows = [
+        _market_selection_row(application_id="app-known", rank=1),
+        _market_selection_row(rank=None),
+    ]
+    with pytest.raises(ValueError, match="ranking is malformed"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(rank=None), rows
+        )
+
+
+def test_market_selection_requires_target_to_be_lowest_ranked() -> None:
+    rows = [
+        _market_selection_row(rank=1, final_score=90.0, opportunity=0.9),
+        _market_selection_row(
+            application_id="app-other",
+            rank=2,
+            final_score=50.0,
+            opportunity=0.5,
+            job_key="job-other",
+        ),
+    ]
+    with pytest.raises(ValueError, match="must be the lowest-ranked selected handoff"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(
+                rank=1, final_score=90.0, opportunity=0.9
+            ),
+            rows,
+        )
+
+
+def test_market_selection_rejects_duplicate_application_ids() -> None:
+    rows = [
+        _market_selection_row(rank=1),
+        _market_selection_row(rank=2, job_key="job-other"),
+    ]
+    with pytest.raises(ValueError, match="ambiguous application IDs"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(), rows, current_runtime=True
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("handoff_root_sha256", "root-other"),
+        ("candidate_intent_sha256", "intent-other"),
+        ("geography_rank", 5),
+        ("final_score", 51.0),
+        ("opportunity", 0.6),
+        ("release_authority", True),
+        ("submission_authority", True),
+    ],
+)
+def test_current_market_selection_rejects_binding_changes(
+    field: str, value: object
+) -> None:
+    row = _market_selection_row(**{field: value})
+    with pytest.raises(ValueError, match="differs from verified selection"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(), [row], current_runtime=True
+        )
+
+
+@pytest.mark.parametrize("current_runtime", [1, 0, "true", None])
+def test_market_selection_requires_exact_runtime_mode(current_runtime: object) -> None:
+    with pytest.raises(TypeError, match="exact bool"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(),
+            [_market_selection_row()],
+            current_runtime=current_runtime,
+        )
+
+
 def _json_bytes(value: object) -> bytes:
     return (canonical_json(value) + "\n").encode()
 
