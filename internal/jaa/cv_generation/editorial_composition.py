@@ -547,6 +547,7 @@ def _build_cover_runtime_contract(
             "Return only one canonical JSON object matching the response schema.",
             "Write a specific UK cover letter under one page using the four supplied sections.",
             "Keep each approved claim ID and source meaning; paraphrase candidate claims only when every qualification and limitation remains explicit.",
+            "Employer-kind claims must be copied exactly, character for character, from their bound approved source text; do not paraphrase, merge, or rewrite them.",
             "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
             "Select relevant, supported claims. Omit an unsuitable claim as a whole; never remove a material limitation or qualifier from a retained positive claim.",
             "Place each selected claim ID exactly once, only in its claim_section_policy section; do not require an employer claim in Opening or Company Fit.",

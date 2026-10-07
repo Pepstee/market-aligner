@@ -207,16 +207,16 @@ def _current_cover_fixture():
     )
     claims = (
         _claim(
-            "candidate-opening",
+            "candidate-evidence",
             "Built a reproducible evidence review process.",
             "candidate",
-            "Opening",
+            "Evidence Match",
         ),
         _claim(
-            "employer-evidence",
-            "Example Systems describes evidence-led delivery.",
+            "employer-opening",
+            "Example Systems runs a support platform for software teams.",
             "employer",
-            "Evidence Match",
+            "Opening",
         ),
     )
     request = build_cover_letter_editorial_request(
@@ -233,49 +233,47 @@ def _current_cover_fixture():
                 EditorialAtom("connective", "Dear Hiring Manager,", None),
                 EditorialAtom(
                     "connective",
-                    "The Data Engineer role at Example Systems caught my attention because of the work described in the vacancy.",
+                    "I am applying for the Data Engineer role at Example Systems.",
                     None,
-                ),
-                EditorialAtom("approved_claim", claims[0].text, claims[0].claim_id),
-            ),
-        ),
-        CoverLetterSection(
-            "Evidence Match",
-            (
-                EditorialAtom(
-                    "connective", "The strongest relevant evidence is set out below.", None
                 ),
                 EditorialAtom("approved_claim", claims[1].text, claims[1].claim_id),
             ),
+            current_runtime=True,
         ),
         CoverLetterSection(
-            "Company Fit",
-            (
-                EditorialAtom(
-                    "connective",
-                    "My interest in Example Systems comes from the work described in the vacancy.",
-                    None,
-                ),
-            ),
+            "Evidence Match",
+            (EditorialAtom("approved_claim", claims[0].text, claims[0].claim_id),),
+            current_runtime=True,
         ),
+        CoverLetterSection("Company Fit", (), current_runtime=True),
         CoverLetterSection(
             "Close",
             (
                 EditorialAtom(
                     "connective",
-                    "I would welcome the opportunity to discuss how this evidence could support Example Systems in this Data Engineer position.",
+                    "Thank you for considering my application.",
                     None,
                 ),
                 EditorialAtom("connective", "Kind regards", None),
                 EditorialAtom("connective", authority.candidate_name, None),
             ),
+            current_runtime=True,
         ),
     )
     draft = build_cover_letter_editorial_draft(
         candidate_name=authority.candidate_name,
         sections=sections,
+        current_runtime=True,
     )
     return authority, claims, request, draft
+
+
+def _current_cover_wire_document(draft):
+    document = draft.document(include_identity=False)
+    document.pop("current_runtime", None)
+    for section in document["sections"]:
+        section.pop("current_runtime", None)
+    return document
 
 
 def _evidence(request, writer, final):
@@ -310,7 +308,12 @@ class _Session:
         self.adapter.calls.append((request_bytes, self.invocation_id))
         response = self.adapter.response_bytes
         if response is None:
-            response = canonical_json(self.adapter.draft.document()).encode()
+            document = (
+                _current_cover_wire_document(self.adapter.draft)
+                if self.adapter.draft.current_runtime
+                else self.adapter.draft.document()
+            )
+            response = canonical_json(document).encode()
         return EditorialBackendResult(
             response_bytes=response,
             invocation_id=self.invocation_id,
@@ -494,6 +497,8 @@ def test_current_cover_letter_runtime_binds_writer_and_humanizer_prompts() -> No
     writer_draft, final_draft, *_ = run_cover_letter_composition_runtime(
         request, runtime=runtime
     )
+    assert len(writer_adapter.calls) == 1
+    assert len(humanizer_adapter.calls) == 1
     writer_request = json.loads(writer_adapter.calls[0][0])
     humanizer_request = json.loads(humanizer_adapter.calls[0][0])
     expected_section_policy = {
@@ -503,10 +508,11 @@ def test_current_cover_letter_runtime_binds_writer_and_humanizer_prompts() -> No
 
     assert writer_draft == final_draft == draft
     assert writer_request["claim_section_policy"] == expected_section_policy
-    assert writer_request["required_claim_ids"] == expected_claim_ids
+    assert writer_request["available_claim_ids"] == expected_claim_ids
+    assert "required_claim_ids" not in writer_request
     assert writer_request["section_min_facts"] == {
-        "Opening": 1,
-        "Evidence Match": 1,
+        "Opening": 0,
+        "Evidence Match": 0,
         "Company Fit": 0,
     }
     writer_instructions = " ".join(writer_request["instructions"])
@@ -519,23 +525,61 @@ def test_current_cover_letter_runtime_binds_writer_and_humanizer_prompts() -> No
         not in writer_instructions
     )
     assert (
-        "Use the supplied rhetorical catalog, preserve supported facts, and add no extra claims."
+        "Opening uses the exact salutation and supplied plain role/company sentence, followed only by its bound facts."
         in writer_instructions
     )
     assert (
-        "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim."
+        "Use only the supplied rhetorical catalog and add no claims or meta-signposts."
+        in writer_instructions
+    )
+    assert (
+        "Keep each approved claim ID and source meaning; paraphrase candidate claims only when every qualification and limitation remains explicit."
+        in writer_instructions
+    )
+    assert (
+        "Employer-kind claims must be copied exactly, character for character, from their bound approved source text; do not paraphrase, merge, or rewrite them."
+        in writer_instructions
+    )
+    expected_employer_claims = {
+        claim.claim_id: claim.text
+        for claim in request.approved_claims
+        if claim.fact_kind == "employer"
+    }
+    captured_employer_claims = {
+        claim["claim_id"]: claim["text"]
+        for claim in writer_request["editorial_request"]["approved_claims"]
+        if claim["fact_kind"] == "employer"
+    }
+    assert expected_employer_claims
+    assert captured_employer_claims == expected_employer_claims
+    expected_candidate_claims = {
+        claim.claim_id: claim.text
+        for claim in request.approved_claims
+        if claim.fact_kind == "candidate"
+    }
+    captured_candidate_claims = {
+        claim["claim_id"]: claim["text"]
+        for claim in writer_request["editorial_request"]["approved_claims"]
+        if claim["fact_kind"] == "candidate"
+    }
+    assert captured_candidate_claims == expected_candidate_claims
+    assert (
+        "Add no work-rights text, AI disclosure, unsupported tool claim, or internal process commentary."
         in writer_instructions
     )
     assert writer_request["claim_section_policy"] == humanizer_request[
         "claim_section_policy"
     ]
-    assert writer_request["required_claim_ids"] == humanizer_request[
-        "required_claim_ids"
-    ]
+    assert "required_claim_ids" not in humanizer_request
+    assert writer_request["available_claim_ids"] == expected_claim_ids
+    assert humanizer_request["available_claim_ids"] == expected_claim_ids
     humanizer_instructions = " ".join(humanizer_request["instructions"])
-    assert "Do not require a separate Opening employer hook" in humanizer_instructions
+    assert (
+        "Do not add generic signposts or an Opening employer hook; follow the supplied claim assignments."
+        in humanizer_instructions
+    )
     assert "Preserve the exact salutation, sign-off, signature, and required CTA." in humanizer_instructions
-    assert "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact." in humanizer_instructions
+    assert "Use no em dash, en dash, disclosure, internal commentary, or new fact." in humanizer_instructions
 
 
 def test_current_cover_runtime_passes_trusted_mode_to_both_response_parsers() -> None:
@@ -544,7 +588,7 @@ def test_current_cover_runtime_passes_trusted_mode_to_both_response_parsers() ->
 
     def pretty(draft):
         return json.dumps(
-            draft.document(), ensure_ascii=False, indent=2
+            _current_cover_wire_document(draft), ensure_ascii=False, indent=2
         ).encode("utf-8") + b"\n"
 
     writer_bytes = pretty(writer)
@@ -593,8 +637,7 @@ def test_detached_cover_adapter_binds_format_mode_to_request_and_preserves_bytes
     monkeypatch, tmp_path
 ) -> None:
     _, _, request, draft = _current_cover_fixture()
-    response = draft.document()
-    response.pop("draft_sha256")
+    response = _current_cover_wire_document(draft)
     response_bytes = json.dumps(
         response, ensure_ascii=False, indent=2
     ).encode("utf-8") + b"\n"
@@ -698,8 +741,7 @@ def test_detached_current_cover_adapter_keeps_duplicate_and_fact_guards(
     monkeypatch, tmp_path, failure
 ) -> None:
     _, _, request, draft = _current_cover_fixture()
-    response = draft.document()
-    response.pop("draft_sha256")
+    response = _current_cover_wire_document(draft)
     if failure == "unknown_fact":
         response["sections"][0]["atoms"][0]["source_kind"] = "unapproved_fact"
         response_bytes = json.dumps(response, ensure_ascii=False, indent=2).encode()
@@ -792,16 +834,15 @@ def test_current_cover_letter_uses_bound_sections_and_exact_claims() -> None:
     _, claims, request, draft = _current_cover_fixture()
     validate_cover_letter_editorial_draft(request, draft)
 
-    omitted = build_cover_letter_editorial_draft(
+    omitted_employer = build_cover_letter_editorial_draft(
         candidate_name=draft.candidate_name,
         sections=(
-            draft.sections[0],
-            replace(draft.sections[1], atoms=draft.sections[1].atoms[:1]),
-            *draft.sections[2:],
+            replace(draft.sections[0], atoms=draft.sections[0].atoms[:2]),
+            *draft.sections[1:],
         ),
+        current_runtime=True,
     )
-    with pytest.raises(EditorialCompositionError):
-        validate_cover_letter_editorial_draft(request, omitted)
+    validate_cover_letter_editorial_draft(request, omitted_employer)
 
     duplicated = build_cover_letter_editorial_draft(
         candidate_name=draft.candidate_name,
@@ -812,6 +853,7 @@ def test_current_cover_letter_uses_bound_sections_and_exact_claims() -> None:
             ),
             *draft.sections[1:],
         ),
+        current_runtime=True,
     )
     with pytest.raises(EditorialCompositionError, match="repeats an approved claim"):
         validate_cover_letter_editorial_draft(request, duplicated)
@@ -828,6 +870,7 @@ def test_current_cover_letter_uses_bound_sections_and_exact_claims() -> None:
             misplaced_company_fit,
             *draft.sections[3:],
         ),
+        current_runtime=True,
     )
     with pytest.raises(EditorialCompositionError, match="wrong section"):
         validate_cover_letter_editorial_draft(request, misplaced)
@@ -843,15 +886,29 @@ def test_current_cover_letter_uses_bound_sections_and_exact_claims() -> None:
 
 
 def test_current_cover_letter_pairs_remain_invalid_in_legacy_mode() -> None:
-    authority, claims, _, _ = _current_cover_fixture()
+    authority, _, _, _ = _current_cover_fixture()
     legacy_authority = replace(authority, current_runtime=False)
+    legacy_incompatible_claims = (
+        _claim(
+            "candidate-opening",
+            "Built a reproducible evidence review process.",
+            "candidate",
+            "Opening",
+        ),
+        _claim(
+            "employer-evidence",
+            "Example Systems runs a support platform for software teams.",
+            "employer",
+            "Evidence Match",
+        ),
+    )
     with pytest.raises(EditorialCompositionError, match="claim policy"):
         build_cover_letter_editorial_request(
             authority=legacy_authority,
             role_title="Data Engineer",
             company_name="Example Systems",
             vacancy_sha256="b" * 64,
-            approved_claims=claims,
+            approved_claims=legacy_incompatible_claims,
         )
 
 
