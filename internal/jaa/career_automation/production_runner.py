@@ -1079,6 +1079,27 @@ class GreenhouseProductionRunner:
             if not row.approved and not row.rejection_codes:
                 raise ValueError("rejected generated revision lacks rejection codes")
 
+    @staticmethod
+    def _review_route_handler(recorder: GreenhouseAttemptRecorder):
+        """Abort non-GET requests before dispatch and archive only successful blocks."""
+
+        def review_route(route) -> None:
+            request = route.request
+            method = getattr(request, "method", None)
+            if type(method) is str and method.upper() == "GET":
+                route.continue_()
+                return
+            try:
+                route.abort()
+            except Exception as exc:
+                recorder.record_review_boundary_fault(
+                    "policy route abort failed: " + str(exc)
+                )
+                raise
+            recorder.record_review_blocked_intent(request)
+
+        return review_route
+
     def execute_next(
         self,
         page: Page,
@@ -1134,15 +1155,8 @@ class GreenhouseProductionRunner:
         elif any(row.role == "review.intent" for row in recorder.attempt._objects(recorder.attempt._events())):
             raise ValueError("a review-only attempt cannot resume as live execution")
         recorder.attach_page_evidence(page)
-        refused_requests: list[str] = []
         if self.review_only:
-            def review_route(route):
-                if route.request.method != "GET":
-                    refused_requests.append(route.request.method)
-                    route.abort()
-                else:
-                    route.continue_()
-            page.route("**/*", review_route)
+            page.route("**/*", self._review_route_handler(recorder))
         try:
             navigation = open_vacancy(item, page)
             if isinstance(navigation, Mapping) and "_current_navigation_capture" in navigation:
@@ -1154,6 +1168,8 @@ class GreenhouseProductionRunner:
                 }
             else:
                 recorder.record_navigation(navigation)
+            if self.review_only:
+                recorder.ensure_review_network_boundary()
         except Exception as exc:
             if self.review_only:
                 raise
@@ -1180,6 +1196,8 @@ class GreenhouseProductionRunner:
         }
         if "browser.prefill_snapshot" not in roles:
             recorder.record_prefill(page, **({"passive": True} if self.review_only else {}))
+        if self.review_only:
+            recorder.ensure_review_network_boundary()
         try:
             revision_sink = GeneratedRevisionSink(recorder)
             prepared = (prepare_review if self.review_only else prepare_release)(item, recorder, page, revision_sink)
@@ -1194,7 +1212,8 @@ class GreenhouseProductionRunner:
             )
             raise
         if self.review_only:
-            if type(prepared) is not PreparedGreenhouseReview or refused_requests:
+            recorder.ensure_review_network_boundary()
+            if type(prepared) is not PreparedGreenhouseReview:
                 raise ValueError("review-only preparation crossed its passive boundary")
             self._validate_generation_inventory(prepared, revision_sink)
             digest = recorder.finalize_review_only(prepared)

@@ -10,6 +10,7 @@ import pytest
 from career_automation.application_archive import (
     RELEASE_REQUIRED_ROLES,
     REVIEW_REQUIRED_ROLES,
+    REVIEW_BLOCKED_INTENT_ERROR_CODE,
     ApplicationArchive,
     ApplicationArchiveError,
     ApplicationArchiveReceipt,
@@ -281,8 +282,47 @@ def test_review_only_refuses_post_and_nonzero_counts(tmp_path):
     recorder, _ = _review_preparation(tmp_path)
     with pytest.raises(ApplicationArchiveError, match="GET"):
         recorder._record_evidence("request", result="observed", details={"method": "POST"})
+    with pytest.raises(ApplicationArchiveError, match="GET"):
+        recorder._record_evidence("request", result="observed", details={"method": None})
     with pytest.raises(ApplicationArchiveError, match="zero"):
         recorder._record_evidence("terminal", result="completed", details={"interaction_counts": {"submit_clicks": 1}})
+
+
+def test_review_only_archive_accepts_only_exact_blocked_nonget_schema(tmp_path):
+    recorder, _ = _review_preparation(tmp_path)
+    recorder._record_evidence(
+        "request",
+        result="blocked",
+        details={
+            "method": "POST",
+            "url_sha256": "a" * 64,
+            "resource_type": "xhr",
+            "error_code": REVIEW_BLOCKED_INTENT_ERROR_CODE,
+        },
+    )
+    for details in (
+        {
+            "method": None,
+            "url_sha256": "a" * 64,
+            "resource_type": "xhr",
+            "error_code": REVIEW_BLOCKED_INTENT_ERROR_CODE,
+        },
+        {
+            "method": "POST",
+            "url_sha256": "not-a-sha256",
+            "resource_type": "xhr",
+            "error_code": REVIEW_BLOCKED_INTENT_ERROR_CODE,
+        },
+        {
+            "method": "POST",
+            "url_sha256": "a" * 64,
+            "resource_type": "xhr",
+            "error_code": REVIEW_BLOCKED_INTENT_ERROR_CODE,
+            "status": 0,
+        },
+    ):
+        with pytest.raises(ApplicationArchiveError, match="blocked request evidence"):
+            recorder._record_evidence("request", result="blocked", details=details)
 
 
 def test_review_only_requires_all_evidence_and_rejects_pdf_substitution(tmp_path):

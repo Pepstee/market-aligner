@@ -14,11 +14,13 @@ from playwright.sync_api import Page
 
 from .application_archive import (
     ApplicationArchive,
+    ApplicationArchiveError,
     ApplicationArchiveReceipt,
     ArchivedObject,
     AttemptArchive,
     VacancyArchiveIdentity,
     release_upload_mapping_bytes,
+    REVIEW_BLOCKED_INTENT_ERROR_CODE,
     REVIEW_ONLY_METADATA,
 )
 from .application_compiler import (
@@ -124,6 +126,10 @@ class GreenhouseAttemptRecorder:
         self._attached_pages: set[int] = set()
         self._created_here = False
         self.current_provider_proof: CurrentGreenhouseNavigationProof | None = None
+        self._review_only_active = False
+        self._review_boundary_fault: str | None = None
+        self._review_blocked_intents: list[object] = []
+        self._review_pending_nonget: list[object] = []
 
     @classmethod
     def create(
@@ -228,6 +234,87 @@ class GreenhouseAttemptRecorder:
     def _url_sha256(value: str) -> str:
         return hashlib.sha256(sanitize_url(value).encode("utf-8")).hexdigest()
 
+    def _record_review_evidence(self, event_kind: str, **kwargs) -> str:
+        try:
+            return self._record_evidence(event_kind, **kwargs)
+        except Exception:
+            if self._review_only_active:
+                self.record_review_boundary_fault(
+                    "review-only browser evidence could not be archived"
+                )
+            raise
+
+    def record_review_boundary_fault(self, reason: str) -> None:
+        """Make a review-only browser boundary fault sticky before archiving it."""
+        if not self._review_only_active:
+            raise ValueError("review boundary faults require review-only mode")
+        if self._review_boundary_fault is not None:
+            return
+        self._review_boundary_fault = reason
+        try:
+            self._record_evidence(
+                "console_error",
+                result="failed",
+                details={"provenance": "review.network_boundary_fault"},
+                private_value=redact_text(reason).encode("utf-8"),
+                private_media_type="text/plain",
+            )
+        except Exception:
+            pass
+
+    def record_review_blocked_intent(self, request) -> None:
+        """Archive a non-GET request only after its policy abort succeeds."""
+        if not self._review_only_active:
+            raise ValueError("blocked request intent evidence requires review-only mode")
+        try:
+            raw_method = request.method
+            resource_type = request.resource_type
+            url = request.url
+            if (
+                type(raw_method) is not str
+                or not raw_method
+                or type(resource_type) is not str
+                or not resource_type
+                or type(url) is not str
+                or not url
+            ):
+                raise ValueError("blocked request metadata is invalid")
+            method = raw_method.upper()
+            if method == "GET":
+                raise ValueError("blocked request intent requires a non-GET method")
+            details = {
+                "method": method,
+                "resource_type": resource_type,
+                "url_sha256": self._url_sha256(url),
+                "error_code": REVIEW_BLOCKED_INTENT_ERROR_CODE,
+            }
+            self._record_evidence("request", result="blocked", details=details)
+        except Exception:
+            self.record_review_boundary_fault(
+                "policy-blocked request evidence could not be validated or archived"
+            )
+            raise
+        self._review_blocked_intents.append(request)
+
+    def ensure_review_network_boundary(self) -> None:
+        """Fail closed unless each observed non-GET request was aborted and archived."""
+        if not self._review_only_active:
+            return
+        if self._review_boundary_fault is not None:
+            raise ApplicationArchiveError(
+                "review-only network boundary violation is fatal"
+            )
+        if any(
+            not any(pending is blocked for blocked in self._review_blocked_intents)
+            for pending in self._review_pending_nonget
+        ):
+            self.record_review_boundary_fault(
+                "a non-GET browser request lacked matching policy-block evidence"
+            )
+            raise ApplicationArchiveError(
+                "review-only network boundary violation is fatal"
+            )
+
     def attach_page_evidence(self, page: Page) -> None:
         """Attach append-only sanitized browser evidence to this attempt once."""
         page_identity = id(page)
@@ -236,33 +323,53 @@ class GreenhouseAttemptRecorder:
         self._attached_pages.add(page_identity)
 
         def on_request(request) -> None:
-            self._record_evidence(
+            method = request.method
+            if self._review_only_active and (
+                type(method) is not str or method.upper() != "GET"
+            ):
+                self._review_pending_nonget.append(request)
+                return
+            self._record_review_evidence(
                 "request",
                 result="observed",
                 details={
-                    "method": str(request.method).upper(),
+                    "method": str(method).upper(),
                     "resource_type": str(request.resource_type),
                     "url_sha256": self._url_sha256(str(request.url)),
                 },
             )
 
         def on_response(response) -> None:
-            self._record_evidence(
+            method = response.request.method
+            if self._review_only_active and (
+                type(method) is not str or method.upper() != "GET"
+            ):
+                self.record_review_boundary_fault(
+                    "review-only observed an actual non-GET network response"
+                )
+                return
+            self._record_review_evidence(
                 "response",
                 result="observed",
                 details={
-                    "method": str(response.request.method).upper(),
+                    "method": str(method).upper(),
                     "status": int(response.status),
                     "url_sha256": self._url_sha256(str(response.url)),
                 },
             )
 
         def on_request_failed(request) -> None:
-            self._record_evidence(
+            method = request.method
+            if self._review_only_active and (
+                type(method) is not str or method.upper() != "GET"
+            ):
+                self._review_pending_nonget.append(request)
+                return
+            self._record_review_evidence(
                 "request_failed",
                 result="failed",
                 details={
-                    "method": str(request.method).upper(),
+                    "method": str(method).upper(),
                     "resource_type": str(request.resource_type),
                     "url_sha256": self._url_sha256(str(request.url)),
                     "error_code": "request_failed",
@@ -272,7 +379,7 @@ class GreenhouseAttemptRecorder:
         def on_console(message) -> None:
             if str(message.type).casefold() not in {"error", "warning"}:
                 return
-            self._record_evidence(
+            self._record_review_evidence(
                 "console_error",
                 result="observed",
                 details={"provenance": "browser.console"},
@@ -286,7 +393,7 @@ class GreenhouseAttemptRecorder:
         page.on("console", on_console)
         page.on(
             "pageerror",
-            lambda error: self._record_evidence(
+            lambda error: self._record_review_evidence(
                 "console_error",
                 result="failed",
                 details={"provenance": "browser.pageerror"},
@@ -722,6 +829,7 @@ class GreenhouseAttemptRecorder:
     def begin_review_only(self) -> None:
         self.attempt.begin_review_only(allow_new=self._created_here)
         self._created_here = False
+        self._review_only_active = True
 
     def recover_review_only_completion(self) -> str | None:
         self.begin_review_only()
@@ -763,6 +871,7 @@ class GreenhouseAttemptRecorder:
         if type(prepared) is not PreparedGreenhouseReview:
             raise TypeError("review-only completion requires its exact non-release type")
         self.begin_review_only()
+        self.ensure_review_network_boundary()
         recovered = self.recover_review_only_completion()
         if recovered is not None:
             return recovered

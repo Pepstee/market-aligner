@@ -14,7 +14,10 @@ from types import SimpleNamespace
 import pytest
 
 import career_automation.production_runner as runner_module
-from career_automation.application_archive import VacancyArchiveIdentity
+from career_automation.application_archive import (
+    ApplicationArchiveError,
+    VacancyArchiveIdentity,
+)
 from career_automation.application_compiler import CandidateContact
 from career_automation.candidate_application_factory import CandidateApplicationPackage
 from career_automation.evidence_matching import canonical_json
@@ -238,9 +241,12 @@ def test_review_only_runner_completes_without_release_and_does_not_reenter(tmp_p
             assert (recorder.attempt.path / "terminal-summary.txt").read_bytes() == prior_summary
         return
     actions = []
-    routes[0](SimpleNamespace(request=SimpleNamespace(method="POST"),
-                              abort=lambda: actions.append("abort"),
-                              continue_=forbidden))
+    with pytest.raises(ApplicationArchiveError, match="immutable"):
+        routes[0](SimpleNamespace(request=SimpleNamespace(
+            method="POST",
+            url=candidate.vacancy.vacancy.source_url + "/track",
+            resource_type="xhr",
+        ), abort=lambda: actions.append("abort"), continue_=forbidden))
     assert actions == ["abort"]
 
 
@@ -263,6 +269,216 @@ def test_review_only_runner_rejects_incomplete_release_before_browser_access(tmp
     with pytest.raises(ValueError, match="no review-only intent"):
         runner.execute_next(None, candidates=(candidate,), open_vacancy=forbidden, prepare_review=forbidden)
     assert recorder.attempt._events() == original
+
+
+def test_review_only_blocked_intent_matches_the_same_request_object(tmp_path):
+    from test_application_archive import _review_preparation
+
+    recorder, _prepared = _review_preparation(tmp_path)
+    callbacks = {}
+    page = SimpleNamespace(on=lambda name, callback: callbacks.__setitem__(name, callback))
+    recorder.attach_page_evidence(page)
+    request = SimpleNamespace(
+        method="POST",
+        url="https://job-boards.greenhouse.io/example/jobs/123/track",
+        resource_type="xhr",
+    )
+    callbacks["request"](request)
+    route_actions = []
+    GreenhouseProductionRunner._review_route_handler(recorder)(SimpleNamespace(
+        request=request,
+        abort=lambda: route_actions.append("abort"),
+        continue_=lambda: pytest.fail("non-GET request was continued"),
+    ))
+    callbacks["requestfailed"](request)
+    recorder.ensure_review_network_boundary()
+    assert route_actions == ["abort"]
+    blocked = [
+        event["payload"]
+        for event in recorder.attempt._events()
+        if event["event_type"] == "evidence_recorded"
+        and event["payload"].get("event_kind") == "request"
+        and event["payload"].get("result") == "blocked"
+    ]
+    assert len(blocked) == 1
+
+
+def test_review_only_requestfailed_only_same_content_object_is_not_covered(tmp_path):
+    from test_application_archive import _review_preparation
+
+    class Request:
+        method = "POST"
+        url = "https://job-boards.greenhouse.io/example/jobs/123/track"
+        resource_type = "xhr"
+
+        def __init__(self):
+            self.post_data_reads = 0
+
+        @property
+        def post_data(self):
+            self.post_data_reads += 1
+            return "same-body=1"
+
+    recorder, _prepared = _review_preparation(tmp_path)
+    callbacks = {}
+    recorder.attach_page_evidence(
+        SimpleNamespace(on=lambda name, callback: callbacks.__setitem__(name, callback))
+    )
+    blocked_request = Request()
+    distinct_failed_request = Request()
+    callbacks["request"](blocked_request)
+    GreenhouseProductionRunner._review_route_handler(recorder)(SimpleNamespace(
+        request=blocked_request,
+        abort=lambda: None,
+        continue_=lambda: pytest.fail("non-GET request was continued"),
+    ))
+    callbacks["requestfailed"](distinct_failed_request)
+    with pytest.raises(ApplicationArchiveError, match="boundary violation is fatal"):
+        recorder.ensure_review_network_boundary()
+    assert blocked_request is not distinct_failed_request
+    assert blocked_request.post_data_reads == distinct_failed_request.post_data_reads == 0
+
+
+def test_review_only_nonget_response_is_sticky_after_blocked_intent(tmp_path):
+    from test_application_archive import _review_preparation
+
+    recorder, _prepared = _review_preparation(tmp_path)
+    callbacks = {}
+    recorder.attach_page_evidence(
+        SimpleNamespace(on=lambda name, callback: callbacks.__setitem__(name, callback))
+    )
+    request = SimpleNamespace(
+        method="POST",
+        url="https://job-boards.greenhouse.io/example/jobs/123/track",
+        resource_type="xhr",
+    )
+    callbacks["request"](request)
+    GreenhouseProductionRunner._review_route_handler(recorder)(SimpleNamespace(
+        request=request,
+        abort=lambda: None,
+        continue_=lambda: pytest.fail("non-GET request was continued"),
+    ))
+    callbacks["response"](SimpleNamespace(request=request, status=200, url=request.url))
+    with pytest.raises(ApplicationArchiveError, match="boundary violation is fatal"):
+        recorder.ensure_review_network_boundary()
+
+
+def test_review_only_blocked_archive_write_failure_is_sticky(tmp_path, monkeypatch):
+    from test_application_archive import _review_preparation
+
+    recorder, _prepared = _review_preparation(tmp_path)
+    original = recorder._record_evidence
+
+    def fail_blocked_write(event_kind, **kwargs):
+        if event_kind == "request":
+            raise OSError("synthetic archive write failure")
+        return original(event_kind, **kwargs)
+
+    monkeypatch.setattr(recorder, "_record_evidence", fail_blocked_write)
+    request = SimpleNamespace(
+        method="POST",
+        url="https://job-boards.greenhouse.io/example/jobs/123/track",
+        resource_type="xhr",
+    )
+    with pytest.raises(OSError, match="synthetic archive write failure"):
+        GreenhouseProductionRunner._review_route_handler(recorder)(SimpleNamespace(
+            request=request,
+            abort=lambda: None,
+            continue_=lambda: pytest.fail("non-GET request was continued"),
+        ))
+    assert recorder._review_blocked_intents == []
+    with pytest.raises(ApplicationArchiveError, match="boundary violation is fatal"):
+        recorder.ensure_review_network_boundary()
+
+
+def test_review_only_abort_failure_is_sticky_and_prevents_finalization(tmp_path):
+    from test_application_archive import _review_preparation
+
+    recorder, prepared = _review_preparation(tmp_path)
+
+    def failed_abort():
+        raise RuntimeError("synthetic abort failure")
+
+    with pytest.raises(RuntimeError, match="synthetic abort failure"):
+        GreenhouseProductionRunner._review_route_handler(recorder)(SimpleNamespace(
+            request=SimpleNamespace(
+                method="POST",
+                url="https://job-boards.greenhouse.io/example/jobs/123/track",
+                resource_type="xhr",
+            ),
+            abort=failed_abort,
+            continue_=lambda: pytest.fail("non-GET request was continued"),
+        ))
+    with pytest.raises(ApplicationArchiveError, match="boundary violation is fatal"):
+        recorder.ensure_review_network_boundary()
+    with pytest.raises(ApplicationArchiveError, match="boundary violation is fatal"):
+        recorder.finalize_review_only(prepared)
+    assert not (recorder.attempt.path / "terminal-manifest.json").exists()
+
+
+def test_review_only_boundary_is_checked_before_preparation(tmp_path):
+    vacancy_bytes = b"synthetic vacancy capture"
+    vacancy = VacancyArchiveIdentity(
+        job_key="greenhouse:example:boundary-test",
+        vacancy_sha256=hashlib.sha256(vacancy_bytes).hexdigest(),
+        role_title="Engineer",
+        company_name="Example",
+        source_url="https://job-boards.greenhouse.io/example/jobs/boundary-test",
+    )
+    candidate = ProductionRunCandidate(
+        vacancy=LiveVacancy.create(
+            vacancy=vacancy,
+            provider="greenhouse",
+            fit_score="0.2",
+            live=True,
+            eligible=True,
+            duplicate=False,
+            live_verified_at=datetime.now(timezone.utc).isoformat(),
+            scoring_inputs_sha256=_digest("boundary-test-score"),
+        ),
+        complete_vacancy=vacancy_bytes,
+        structured_vacancy={"job_key": vacancy.job_key},
+        assessment={"fit_score": 0.2},
+    )
+    callbacks = {}
+    route_handlers = []
+
+    class Page:
+        def on(self, name, callback):
+            callbacks[name] = callback
+
+        def route(self, _pattern, callback):
+            route_handlers.append(callback)
+
+    page = Page()
+    runner = GreenhouseProductionRunner(
+        repository_root=ROOT,
+        archive_root=tmp_path / "archive",
+        review_only=True,
+    )
+    prepared_calls = []
+
+    def open_vacancy(_item, _page):
+        callbacks["requestfailed"](SimpleNamespace(
+            method="POST",
+            url=candidate.vacancy.vacancy.source_url + "/track",
+            resource_type="xhr",
+        ))
+        return {
+            "method": "GET",
+            "status": 200,
+            "url": candidate.vacancy.vacancy.source_url,
+        }
+
+    with pytest.raises(ApplicationArchiveError, match="boundary violation is fatal"):
+        runner.execute_next(
+            page,
+            candidates=(candidate,),
+            open_vacancy=open_vacancy,
+            prepare_review=lambda *_args: prepared_calls.append("called"),
+        )
+    assert route_handlers
+    assert prepared_calls == []
 
 
 def test_review_only_runner_never_constructs_submit_executor(tmp_path, monkeypatch):

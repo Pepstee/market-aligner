@@ -158,6 +158,10 @@ REVIEW_ONLY_METADATA = {
     "release_authority": False,
     "submission_authority": False,
 }
+REVIEW_BLOCKED_INTENT_ERROR_CODE = "policy_blocked_before_dispatch"
+REVIEW_BLOCKED_INTENT_DETAIL_KEYS = frozenset(
+    {"method", "url_sha256", "resource_type", "error_code"}
+)
 REVIEW_REQUIRED_ROLES = frozenset({
     "review.intent", "review.result", "review.package", "review.ats_passive_forensics",
     "vacancy.source_identity", "vacancy.capture", "vacancy.visible_listing_capture",
@@ -182,7 +186,35 @@ def _review_event_allowed(event_type: str, payload: Mapping[str, object]) -> Non
         details = payload.get("details", {})
         if not isinstance(details, Mapping):
             raise ApplicationArchiveError("review-only event details are invalid")
-        if "method" in details and details["method"] != "GET":
+        blocked_intent = (
+            payload.get("event_kind") == "request"
+            and payload.get("result") == "blocked"
+        )
+        if blocked_intent:
+            method = details.get("method")
+            resource_type = details.get("resource_type")
+            url_sha256 = details.get("url_sha256")
+            if not (
+                type(method) is str
+                and method
+                and method == method.upper()
+                and method.isascii()
+                and all(
+                    character.isalnum() or character in "!#$%&'*+-.^_`|~"
+                    for character in method
+                )
+                and method != "GET"
+                and type(resource_type) is str
+                and resource_type
+                and type(url_sha256) is str
+                and re.fullmatch(r"[0-9a-f]{64}", url_sha256)
+                and details.get("error_code") == REVIEW_BLOCKED_INTENT_ERROR_CODE
+                and set(details) == REVIEW_BLOCKED_INTENT_DETAIL_KEYS
+            ):
+                raise ApplicationArchiveError(
+                    "review-only blocked request evidence is invalid"
+                )
+        elif "method" in details and details["method"] != "GET":
             raise ApplicationArchiveError("review-only network evidence must use GET")
         counts = details.get("interaction_counts", {})
         if not isinstance(counts, Mapping) or any(type(value) is not int or value != 0 for value in counts.values()):
