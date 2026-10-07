@@ -12,9 +12,9 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from market_aligner.domain.contracts import RawPosting
+from market_aligner.domain.contracts import JobUrl, RawPosting
 from market_aligner.applications.canonical import ContractValidationError
-from market_aligner.collectors.evidence import bind_public_listing
+from market_aligner.collectors.evidence import bind_public_listing, public_listing_bytes
 from market_aligner.llm.codex_gateway import (
     CodexGatewayError,
     CodexSemanticGateway,
@@ -54,7 +54,7 @@ from market_aligner.llm.structured import (
     extract_structured_vacancy,
 )
 from market_aligner.profiler.schema import EvidenceItem
-from market_aligner.state.vacancies import raw_posting_content_sha256
+from market_aligner.state.vacancies import JobDatabase, raw_posting_content_sha256
 
 
 class FakeCodexRunner:
@@ -1109,6 +1109,111 @@ class VacancyEligibilityContractTests(unittest.TestCase):
         for field, value, quote, expected in cases:
             with self.subTest(field=field, value=value, quote=quote):
                 self.assertEqual(expected, quote_supports_eligibility(field, value, quote))
+
+    def test_eligibility_capture_keeps_collector_and_capture_hash_domains_distinct(
+        self,
+    ) -> None:
+        raw = RawPosting(
+            board="greenhouse",
+            job_id="synthetic-hash-domains",
+            url="https://jobs.example/public/1",
+            fetched_at="2026-10-07T18:00:00Z",
+            raw_json={"title": "Synthetic role", "content": "Synthetic body"},
+            content_type="application/json",
+        )
+        exact = public_listing_bytes(raw)
+        exact_digest = hashlib.sha256(exact).hexdigest()
+        canonical_digest = raw_posting_content_sha256(raw)
+        self.assertNotEqual(exact_digest, canonical_digest)
+
+        for declared_digest in (exact_digest, canonical_digest):
+            with self.subTest(declared_digest=declared_digest):
+                bound = replace(raw, content_sha256=declared_digest)
+                self.assertEqual(
+                    (canonical_digest, exact), verified_eligibility_capture(bound)
+                )
+                task_input = vacancy_eligibility_input(bound)
+                self.assertEqual(canonical_digest, task_input["content_sha256"])
+                self.assertEqual(exact_digest, task_input["public_capture_sha256"])
+
+
+    def test_eligibility_input_preserves_database_snapshot_key_after_roundtrip(
+        self,
+    ) -> None:
+        raw = RawPosting(
+            board="greenhouse",
+            job_id="synthetic-snapshot-roundtrip",
+            url="https://jobs.example/public/3",
+            fetched_at="2026-10-07T18:00:00Z",
+            raw_json={"zeta": "Synthetic body", "alpha": "Synthetic title"},
+            content_type="application/json",
+        )
+        exact_digest = hashlib.sha256(public_listing_bytes(raw)).hexdigest()
+        raw = replace(raw, content_sha256=exact_digest)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            data_home = Path(temporary_directory)
+            database = JobDatabase(data_home / "vacancies.sqlite3", data_home=data_home)
+            database.upsert_discovered(JobUrl(raw.board, raw.job_id, raw.url))
+            database.store_raw(raw)
+            _, source_content_sha256, _ = database.fetched_posting(raw.key)
+            restored = database.load_raw_snapshot(raw.key, source_content_sha256)
+
+            self.assertEqual(exact_digest, restored.content_sha256)
+            self.assertEqual(
+                exact_digest,
+                hashlib.sha256(public_listing_bytes(restored)).hexdigest(),
+            )
+            self.assertNotEqual(
+                source_content_sha256, raw_posting_content_sha256(restored)
+            )
+            task_input = vacancy_eligibility_input(
+                restored, source_content_sha256=source_content_sha256
+            )
+            self.assertEqual(source_content_sha256, task_input["content_sha256"])
+            self.assertEqual(exact_digest, task_input["public_capture_sha256"])
+            facts = VacancyEligibilityFacts(
+                source_content_sha256=source_content_sha256,
+                work_jurisdiction=None,
+                required_residence=None,
+                sponsorship_available=None,
+                minimum_years_experience=None,
+                contract_type=None,
+                source_evidence=(),
+                unknown_fields=tuple(sorted(VACANCY_ELIGIBILITY_FIELDS)),
+            )
+            receipt = LLMReceipt.bind(
+                receipt_id="snapshot-roundtrip-eligibility",
+                task="vacancy_eligibility_facts",
+                model="fixture-model",
+                prompt_version="fixture-v1",
+                inputs=task_input,
+                output=facts,
+                created_at="2026-10-07T18:00:00Z",
+            )
+            self.assertEqual(
+                facts,
+                accept_vacancy_eligibility_facts(
+                    restored, facts, receipt, inputs=task_input
+                ),
+            )
+
+    def test_eligibility_capture_rejects_unbound_declared_hashes(self) -> None:
+        raw = RawPosting(
+            board="greenhouse",
+            job_id="synthetic-hash-mismatch",
+            url="https://jobs.example/public/2",
+            fetched_at="2026-10-07T18:00:00Z",
+            raw_json={"title": "Synthetic role", "content": "Synthetic body"},
+            content_type="application/json",
+        )
+        for declared_digest in ("f" * 64, "not-a-sha256"):
+            with self.subTest(declared_digest=declared_digest):
+                with self.assertRaises(ContractValidationError):
+                    verified_eligibility_capture(
+                        replace(raw, content_sha256=declared_digest)
+                    )
+        with self.assertRaises(ContractValidationError):
+            vacancy_eligibility_input(raw, source_content_sha256="bad")
 
     def test_acceptance_binds_fact_quote_to_exact_public_source_and_receipt(self) -> None:
         raw, _ = LLMPipelineTests._structured_listing()

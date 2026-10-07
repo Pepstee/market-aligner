@@ -2206,10 +2206,13 @@ def _build_production_handoff_from_authenticated_time(
             from market_aligner.llm.pipeline import vacancy_eligibility_input
             from market_aligner.service.processing import _cached_vacancy_eligibility
 
+            source_content_sha256 = posting["content_hash"]
             raw_posting = service.jobs.load_raw_snapshot(
-                source_job_key, str(posting["content_hash"])
+                source_job_key, source_content_sha256
             )
-            vacancy_inputs = vacancy_eligibility_input(raw_posting)
+            vacancy_inputs = vacancy_eligibility_input(
+                raw_posting, source_content_sha256=source_content_sha256
+            )
             cached_eligibility = _cached_vacancy_eligibility(
                 result,
                 raw_posting,

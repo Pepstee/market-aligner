@@ -1,11 +1,11 @@
 {
-  "community_count": 30108,
-  "edge_count": 77711,
-  "node_count": 57681,
+  "community_count": 30104,
+  "edge_count": 77736,
+  "node_count": 57684,
   "outputs": {
-    ".graphify_labels.json": "6de377c51a69c71628a7fbb684a94347a00b65476be4045bcff0015b76a878ba",
-    "GRAPH_REPORT.md": "fc4c730487b5acf57d20f032ba651047ad9560fb007b63410156f55d518ae57d",
-    "graph.json": "425ca929ab115b9d53f8838dc637ce7c7d51812f351a0895db08749b57311bc4"
+    ".graphify_labels.json": "87248609b3867c4d83424626c95a57ed45f4a548bd029564f0afd0a854c43aaa",
+    "GRAPH_REPORT.md": "c3afb0ed50c686e8a7248186188e3e3cf5c322334eb4e8338e0de9a5e46e3359",
+    "graph.json": "dd8a33e1ab960ddde9dac6d2ac3b29f54dbb47648abcd218cb1a4ea325333d97"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "420bb89397254e8dd7a2e7394c71b547b8fcbd31",
+  "source_base_commit": "a226833a165a9ab79d0501f68fb0872f0b96b4ca",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -715,7 +715,7 @@
     "src/market_aligner/applications/jaa.py": "fce5c2bcc41486096f119f49838c23f22fad5bb7aedfae3ca9b0637d47af86b5",
     "src/market_aligner/applications/legacy_v0.py": "826747e9e8049709537c95d8674a95537148b4743a1652feecdca4d18d16de67",
     "src/market_aligner/applications/producer.py": "ffe3d88842ec7023ecd9089ff4f650124257b11cd8f3a36f6c47c752611d1f58",
-    "src/market_aligner/applications/production_handoff.py": "9fee3f713d6e0ba4eecfc9de9392b026a3634e384be2579a5d5880663d7ac6a8",
+    "src/market_aligner/applications/production_handoff.py": "1d269f28b65b5bc407a09b10bdd1de58b374b4f1d986c4ebc15a2f4c98f27c1c",
     "src/market_aligner/assessment/__init__.py": "95adae9b08a7013ca9649fc47d73f425772f98b9e7dd3f6afd488e4513b18d58",
     "src/market_aligner/assessment/calibration.py": "722284df4decb114411b39848e950510b4fdef6c9d9172a6bdc5c5f268467a98",
     "src/market_aligner/assessment/eligibility.py": "7669c4e15c1d85f18d474d8b72e5229e44a78c42fd9e7319d79635cc857a0729",
@@ -775,7 +775,7 @@
     "src/market_aligner/llm/__init__.py": "2ea86f8e0e07b357c5df697ce1a76ced7825431ea98f783f97ca066be837fff6",
     "src/market_aligner/llm/codex_gateway.py": "1edc182d0ad89ec057d81c614ad93c998d7e6b40a7fb5fee1c2144df0c0d976a",
     "src/market_aligner/llm/contracts.py": "cba01af90d17c11d246027acdd3def6a9e49c21211b7d2492d36e8ba830a4e11",
-    "src/market_aligner/llm/pipeline.py": "49c53c2e777e444e8c3ae100eea434b93260f4935dee5b10913b82f07524e343",
+    "src/market_aligner/llm/pipeline.py": "48fae40810786afbc1a393547a247bc3f991486650dd0c2f6894cb25dedb5307",
     "src/market_aligner/llm/structured.py": "9182fdfe0541ba70e7f96502cf271406d9e10978a84700e81b8119f4815f9a47",
     "src/market_aligner/normalisation/__init__.py": "b1650ff2aafbda22ea78530df3f5604b68e033c7f07ddd94e80bb642e6373878",
     "src/market_aligner/normalisation/deduplication.py": "c7ca03c2e1cce88c50f3b6c356c07cc0fea6e5ff7531304e3b58561f9cb3598a",
@@ -840,7 +840,7 @@
     "tests/test_jaa_events_v1.py": "98edfd1fb21ffd9f1bacde30b027d70a360cba2d177e4197708660042f2dc2b0",
     "tests/test_legacy_import.py": "00ce475704bf5ba829683365437c43c9804cd32b1d1e812832fcc71741ba1915",
     "tests/test_lineage.py": "322e19db7cf892a373fede67fa36eb1f2c3771aacd9d7cf057c9f6de4f1ada23",
-    "tests/test_llm_pipeline.py": "fa889a8b603e0f221c865e17d5ebf1c33ef62f78b742a835174e622f5bb576dc",
+    "tests/test_llm_pipeline.py": "1785c26720b57e59f24493f41af735b8998381acd32c05638182ba27779accd8",
     "tests/test_market_aligner_jaa_handoff.py": "db5b273b3864b35ebb15bb030a9b7130792999af6204e08faf933c3be3499f63",
     "tests/test_migration_ledger.py": "c68796958547de9caeff93c0f7ba9c169d723eb8b9826b2b96602171bb13baa2",
     "tests/test_migrations.py": "e968fa4158bd4fc6521512007f5ae2659c3b094fdefeba95fa60b0be45de900f",

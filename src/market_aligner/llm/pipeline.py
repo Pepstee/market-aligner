@@ -101,19 +101,34 @@ def accept_subject_bound_extraction(
 
 
 def verified_eligibility_capture(raw: RawPosting) -> tuple[str, bytes]:
-    """Validate collector identity and return privacy-checked public capture bytes."""
+    """Validate a recognized source hash and return canonical identity plus capture bytes."""
     exact = public_listing_bytes(raw)
     digest = raw_posting_content_sha256(raw)
-    if raw.content_sha256 is not None and raw.content_sha256 != digest:
+    exact_digest = digest_bytes(exact)
+    declared_digest = require_sha256(
+        raw.content_sha256, "declared collector digest", nullable=True
+    )
+    if declared_digest is not None and declared_digest not in {
+        digest,
+        exact_digest,
+    }:
         raise ContractValidationError(
             "declared collector digest differs from the exact posting source"
         )
     return digest, exact
 
 
-def vacancy_eligibility_input(raw: RawPosting) -> dict[str, Any]:
-    """Bind collector identity and distinct public-capture bytes in the task input."""
+def vacancy_eligibility_input(
+    raw: RawPosting, *, source_content_sha256: str | None = None
+) -> dict[str, Any]:
+    """Bind the source identity and distinct public-capture bytes in the task input."""
     collector_digest, exact = verified_eligibility_capture(raw)
+    if source_content_sha256 is not None:
+        if type(source_content_sha256) is not str:
+            raise ContractValidationError("source content identity must be a string")
+        collector_digest = require_sha256(
+            source_content_sha256, "source content identity"
+        )
     return {
         "adapter": raw.board,
         "canonical_url": raw.url,
@@ -331,16 +346,18 @@ def accept_vacancy_eligibility_facts(
     inputs: Mapping[str, Any],
 ) -> VacancyEligibilityFacts:
     """Accept typed vacancy facts only with exact-source quote evidence."""
-    collector_digest, exact = verified_eligibility_capture(raw)
-    if facts.source_content_sha256 != collector_digest:
+    _, exact = verified_eligibility_capture(raw)
+    if receipt.task != VACANCY_ELIGIBILITY_FACTS_TASK:
+        raise ContractValidationError("vacancy eligibility receipt has the wrong task")
+    expected_inputs = vacancy_eligibility_input(
+        raw, source_content_sha256=inputs.get("content_sha256")
+    )
+    if canonical_hash(dict(inputs)) != canonical_hash(expected_inputs):
+        raise ContractValidationError("vacancy eligibility input differs from exact public source")
+    if facts.source_content_sha256 != expected_inputs["content_sha256"]:
         raise ContractValidationError(
             "vacancy eligibility facts bind a different public capture"
         )
-    if receipt.task != VACANCY_ELIGIBILITY_FACTS_TASK:
-        raise ContractValidationError("vacancy eligibility receipt has the wrong task")
-    expected_inputs = vacancy_eligibility_input(raw)
-    if canonical_hash(dict(inputs)) != canonical_hash(expected_inputs):
-        raise ContractValidationError("vacancy eligibility input differs from exact public source")
     if receipt.input_sha256 != canonical_hash(expected_inputs):
         raise ContractValidationError("vacancy eligibility receipt input differs")
     if receipt.output_sha256 != canonical_hash(asdict(facts)):
