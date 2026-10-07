@@ -7,7 +7,12 @@ import career_automation.current_greenhouse_navigation as navigation
 import career_automation.browser_executor as browser_executor
 import career_automation.production_attempt as production_attempt
 import pytest
-from career_automation.application_archive import ApplicationArchiveReceipt
+from career_automation.application_archive import (
+    ApplicationArchive,
+    ApplicationArchiveError,
+    ApplicationArchiveReceipt,
+    VacancyArchiveIdentity,
+)
 from career_automation.current_greenhouse_navigation import (
     CurrentGreenhouseNavigationCapture,
     _redacted_loader_capture,
@@ -200,6 +205,112 @@ def test_navigation_capture_can_bind_to_only_one_attempt():
         page=page,
     )
     assert fresh_recorder.current_provider_proof.attempt_id == "attempt-two"
+
+
+def test_current_navigation_details_use_real_closed_archive_schema(tmp_path):
+    source_url = "https://job-boards.eu.greenhouse.io/example/jobs/12345"
+    payload = {
+        "state": {
+            "loaderData": {
+                "routes/$url_token_.jobs_.$job_post_id": {
+                    "jobPostId": "12345",
+                    "urlToken": "synthetic-private-token",
+                    "jobPost": {
+                        "public_url": source_url,
+                        "confirmation_message": "Received.",
+                    },
+                    "submitPath": "https://boards.eu.greenhouse.io/example/jobs/12345",
+                    "confirmationPath": "/example/jobs/12345/confirmation",
+                }
+            }
+        }
+    }
+    original_response = (
+        "<html><script>window.__remixContext = "
+        + json.dumps(payload)
+        + ";</script></html>"
+    ).encode("utf-8")
+    original_sha256, redacted_response, loader_config = _redacted_loader_capture(
+        original_response, source_url=source_url
+    )
+    vacancy_bytes = b'{"synthetic_public_vacancy":true}'
+    vacancy = VacancyArchiveIdentity(
+        job_key="greenhouse:example:12345",
+        vacancy_sha256=hashlib.sha256(vacancy_bytes).hexdigest(),
+        role_title="Synthetic role",
+        company_name="Synthetic employer",
+        source_url=source_url,
+    )
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+    archive = ApplicationArchive(
+        tmp_path / "archive", repository_root=repository_root
+    )
+    attempt = archive.create_attempt(vacancy)
+    attempt.add_artifact(
+        "vacancy.structured", vacancy_bytes, media_type="application/json"
+    )
+    page = object()
+    market_binding = {
+        "application_id": "app_" + "1" * 32,
+        "raw_listing_sha256": vacancy.vacancy_sha256,
+        "source_job_key": vacancy.job_key,
+        "source_url": source_url,
+    }
+    capture = CurrentGreenhouseNavigationCapture(
+        page_identity=id(page),
+        source_url=source_url,
+        response_url=source_url,
+        method="GET",
+        status=200,
+        observed_at="2026-10-07T10:00:00Z",
+        primary_response_sha256=original_sha256,
+        redacted_response=redacted_response,
+        redacted_response_sha256=hashlib.sha256(redacted_response).hexdigest(),
+        loader_config=loader_config,
+        loader_config_sha256=hashlib.sha256(loader_config).hexdigest(),
+        market_context_sha256="b" * 64,
+        market_binding=tuple(sorted(market_binding.items())),
+        repository_head="c" * 40,
+        code_source_sha256s=(("current_greenhouse_navigation.py", "d" * 64),),
+        _issuer=navigation._CAPTURE_ISSUER,
+    )
+    recorder = object.__new__(GreenhouseAttemptRecorder)
+    recorder.attempt = attempt
+    recorder.current_provider_proof = None
+
+    recorder.record_navigation(
+        {
+            "url": source_url,
+            "method": "GET",
+            "status": 200,
+            "_current_navigation_capture": capture,
+        },
+        page=page,
+    )
+
+    assert recorder.current_provider_proof.attempt_id == attempt.attempt_id
+    navigation_events = [
+        event
+        for event in attempt._events()
+        if event.get("event_type") == "evidence_recorded"
+        and event.get("payload", {}).get("event_kind") == "navigation"
+    ]
+    assert len(navigation_events) == 1
+    details = navigation_events[0]["payload"]["details"]
+    assert details["provider_response_sha256"] == original_sha256
+    assert details["provider_redacted_response_sha256"] == capture.redacted_response_sha256
+    assert details["provider_loader_config_sha256"] == capture.loader_config_sha256
+    assert details["current_market_context_sha256"] == capture.market_context_sha256
+
+    with pytest.raises(ApplicationArchiveError, match="detail keys are invalid"):
+        attempt.record_evidence_event(
+            event_id=attempt.next_evidence_event_id("navigation"),
+            event_kind="navigation",
+            occurred_at="2026-10-07T10:00:01Z",
+            result="completed",
+            details={"unapproved_detail": "still rejected"},
+        )
 
 
 def test_current_proof_is_consumed_by_release_and_archive_boundaries(
