@@ -3,7 +3,8 @@
 This module replaces operator-authored handoff manifests.  It reads the exact
 profile, processing promotion, vacancy source and employer-research records
 that already own those facts, revalidates their current bindings, and emits a
-non-release protected outbox bundle.  It never calls a model or a provider.
+non-release protected outbox bundle. The explicit current-runtime path may
+create one source-bound policy canary on a cache miss; legacy remains offline.
 """
 
 from __future__ import annotations
@@ -50,8 +51,10 @@ from market_aligner.profiler.current_activation import (
     PinnedRecoveryInputs,
     build_current_candidate_policy_catalog,
     compile_current_profile_projection,
+    locate_current_activation_artifact,
     read_current_profile_projection_bundle,
     read_current_candidate_policy_canary_for_activation,
+    write_current_candidate_policy_canary,
 )
 from market_aligner.research.models import (
     ClaimSupport,
@@ -1507,6 +1510,7 @@ def _admit_current_candidate_policy(
     track: str,
     source_job_key: str,
     target_job_jurisdiction: str | None,
+    vacancy_facts_receipt: object,
     current_documents: dict[str, bytes],
     current_projection: dict[str, Any],
     recovery_manifest_relative_path: str,
@@ -1516,6 +1520,8 @@ def _admit_current_candidate_policy(
 
     from market_aligner.llm.codex_gateway import (
         CANDIDATE_POLICY_PROMPT_VERSION,
+        CodexGatewayError,
+        CodexSemanticGateway,
         PROVIDER_IDENTITY,
     )
     from market_aligner.llm.contracts import (
@@ -1529,6 +1535,7 @@ def _admit_current_candidate_policy(
         admit_current_candidate_facts,
         admit_saved_candidate_policy,
         bind_current_candidate_policy_refs,
+        build_current_candidate_policy_canary_document,
     )
 
     invalid = "saved current candidate policy failed live validation"
@@ -1561,22 +1568,38 @@ def _admit_current_candidate_policy(
                 raise ValueError(invalid)
 
             activation_sha256 = projection["activation_sha256"]
-            canary_bytes, canary_sha256 = (
-                read_current_candidate_policy_canary_for_activation(
-                    data_home=deployment.data_home,
-                    profile_id=profile_id,
-                    track=track,
-                    source_job_key=source_job_key,
-                    activation_sha256=activation_sha256,
+            canary_missing = False
+            try:
+                canary_bytes, canary_sha256 = (
+                    read_current_candidate_policy_canary_for_activation(
+                        data_home=deployment.data_home,
+                        profile_id=profile_id,
+                        track=track,
+                        source_job_key=source_job_key,
+                        activation_sha256=activation_sha256,
+                    )
                 )
-            )
-            canary_document = _document(
-                canary_bytes, "current candidate policy canary"
-            )
-            activation_name = canary_document.get("activation_name")
-            activation_file_sha256 = canary_document.get(
-                "activation_file_sha256"
-            )
+            except FileNotFoundError:
+                canary_bytes = b""
+                canary_sha256 = ""
+                canary_missing = True
+            if canary_missing:
+                activation_name, activation_file_sha256 = (
+                    locate_current_activation_artifact(
+                        data_home=deployment.data_home,
+                        profile_id=profile_id,
+                        activation_sha256=activation_sha256,
+                    )
+                )
+                canary_document = None
+            else:
+                canary_document = _document(
+                    canary_bytes, "current candidate policy canary"
+                )
+                activation_name = canary_document.get("activation_name")
+                activation_file_sha256 = canary_document.get(
+                    "activation_file_sha256"
+                )
             if (
                 type(activation_name) is not str
                 or type(activation_file_sha256) is not str
@@ -1727,16 +1750,108 @@ def _admit_current_candidate_policy(
                             raise ValueError(invalid)
                         return None
 
-                    admission = admit_saved_candidate_policy(
-                        canary_document,
-                        expected_provenance=expected_provenance,
-                        expected_target=expected_target,
-                        expected_request=expected_request,
-                        catalog=catalog,
-                        verify_receipt=verify_receipt,
-                        bind_refs=bind_current_candidate_policy_refs,
-                        admit_refs=admit_current_candidate_facts,
-                    )
+                    def admit_document(document: object) -> Any:
+                        return admit_saved_candidate_policy(
+                            document,
+                            expected_provenance=expected_provenance,
+                            expected_target=expected_target,
+                            expected_request=expected_request,
+                            catalog=catalog,
+                            verify_receipt=verify_receipt,
+                            bind_refs=bind_current_candidate_policy_refs,
+                            admit_refs=admit_current_candidate_facts,
+                        )
+
+                    if canary_missing:
+                        if (
+                            type(vacancy_facts_receipt) is not LLMReceipt
+                            or type(vacancy_facts_receipt.transport)
+                            is not LLMTransportReceipt
+                            or type(
+                                vacancy_facts_receipt.transport.invocation_count
+                            ) is not int
+                            or vacancy_facts_receipt.transport.invocation_count != 1
+                            or vacancy_facts_receipt.transport.provider_identity
+                            != PROVIDER_IDENTITY
+                            or vacancy_facts_receipt.transport.provider_sha256
+                            != canonical_hash({"provider": PROVIDER_IDENTITY})
+                            or type(vacancy_facts_receipt.model) is not str
+                            or vacancy_facts_receipt.transport.model_identity
+                            != vacancy_facts_receipt.model
+                        ):
+                            raise ValueError(invalid)
+                        gateway = CodexSemanticGateway(
+                            model=vacancy_facts_receipt.model
+                        )
+                        policy_selection, policy_receipt = (
+                            gateway.extract_candidate_policy(
+                                expected_request["factual_catalog"],
+                                target_job_jurisdiction=target_job_jurisdiction,
+                                correction_assessments=corrections,
+                                iso_codes=expected_request["allowed_iso_codes"],
+                                contract_types=expected_request[
+                                    "allowed_contract_types"
+                                ],
+                            )
+                        )
+                        canary_document = build_current_candidate_policy_canary_document(
+                            activation_file_sha256=activation_file_sha256,
+                            activation_name=activation_name,
+                            activation_sha256=activation_sha256,
+                            active_snapshot_hashes=dict(snapshot.hashes),
+                            profile_id=profile_id,
+                            receipt=policy_receipt,
+                            recovery_manifest_sha256=manifest_sha256,
+                            request=expected_request,
+                            selection=policy_selection,
+                            target_job_jurisdiction=target_job_jurisdiction,
+                            target_job_key=source_job_key,
+                        )
+                        admit_document(canary_document)
+                        canary_bytes = _canonical(canary_document)
+                        canary_sha256 = _sha(canary_bytes)
+                        recovered.revalidate()
+                        activation.revalidate()
+                        snapshot.revalidate()
+                        _persisted_path, persisted_sha256 = (
+                            write_current_candidate_policy_canary(
+                                data_home=deployment.data_home,
+                                profile_id=profile_id,
+                                track=track,
+                                source_job_key=source_job_key,
+                                target_job_jurisdiction=target_job_jurisdiction,
+                                activation_name=activation_name,
+                                activation_sha256=activation_sha256,
+                                activation_file_sha256=activation_file_sha256,
+                                recovery_manifest_sha256=manifest_sha256,
+                                active_snapshot_hashes=dict(snapshot.hashes),
+                                canary_bytes=canary_bytes,
+                                expected_sha256=canary_sha256,
+                            )
+                        )
+                        if persisted_sha256 != canary_sha256:
+                            raise ValueError(invalid)
+                        persisted_bytes, observed_sha256 = (
+                            read_current_candidate_policy_canary_for_activation(
+                                data_home=deployment.data_home,
+                                profile_id=profile_id,
+                                track=track,
+                                source_job_key=source_job_key,
+                                activation_sha256=activation_sha256,
+                            )
+                        )
+                        if (
+                            persisted_bytes != canary_bytes
+                            or observed_sha256 != canary_sha256
+                        ):
+                            raise ValueError(invalid)
+                        canary_document = _document(
+                            persisted_bytes, "current candidate policy canary"
+                        )
+
+                    if type(canary_document) is not dict:
+                        raise ValueError(invalid)
+                    admission = admit_document(canary_document)
                     recovered.revalidate()
                     activation.revalidate()
                     snapshot.revalidate()
@@ -1745,7 +1860,14 @@ def _admit_current_candidate_policy(
             snapshot.close()
     except ProductionHandoffError:
         raise
-    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (
+        CodexGatewayError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
         raise ProductionHandoffError(
             "candidate_policy", "saved current candidate policy failed live validation"
         ) from None
@@ -2231,6 +2353,7 @@ def _build_production_handoff_from_authenticated_time(
                     track=track,
                     source_job_key=source_job_key,
                     target_job_jurisdiction=vacancy_facts.work_jurisdiction,
+                    vacancy_facts_receipt=vacancy_facts_receipt,
                     current_documents=current_documents,
                     current_projection=projection,
                     recovery_manifest_relative_path=(

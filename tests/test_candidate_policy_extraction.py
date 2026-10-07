@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import subprocess
 import tempfile
 from pathlib import Path
@@ -147,6 +148,171 @@ def test_gateway_binds_candidate_policy_to_supplied_catalog_and_schema() -> None
     assert receipt.task == "candidate_policy_extraction"
     assert receipt.transport is not None
     assert receipt.transport.invocation_count == 1
+
+
+def test_current_candidate_policy_document_roundtrips_through_native_admission() -> None:
+    from market_aligner.llm.contracts import (
+        LLMReceipt,
+        LLMTransportReceipt,
+        canonical_hash,
+    )
+    from market_aligner.processing import (
+        admit_current_candidate_facts,
+        admit_saved_candidate_policy,
+        bind_current_candidate_policy_refs,
+        build_current_candidate_policy_canary_document,
+    )
+
+    records = [
+        {
+            "evidence_id": "profile-rights",
+            "kind": "current_profile_field",
+            "status": "explicit",
+            "claim": '"GB"',
+        },
+        {
+            "evidence_id": "job-scope-policy",
+            "kind": "preferences",
+            "status": "verified",
+            "claim": "Synthetic source-bound policy for job jurisdiction.",
+        },
+        {
+            "evidence_id": "old-policy",
+            "kind": "preferences",
+            "status": "explicit",
+            "claim": "Synthetic earlier policy statement.",
+        },
+    ]
+    corrections = [
+        {
+            "source_evidence_id": "old-policy",
+            "relationship": "not_applicable",
+            "affected_evidence_ids": [],
+        }
+    ]
+    iso_codes = ["GB", "US"]
+    contract_types = ["contract", "permanent"]
+    with tempfile.TemporaryDirectory() as temporary:
+        gateway, _runner = _gateway(Path(temporary), _response())
+        selection, receipt = gateway.extract_candidate_policy(
+            records,
+            target_job_jurisdiction="GB",
+            correction_assessments=corrections,
+            iso_codes=iso_codes,
+            contract_types=contract_types,
+        )
+
+    request = {
+        "schema": "market-aligner.candidate-policy-input.v1",
+        "target_job_jurisdiction": "GB",
+        "factual_catalog": records,
+        "correction_assessments": corrections,
+        "invalidated_ids": [],
+        "allowed_iso_codes": iso_codes,
+        "allowed_contract_types": contract_types,
+    }
+    snapshot_hashes = {
+        "profile_sha256": "a" * 64,
+        "evidence_ledger_sha256": "b" * 64,
+    }
+    provenance = {
+        "activation_file_sha256": "c" * 64,
+        "activation_name": "activation-" + "1" * 32 + ".json",
+        "activation_sha256": "d" * 64,
+        "active_snapshot_hashes": snapshot_hashes,
+        "profile_id": "prf_" + "e" * 32,
+        "recovery_manifest_sha256": "f" * 64,
+    }
+    target = {
+        "target_job_jurisdiction": "GB",
+        "target_job_key": "greenhouse:synthetic:42",
+    }
+    document = build_current_candidate_policy_canary_document(
+        **provenance,
+        receipt=receipt,
+        request=request,
+        selection=selection,
+        **target,
+    )
+    assert document["request_matches_receipt"] is True
+
+    catalog = {
+        row["evidence_id"]: {
+            **row,
+            "source_ref": f"synthetic://{row['evidence_id']}",
+            "content_sha256": "9" * 64,
+        }
+        for row in records
+    }
+
+    def verify_receipt(value, *, inputs, output):
+        if type(value) is not dict:
+            raise ValueError("invalid synthetic receipt")
+        receipt_value = dict(value)
+        transport_value = receipt_value.pop("transport")
+        verified = LLMReceipt(
+            **{
+                **receipt_value,
+                "transport": LLMTransportReceipt(**transport_value),
+            }
+        )
+        if (
+            verified.input_sha256 != canonical_hash(inputs)
+            or verified.output_sha256 != canonical_hash(output)
+        ):
+            raise ValueError("synthetic receipt binding differs")
+        return None
+
+    admission = admit_saved_candidate_policy(
+        document,
+        expected_provenance=provenance,
+        expected_target=target,
+        expected_request=request,
+        catalog=catalog,
+        verify_receipt=verify_receipt,
+        bind_refs=bind_current_candidate_policy_refs,
+        admit_refs=admit_current_candidate_facts,
+    )
+    assert admission.status_downgraded is False
+    assert admission.effective["requires_sponsorship"] is False
+
+    changed_request = copy.deepcopy(request)
+    changed_request["target_job_jurisdiction"] = "US"
+    with pytest.raises(ValueError, match="^invalid saved candidate policy$"):
+        build_current_candidate_policy_canary_document(
+            **provenance,
+            receipt=receipt,
+            request=changed_request,
+            selection=selection,
+            **target,
+        )
+    changed_selection = copy.deepcopy(selection)
+    changed_selection["current_residence"] = {
+        "value": "GB",
+        "source_ids": ["profile-rights"],
+    }
+    with pytest.raises(ValueError, match="^invalid saved candidate policy$"):
+        build_current_candidate_policy_canary_document(
+            **provenance,
+            receipt=receipt,
+            request=request,
+            selection=changed_selection,
+            **target,
+        )
+    bad_provenance = {**provenance, "activation_sha256": "D" * 64}
+    with pytest.raises(ValueError, match="^invalid saved candidate policy$"):
+        build_current_candidate_policy_canary_document(
+            **bad_provenance,
+            receipt=receipt,
+            request=request,
+            selection=selection,
+            **target,
+        )
+
+    request["factual_catalog"][0]["claim"] = "mutated after build"
+    selection["requires_sponsorship"]["value"] = True
+    assert document["request"]["factual_catalog"][0]["claim"] == '"GB"'
+    assert document["selection"]["requires_sponsorship"]["value"] is False
 
 
 @pytest.mark.parametrize(

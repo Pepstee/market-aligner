@@ -4266,9 +4266,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/applications/production_handoff.py": {
-    "mtime": 1791396968.0771098,
-    "seen": 1791397338.0292866,
-    "ast_hash": "9b19064380132d1b2d49b139da3df382",
+    "mtime": 1791408644.3779237,
+    "seen": 1791408696.3457177,
+    "ast_hash": "2ba6800c8d09a68697087dfb3ce9814b",
     "semantic_hash": ""
   },
   "src/market_aligner/assessment/geography.py": {
@@ -4572,9 +4572,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/processing.py": {
-    "mtime": 1791298464.2151065,
-    "seen": 1791302696.4746652,
-    "ast_hash": "d86508362e867a968621d11177e3697e",
+    "mtime": 1791407879.7299368,
+    "seen": 1791408513.6656196,
+    "ast_hash": "f223a69c50a0320065c160bbe670766d",
     "semantic_hash": ""
   },
   "src/market_aligner/profiler/intent.py": {
@@ -4716,9 +4716,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/profiler/current_activation.py": {
-    "mtime": 1791314732.2948482,
-    "seen": 1791318855.7504723,
-    "ast_hash": "447e64c7a28a6bf231edacc95af40272",
+    "mtime": 1791407647.4179225,
+    "seen": 1791408513.6656215,
+    "ast_hash": "2a0194a291e98cabb8423ba6809dd891",
     "semantic_hash": ""
   },
   "src/market_aligner/profiler/fact_packet.py": {
@@ -4734,9 +4734,9 @@
     "semantic_hash": ""
   },
   "tests/test_current_activation.py": {
-    "mtime": 1791314775.778845,
-    "seen": 1791318855.7505128,
-    "ast_hash": "61b0efdd079c587706e705dc7953d0c7",
+    "mtime": 1791407647.4539225,
+    "seen": 1791408513.6656625,
+    "ast_hash": "e42b6d6562ea9fc34835d258570bdff9",
     "semantic_hash": ""
   },
   "tests/test_current_fact_packet.py": {
@@ -4758,9 +4758,9 @@
     "semantic_hash": ""
   },
   "tests/test_candidate_policy_extraction.py": {
-    "mtime": 1791294629.9751713,
-    "seen": 1791302696.47471,
-    "ast_hash": "473abbbdde759090437ca2e2b2a3a74d",
+    "mtime": 1791407913.8459349,
+    "seen": 1791408513.6656578,
+    "ast_hash": "ba6e28e1b1f91c842145ff1161d786ed",
     "semantic_hash": ""
   },
   "tests/test_current_eligibility_receipt.py": {

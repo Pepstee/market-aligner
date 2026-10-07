@@ -73,6 +73,7 @@ from market_aligner.llm.contracts import (
     EvidenceAlignment,
     EvidenceMatch,
     LLMReceipt,
+    LLMTransportReceipt,
     SemanticVacancyExtraction,
     canonical_hash,
 )
@@ -8314,6 +8315,126 @@ def _saved_candidate_policy_exact_dict(
         or (expected_keys is not None and set(value) != expected_keys)
     ):
         raise ValueError(_SAVED_CANDIDATE_POLICY_INVALID)
+
+
+def build_current_candidate_policy_canary_document(
+    *,
+    activation_file_sha256: object,
+    activation_name: object,
+    activation_sha256: object,
+    active_snapshot_hashes: object,
+    profile_id: object,
+    receipt: object,
+    recovery_manifest_sha256: object,
+    request: object,
+    selection: object,
+    target_job_jurisdiction: object,
+    target_job_key: object,
+) -> dict[str, Any]:
+    """Bind one typed policy result to the exact current request and source pins."""
+    invalid = _SAVED_CANDIDATE_POLICY_INVALID
+    request_keys = frozenset({
+        "schema", "target_job_jurisdiction", "factual_catalog",
+        "correction_assessments", "invalidated_ids", "allowed_iso_codes",
+        "allowed_contract_types",
+    })
+    if (
+        type(receipt) is not LLMReceipt
+        or type(receipt.transport) is not LLMTransportReceipt
+        or type(receipt.transport.invocation_count) is not int
+        or receipt.transport.invocation_count != 1
+        or receipt.task != "candidate_policy_extraction"
+        or receipt.receipt_id != receipt.transport.receipt_sha256
+        or receipt.model != receipt.transport.model_identity
+        or type(request) is not dict
+        or type(selection) is not dict
+    ):
+        raise ValueError(invalid)
+    receipt_text_fields = (
+        "receipt_id", "task", "model", "prompt_version", "input_sha256",
+        "output_sha256", "created_at", "contract_version",
+    )
+    transport_text_fields = (
+        "provider_identity", "provider_sha256", "model_identity", "model_sha256",
+        "transport_sha256", "request_sha256", "response_sha256", "binary_sha256",
+        "receipt_sha256", "schema_version",
+    )
+    if (
+        any(type(getattr(receipt, field)) is not str for field in receipt_text_fields)
+        or any(
+            type(getattr(receipt.transport, field)) is not str
+            for field in transport_text_fields
+        )
+    ):
+        raise ValueError(invalid)
+    _saved_candidate_policy_exact_dict(request, request_keys)
+    _saved_candidate_policy_exact_dict(selection, _CANDIDATE_FACTS_KEYS)
+    if (
+        request["schema"] != "market-aligner.candidate-policy-input.v1"
+        or request["target_job_jurisdiction"] != target_job_jurisdiction
+        or type(profile_id) is not str
+        or type(activation_name) is not str
+        or re.fullmatch(r"activation-[0-9a-f]{32}\.json", activation_name) is None
+        or type(target_job_key) is not str
+        or not target_job_key
+        or target_job_key != target_job_key.strip()
+        or type(target_job_jurisdiction) not in (str, type(None))
+        or type(active_snapshot_hashes) is not dict
+        or not active_snapshot_hashes
+        or any(type(key) is not str for key in active_snapshot_hashes)
+        or any(
+            type(value) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in active_snapshot_hashes.values()
+        )
+        or any(
+            type(value) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in (
+                activation_file_sha256,
+                activation_sha256,
+                recovery_manifest_sha256,
+            )
+        )
+    ):
+        raise ValueError(invalid)
+    try:
+        validate_profile_id(profile_id)
+        transport = LLMTransportReceipt(**dataclasses.asdict(receipt.transport))
+        receipt_copy = LLMReceipt(
+            **{
+                **dataclasses.asdict(receipt),
+                "transport": transport,
+            }
+        )
+        if (
+            receipt_copy.input_sha256 != canonical_hash(request)
+            or receipt_copy.output_sha256 != canonical_hash(selection)
+        ):
+            raise ValueError(invalid)
+        document = {
+            "schema": "market-aligner.current-candidate-policy-canary.v1",
+            "activation_file_sha256": activation_file_sha256,
+            "activation_name": activation_name,
+            "activation_sha256": activation_sha256,
+            "active_snapshot_hashes": copy.deepcopy(active_snapshot_hashes),
+            "profile_id": profile_id,
+            "receipt": dataclasses.asdict(receipt_copy),
+            "recovery_manifest_sha256": recovery_manifest_sha256,
+            "request": copy.deepcopy(request),
+            "request_matches_receipt": True,
+            "selection": copy.deepcopy(selection),
+            "target_job_jurisdiction": target_job_jurisdiction,
+            "target_job_key": target_job_key,
+        }
+        _saved_candidate_policy_exact_dict(
+            document, _SAVED_CANDIDATE_POLICY_DOCUMENT_KEYS
+        )
+        if len(_saved_candidate_policy_canonical(document)) > 1024 * 1024:
+            raise ValueError(invalid)
+        return document
+    except (TypeError, ValueError, RecursionError, UnicodeError):
+        raise ValueError(invalid) from None
 
 
 def _saved_candidate_policy_invalidated_ids(value: object) -> list[str]:

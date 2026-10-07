@@ -21,6 +21,7 @@ from market_aligner.profiler.current_activation import (
     PinnedRecoveryInputs,
     build_current_candidate_policy_catalog,
     compile_current_profile_activation,
+    locate_current_activation_artifact,
     read_current_profile_projection_bundle,
     read_current_candidate_policy_canary,
     read_current_candidate_policy_canary_for_activation,
@@ -615,6 +616,47 @@ def test_activation_artifact_is_private_create_only_and_hash_bound(tmp_path: Pat
     assert json.loads(written) == document
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert path.stat().st_uid == os.getuid()
+
+
+def test_current_activation_locator_uses_semantic_pin_and_refuses_ambiguity(
+    tmp_path: Path,
+) -> None:
+    store, _manifest, _profile, _evidence, _relative = _fixture(tmp_path)
+    document: dict[str, Any] = {
+        "schema_version": "market-aligner.current-profile-fact-activation.v1",
+        "profile_id": _PROFILE_ID,
+        "application_authority": False,
+        "release_authority": False,
+        "submission_authority": False,
+    }
+    document["activation_sha256"] = canonical_hash(document)
+    path, digest = write_current_activation_artifact(
+        data_home=store.paths.root, profile_id=_PROFILE_ID, document=document
+    )
+
+    assert locate_current_activation_artifact(
+        data_home=store.paths.root,
+        profile_id=_PROFILE_ID,
+        activation_sha256=document["activation_sha256"],
+    ) == (path.name, digest)
+
+    with pytest.raises(ValueError, match="^current_profile_projection_invalid$"):
+        locate_current_activation_artifact(
+            data_home=store.paths.root,
+            profile_id=_PROFILE_ID,
+            activation_sha256="f" * 64,
+        )
+
+    duplicate_path, _ = write_current_activation_artifact(
+        data_home=store.paths.root, profile_id=_PROFILE_ID, document=document
+    )
+    assert duplicate_path != path
+    with pytest.raises(ValueError, match="^current_profile_projection_invalid$"):
+        locate_current_activation_artifact(
+            data_home=store.paths.root,
+            profile_id=_PROFILE_ID,
+            activation_sha256=document["activation_sha256"],
+        )
 
 
 def test_project_current_activation_cli_revalidates_and_emits_private_bundle(

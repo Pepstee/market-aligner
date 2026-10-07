@@ -1394,6 +1394,61 @@ def _current_policy_canary_directory(
         raise
 
 
+def locate_current_activation_artifact(
+    *, data_home: str | Path | None, profile_id: str, activation_sha256: str
+) -> tuple[str, str]:
+    """Resolve one activation filename by its pinned semantic digest."""
+    validate_profile_id(profile_id)
+    if (
+        type(activation_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", activation_sha256) is None
+    ):
+        raise ValueError(_INVALID_PROJECTION)
+    root_chain, directories = _current_policy_canary_directory(data_home, profile_id)
+    try:
+        profile_directory = directories[-1]
+        matches: list[tuple[str, str]] = []
+        for name in sorted(os.listdir(profile_directory.fd)):
+            if _CURRENT_ACTIVATION_NAME.fullmatch(name) is None:
+                continue
+            descriptor: int | None = None
+            try:
+                raw, _identity, descriptor = _open_verified_leaf(
+                    profile_directory.fd, name, _MAX_CURRENT_ACTIVATION_BYTES
+                )
+                document = _strict_json_loads(raw)
+                if (
+                    type(document) is not dict
+                    or _canonical_document_bytes(document) != raw
+                    or document.get("schema_version")
+                    != "market-aligner.current-profile-fact-activation.v1"
+                    or document.get("profile_id") != profile_id
+                    or type(document.get("activation_sha256")) is not str
+                ):
+                    raise ValueError(_INVALID_PROJECTION)
+                unsigned = dict(document)
+                observed_semantic_sha256 = unsigned.pop("activation_sha256")
+                if canonical_hash(unsigned) != observed_semantic_sha256:
+                    raise ValueError(_INVALID_PROJECTION)
+                if observed_semantic_sha256 == activation_sha256:
+                    matches.append((name, _sha256(raw)))
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+        root_chain.revalidate()
+        for directory in directories:
+            directory.revalidate()
+        if len(matches) != 1:
+            raise ValueError(_INVALID_PROJECTION)
+        return matches[0]
+    except (KeyError, OSError, TypeError, ValueError, UnicodeDecodeError, RecursionError):
+        raise ValueError(_INVALID_PROJECTION) from None
+    finally:
+        for directory in reversed(directories):
+            directory.close()
+        root_chain.close()
+
+
 def write_current_candidate_policy_canary(
     *,
     data_home: str | Path | None,
