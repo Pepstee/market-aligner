@@ -1654,11 +1654,21 @@ def test_provider_authority_resolves_committed_sources_from_nested_subtree(
 
     head = observation_authority._verify_exact_head_policy(subtree, policy_value)
     assert len(head) == 40
+    assert observation_authority._verify_exact_head_policy(
+        repository, policy_value
+    ) == head
     assert observation_authority._git_show(
         subtree,
         "HEAD",
         "career_automation/fixtures/trusted-greenhouse-success-observations.json",
     ) == policy_value
+
+    unrelated_root = repository / "unrelated"
+    unrelated_root.mkdir()
+    with pytest.raises(ValueError, match="trust policy source path is invalid"):
+        observation_authority._verify_exact_head_policy(
+            unrelated_root, policy_value
+        )
 
 
 def test_provider_authority_subtree_lookup_rejects_escape_and_dirty_head(

@@ -988,10 +988,18 @@ def _trusted_policy() -> tuple[dict[str, object], bytes, str]:
 
 def _verify_exact_head_policy(repository_root: str | Path, policy_value: bytes) -> str:
     head = exact_clean_head(repository_root)
+    policy_path = (
+        "internal/jaa/career_automation/fixtures/"
+        "trusted-greenhouse-success-observations.json"
+    )
+    prefix = _repository_prefix(repository_root)
+    if not policy_path.startswith(prefix):
+        raise ValueError("provider observation trust policy source path is invalid")
+    relative_path = policy_path[len(prefix) :]
     committed = _git_show(
         repository_root,
         "HEAD",
-        "career_automation/fixtures/trusted-greenhouse-success-observations.json",
+        relative_path,
     )
     if committed != policy_value:
         raise ValueError("provider observation trust policy differs from exact HEAD")
