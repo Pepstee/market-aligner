@@ -34,6 +34,7 @@ from .browser_executor import (
     GreenhouseSuccessEvidence,
 )
 from .candidate_release_authority import CandidateReleaseExecutionAuthority
+from .current_greenhouse_navigation import CurrentGreenhouseNavigationProof
 from cv_generation.service import CandidateApplicationPackage
 from .external_document_assurance import ExternalDocumentAssuranceReceipt
 from .evidence_matching import canonical_json
@@ -924,6 +925,7 @@ class PreparedGreenhouseRelease:
     form_field_authorities: tuple[tuple[str, str], ...] = ()
     form_inventory_sha256: str | None = None
     form_inventory: bytes | None = None
+    current_provider_proof: CurrentGreenhouseNavigationProof | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1143,7 +1145,15 @@ class GreenhouseProductionRunner:
             page.route("**/*", review_route)
         try:
             navigation = open_vacancy(item, page)
-            recorder.record_navigation(navigation)
+            if isinstance(navigation, Mapping) and "_current_navigation_capture" in navigation:
+                recorder.record_navigation(navigation, page=page)
+                navigation = {
+                    key: value
+                    for key, value in navigation.items()
+                    if key != "_current_navigation_capture"
+                }
+            else:
+                recorder.record_navigation(navigation)
         except Exception as exc:
             if self.review_only:
                 raise
@@ -1216,6 +1226,9 @@ class GreenhouseProductionRunner:
             consent_states=prepared.consent_states,
             success_evidence=prepared.success_evidence,
             success_observation=prepared.success_observation,
+            current_provider_proof=getattr(
+                prepared, "current_provider_proof", None
+            ),
         )
         authority = CandidateReleaseExecutionAuthority(
             gate=prepared.gate,
@@ -1252,6 +1265,9 @@ class GreenhouseProductionRunner:
             review_form_fields=prepared.review_form_fields,
             review_form_field_authorities=prepared.form_field_authorities,
             form_inventory_sha256=prepared.form_inventory_sha256,
+            current_provider_proof=getattr(
+                prepared, "current_provider_proof", None
+            ),
         )
         return self.executor.execute(
             page,

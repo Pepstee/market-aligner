@@ -46,6 +46,11 @@ from .candidate_contact_authority import (
     resolve_native_contact,
 )
 from .candidate_application_factory import CURRENT_RUNTIME_ENVIRONMENT
+from .current_greenhouse_navigation import (
+    CurrentGreenhouseNavigationProof,
+    capture_current_greenhouse_navigation,
+    verify_live_current_greenhouse_navigation,
+)
 from .candidate_release_gate import (
     CandidateAuthorityFiles,
     CandidateAuthorityReleaseGate,
@@ -861,7 +866,7 @@ class GutuaGreenhouseSession:
             return None
         request = response.request
         redirected_from = request.redirected_from
-        return {
+        navigation = {
             "url": response.url,
             "status": response.status,
             "method": request.method,
@@ -869,6 +874,23 @@ class GutuaGreenhouseSession:
                 redirected_from.url if redirected_from is not None else None
             ),
         }
+        market_context = getattr(self, "market_context_by_key", {}).get(
+            item.vacancy.vacancy.job_key
+        )
+        if (
+            market_context is not None
+            and market_context.market_decision_authority.environment
+            == CURRENT_RUNTIME_ENVIRONMENT
+        ):
+            navigation["_current_navigation_capture"] = (
+                capture_current_greenhouse_navigation(
+                    response,
+                    page=page,
+                    context=market_context,
+                    repository_root=self.repository_root,
+                )
+            )
+        return navigation
 
     @staticmethod
     def _field_identity(field: Mapping[str, object]) -> str:
@@ -1612,29 +1634,61 @@ class GutuaGreenhouseSession:
             answers_text=package.artifacts.editable.answers_text,
             intended_vacancy=intended,
         )
+        current_provider_proof = None
+        observation_authority = None
         if not review_only:
-            success_observation, observation_authority = (
-                load_provider_observation_authority(
-                    source_url=vacancy.source_url,
-                    archive_root=self.archive_root,
-                    repository_root=self.repository_root,
+            if current_runtime:
+                current_provider_proof = recorder.current_provider_proof
+                if type(current_provider_proof) is not CurrentGreenhouseNavigationProof:
+                    raise ProductionATSBoundaryError(
+                        "current Greenhouse navigation proof is unavailable"
+                    )
+                verify_live_current_greenhouse_navigation(
+                    current_provider_proof,
+                    context=market_context,
+                    page=page,
+                    attempt_id=recorder.attempt.attempt_id,
+                    vacancy=vacancy,
                 )
-            )
-            observation = json.loads(success_observation)
-            paths = observation["provider_loader_paths"]
-            marker = " ".join(
-                re.sub(r"<[^>]+>", " ", str(paths["confirmation_message"])).strip().split()
-            )
-            if not marker:
-                raise ValueError("provider observation confirmation marker is empty")
-            success_evidence = GreenhouseSuccessEvidence(
-                observation_sha256=observation_authority.observation_sha256,
-                observed_at=str(observation["observed_at"]),
-                confirmation_url=urljoin(
-                    vacancy.source_url, str(paths["confirmationPath"])
-                ),
-                required_visible_markers=(marker,),
-            )
+                success_observation = current_provider_proof.observation_bytes()
+                loader = current_provider_proof.loader_document()
+                success_evidence = GreenhouseSuccessEvidence(
+                    observation_sha256=hashlib.sha256(
+                        success_observation
+                    ).hexdigest(),
+                    observed_at=current_provider_proof.observed_at,
+                    confirmation_url=loader["confirmation_url"],
+                    required_visible_markers=loader[
+                        "required_visible_markers"
+                    ],
+                )
+            else:
+                success_observation, observation_authority = (
+                    load_provider_observation_authority(
+                        source_url=vacancy.source_url,
+                        archive_root=self.archive_root,
+                        repository_root=self.repository_root,
+                    )
+                )
+                observation = json.loads(success_observation)
+                paths = observation["provider_loader_paths"]
+                marker = " ".join(
+                    re.sub(
+                        r"<[^>]+>", " ", str(paths["confirmation_message"])
+                    ).strip().split()
+                )
+                if not marker:
+                    raise ValueError(
+                        "provider observation confirmation marker is empty"
+                    )
+                success_evidence = GreenhouseSuccessEvidence(
+                    observation_sha256=observation_authority.observation_sha256,
+                    observed_at=str(observation["observed_at"]),
+                    confirmation_url=urljoin(
+                        vacancy.source_url, str(paths["confirmationPath"])
+                    ),
+                    required_visible_markers=(marker,),
+                )
         client = LLMClient.from_config(
             cache_enabled=False,
             cache_dir=self.archive_root / "review-cache",
@@ -1998,9 +2052,7 @@ class GutuaGreenhouseSession:
                         "contact_authority": _contact_authority_provenance_sha256(
                             contact_authority, current_runtime=current_runtime
                         ),
-                        "provider_observation": (
-                            observation_authority.observation_sha256
-                        ),
+                        "provider_observation": success_evidence.observation_sha256,
                     }
                 ),
             ),
@@ -2011,6 +2063,7 @@ class GutuaGreenhouseSession:
             consent_states=consent_states,
             success_evidence=success_evidence,
             success_observation=success_observation,
+            current_provider_proof=current_provider_proof,
             gate=gate,
             release_token=issued.release_token,
             artifact_root=artifact_root,

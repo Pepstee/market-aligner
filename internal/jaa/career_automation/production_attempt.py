@@ -47,6 +47,13 @@ from .production_queue import ProductionCheckpointLedger
 from form_filling.service import approved_form_mapping_bytes
 from form_filling.ats_forensics import redact_text, sanitize_url
 from .provider_observation_authority import verify_provider_observation_authority
+from .current_greenhouse_navigation import (
+    CurrentGreenhouseNavigationCapture,
+    CurrentGreenhouseNavigationProof,
+    bind_current_greenhouse_navigation,
+    reserve_current_greenhouse_navigation_capture,
+    verify_current_greenhouse_navigation_proof,
+)
 from .rendering import ApplicationArtifacts
 
 
@@ -116,6 +123,7 @@ class GreenhouseAttemptRecorder:
         self.attempt = attempt
         self._attached_pages: set[int] = set()
         self._created_here = False
+        self.current_provider_proof: CurrentGreenhouseNavigationProof | None = None
 
     @classmethod
     def create(
@@ -287,8 +295,11 @@ class GreenhouseAttemptRecorder:
             ),
         )
 
-    def record_navigation(self, evidence: Mapping[str, object] | None) -> str:
+    def record_navigation(
+        self, evidence: Mapping[str, object] | None, *, page: Page | None = None
+    ) -> str:
         row = dict(evidence or {})
+        capture = row.pop("_current_navigation_capture", None)
         details: dict[str, object] = {
             "method": str(row.get("method", "GET")).upper(),
             "url_sha256": self._url_sha256(
@@ -297,9 +308,82 @@ class GreenhouseAttemptRecorder:
         }
         if isinstance(row.get("status"), int):
             details["status"] = int(row["status"])
-        return self._record_evidence(
-            "navigation", result="completed", details=details
+        members: dict[str, str] = {}
+        if capture is not None:
+            if (
+                type(capture) is not CurrentGreenhouseNavigationCapture
+                or page is None
+                or capture.page_identity != id(page)
+                or self.current_provider_proof is not None
+            ):
+                raise ValueError("current navigation capture is not bound to this page")
+            existing_roles = {
+                artifact.role
+                for artifact in self.attempt._objects(self.attempt._events())
+            }
+            if {
+                "provider.current_loader_response",
+                "provider.current_loader_config",
+            } & existing_roles:
+                raise ValueError("current navigation proof already exists for this attempt")
+            reserve_current_greenhouse_navigation_capture(
+                capture,
+                attempt_id=self.attempt.attempt_id,
+                page=page,
+            )
+            response_artifact = self.attempt.add_artifact(
+                "provider.current_loader_response",
+                capture.redacted_response,
+                media_type="text/html",
+                lineage=(self.attempt.vacancy.vacancy_sha256,),
+                disposition="approved",
+                metadata={
+                    "capture": "redacted_current_primary_navigation_response",
+                    "primary_response_sha256": capture.primary_response_sha256,
+                },
+            )
+            config_artifact = self.attempt.add_artifact(
+                "provider.current_loader_config",
+                capture.loader_config,
+                media_type="application/json",
+                lineage=(response_artifact.sha256,),
+                disposition="approved",
+                metadata={"capture": "parsed_current_navigation_loader"},
+            )
+            members.update(
+                {
+                    "provider.current_loader_response": response_artifact.sha256,
+                    "provider.current_loader_config": config_artifact.sha256,
+                }
+            )
+            details.update(
+                {
+                    "provider_response_sha256": capture.primary_response_sha256,
+                    "provider_redacted_response_sha256": (
+                        capture.redacted_response_sha256
+                    ),
+                    "provider_loader_config_sha256": (
+                        capture.loader_config_sha256
+                    ),
+                    "current_market_context_sha256": (
+                        capture.market_context_sha256
+                    ),
+                }
+            )
+        event_sha256 = self._record_evidence(
+            "navigation",
+            result="completed",
+            members=members,
+            details=details,
         )
+        if capture is not None:
+            self.current_provider_proof = bind_current_greenhouse_navigation(
+                capture,
+                attempt_id=self.attempt.attempt_id,
+                navigation_event_sha256=event_sha256,
+                vacancy=self.attempt.vacancy,
+            )
+        return event_sha256
 
     def record_field_action(
         self,
@@ -791,6 +875,7 @@ class GreenhouseAttemptRecorder:
         consent_states: Sequence[tuple[str, bool | str]],
         success_evidence: GreenhouseSuccessEvidence,
         success_observation: bytes,
+        current_provider_proof: CurrentGreenhouseNavigationProof | None = None,
         finalized_at: datetime | None = None,
     ) -> ApplicationArchiveReceipt:
         release_time = finalized_at or datetime.now(timezone.utc)
@@ -800,13 +885,63 @@ class GreenhouseAttemptRecorder:
             application_url=self.attempt.vacancy.source_url,
             application_id=self.attempt.vacancy.source_url.rstrip("/").rsplit("/", 1)[-1],
             verified_at=release_time,
+            current_provider_proof=current_provider_proof,
         )
-        provider_authority = verify_provider_observation_authority(
-            success_observation,
-            source_url=self.attempt.vacancy.source_url,
-            archive_root=self.attempt.archive.root,
-            repository_root=self.attempt.archive.repository_root,
-        )
+        if current_provider_proof is None:
+            provider_authority = verify_provider_observation_authority(
+                success_observation,
+                source_url=self.attempt.vacancy.source_url,
+                archive_root=self.attempt.archive.root,
+                repository_root=self.attempt.archive.repository_root,
+            )
+            provider_authority_document = provider_authority.document()
+            provider_authority_metadata = {
+                "provider": "greenhouse",
+                "collector_identity": provider_authority.collector_identity,
+                "capture_manifest_sha256": provider_authority.capture_manifest_sha256,
+            }
+        else:
+            if (
+                type(current_provider_proof) is not CurrentGreenhouseNavigationProof
+                or self.current_provider_proof is not current_provider_proof
+            ):
+                raise ValueError("current provider proof was not issued by this attempt")
+            objects = self.attempt._objects(self.attempt._events())
+            response_rows = [
+                row for row in objects if row.role == "provider.current_loader_response"
+            ]
+            config_rows = [
+                row for row in objects if row.role == "provider.current_loader_config"
+            ]
+            events = self.attempt._events()
+            navigation_rows = [
+                event
+                for event in events
+                if event.get("event_sha256")
+                == current_provider_proof.navigation_event_sha256
+            ]
+            if len(response_rows) != 1 or len(config_rows) != 1 or len(navigation_rows) != 1:
+                raise ValueError("current provider navigation evidence is ambiguous")
+            provider_authority_document = verify_current_greenhouse_navigation_proof(
+                current_provider_proof,
+                source_url=self.attempt.vacancy.source_url,
+                application_id=current_provider_proof.application_id,
+                job_key=source.job_key,
+                vacancy_sha256=source.vacancy_sha256,
+                attempt_id=self.attempt.attempt_id,
+                repository_root=self.attempt.archive.repository_root,
+                success_observation=success_observation,
+                archived_response=self.attempt.read_artifact(response_rows[0]),
+                archived_loader_config=self.attempt.read_artifact(config_rows[0]),
+                navigation_event=navigation_rows[0],
+                page=page,
+            )
+            provider_authority = None
+            provider_authority_metadata = {
+                "provider": "greenhouse",
+                "authority_kind": "current_navigation_proof",
+                "proof_sha256": current_provider_proof.proof_sha256,
+            }
         selected = self._selected()
         if "browser.prefill_snapshot" not in selected:
             raise ValueError("prefill snapshot must be archived before release")
@@ -999,15 +1134,9 @@ class GreenhouseAttemptRecorder:
             ),
             (
                 "provider.success_authority",
-                _json_bytes(provider_authority.document()),
+                _json_bytes(provider_authority_document),
                 "application/json",
-                {
-                    "provider": "greenhouse",
-                    "collector_identity": provider_authority.collector_identity,
-                    "capture_manifest_sha256": (
-                        provider_authority.capture_manifest_sha256
-                    ),
-                },
+                provider_authority_metadata,
             ),
             (
                 "production.identities",

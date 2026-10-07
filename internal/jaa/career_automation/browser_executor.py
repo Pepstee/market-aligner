@@ -21,6 +21,7 @@ from urllib.parse import parse_qsl, urljoin, urlsplit
 from playwright.sync_api import Locator, Page, Route
 
 from .application_archive import (
+    ApplicationArchive,
     ApplicationArchiveReceipt,
     VacancyArchiveIdentity,
     release_authority_selected_sha256,
@@ -47,6 +48,10 @@ from .evidence_matching import canonical_json
 from .form_answers import form_answer_bindings_bytes, source_form_answer_bindings
 from form_filling.service import approved_form_mapping_bytes
 from .provider_observation_authority import verify_provider_observation_authority
+from .current_greenhouse_navigation import (
+    CurrentGreenhouseNavigationProof,
+    verify_current_greenhouse_navigation_proof,
+)
 from .ats_fixture import FixtureReceipt
 from .browser_workflows import (
     ActionKind,
@@ -164,6 +169,7 @@ def validate_greenhouse_success_observation(
     application_url: str,
     application_id: str,
     verified_at: datetime,
+    current_provider_proof: CurrentGreenhouseNavigationProof | None = None,
 ) -> dict[str, object]:
     """Bind observed provider semantics to schema, route, time and visible text."""
     if hashlib.sha256(value).hexdigest() != evidence.observation_sha256:
@@ -235,6 +241,35 @@ def validate_greenhouse_success_observation(
         "job-boards.greenhouse.io",
         "job-boards.eu.greenhouse.io",
     }
+    if current_provider_proof is not None:
+        if type(current_provider_proof) is not CurrentGreenhouseNavigationProof:
+            raise ValueError("current Greenhouse proof has an unsupported type")
+        loader = current_provider_proof.loader_document()
+        if (
+            current_provider_proof.source_url != application_url
+            or current_provider_proof.application_id
+            != dict(current_provider_proof.market_binding).get("application_id")
+            or current_provider_proof.job_key
+            != dict(current_provider_proof.market_binding).get("source_job_key")
+            or current_provider_proof.observation_bytes() != value
+            or loader["confirmation_url"] != evidence.confirmation_url
+            or paths.get("confirmationPath") != loader["confirmationPath"]
+            or paths.get("submitPath") != loader["submitPath"]
+            or paths.get("confirmation_message") != loader["confirmation_message"]
+            or current_provider_proof.proof_sha256
+            != current_provider_proof.document()["proof_sha256"]
+        ):
+            raise ValueError("current Greenhouse proof differs from its observation")
+        if (
+            submit.hostname == "boards.eu.greenhouse.io"
+            and urlsplit(application_url).hostname == "job-boards.eu.greenhouse.io"
+        ):
+            allowed_submit_hosts.add("boards.eu.greenhouse.io")
+        if (
+            submit.hostname == "boards.greenhouse.io"
+            and urlsplit(application_url).hostname == "job-boards.greenhouse.io"
+        ):
+            allowed_submit_hosts.add("boards.greenhouse.io")
     if (
         submit.scheme != "https"
         or submit.hostname not in allowed_submit_hosts
@@ -323,6 +358,9 @@ class ReleaseExecutionAuthority:
     field_authority_names: tuple[tuple[str, str], ...]
     consent_states: tuple[tuple[str, bool | str], ...]
     success_evidence: GreenhouseSuccessEvidence | None
+    current_provider_proof: CurrentGreenhouseNavigationProof | None = field(
+        default=None, repr=False, kw_only=True
+    )
     jurisdiction: str
     contract_type: str
     consumed_at: datetime
@@ -366,6 +404,7 @@ class ReleaseExecutionAuthority:
                 self.application_url,
                 self.receipt_url,
                 self.application_id,
+                current_provider_proof=self.current_provider_proof,
             )
             if self.archive_receipt.vacancy.source_url != self.application_url:
                 raise ValueError(
@@ -550,13 +589,54 @@ class ReleaseExecutionAuthority:
                 application_url=self.application_url,
                 application_id=self.application_id,
                 verified_at=verification_time,
+                current_provider_proof=self.current_provider_proof,
             )
-            provider_authority = verify_provider_observation_authority(
-                observation,
-                source_url=self.application_url,
-                archive_root=self.archive_root,
-                repository_root=self.repository_root,
-            )
+            if self.current_provider_proof is None:
+                provider_authority = verify_provider_observation_authority(
+                    observation,
+                    source_url=self.application_url,
+                    archive_root=self.archive_root,
+                    repository_root=self.repository_root,
+                )
+            else:
+                response_bytes = selected_archive_object_bytes(
+                    self.archive_receipt,
+                    "provider.current_loader_response",
+                    root=self.archive_root,
+                    repository_root=self.repository_root,
+                )
+                loader_bytes = selected_archive_object_bytes(
+                    self.archive_receipt,
+                    "provider.current_loader_config",
+                    root=self.archive_root,
+                    repository_root=self.repository_root,
+                )
+                attempt = ApplicationArchive(
+                    self.archive_root,
+                    repository_root=self.repository_root,
+                    create=False,
+                ).open_attempt(self.archive_receipt.attempt_id)
+                matching_events = [
+                    event
+                    for event in attempt._events()
+                    if event.get("event_sha256")
+                    == self.current_provider_proof.navigation_event_sha256
+                ]
+                if len(matching_events) != 1:
+                    raise ValueError("current provider navigation event is ambiguous")
+                provider_authority = verify_current_greenhouse_navigation_proof(
+                    self.current_provider_proof,
+                    source_url=self.application_url,
+                    application_id=self.current_provider_proof.application_id,
+                    job_key=self.source.job_key,
+                    vacancy_sha256=self.source.vacancy_sha256,
+                    attempt_id=self.archive_receipt.attempt_id,
+                    repository_root=self.repository_root,
+                    success_observation=observation,
+                    archived_response=response_bytes,
+                    archived_loader_config=loader_bytes,
+                    navigation_event=matching_events[0],
+                )
         expected_vacancy = VacancyArchiveIdentity(
             job_key=self.source.job_key,
             vacancy_sha256=self.source.vacancy_sha256,
@@ -605,7 +685,11 @@ class ReleaseExecutionAuthority:
                 else None
             ),
             provider_success_authority=(
-                _json_bytes(provider_authority.document())
+                _json_bytes(
+                    provider_authority
+                    if self.current_provider_proof is not None
+                    else provider_authority.document()
+                )
                 if provider_authority is not None
                 else None
             ),
@@ -648,11 +732,22 @@ def _validate_greenhouse_routes(
     application_url: str,
     receipt_url: str,
     application_id: str,
+    *,
+    current_provider_proof: CurrentGreenhouseNavigationProof | None = None,
 ) -> None:
     allowed_hosts = {
         "job-boards.greenhouse.io",
         "job-boards.eu.greenhouse.io",
     }
+    if current_provider_proof is not None:
+        if type(current_provider_proof) is not CurrentGreenhouseNavigationProof:
+            raise ValueError("current Greenhouse proof has an unsupported type")
+        allowed_hosts.update(
+            {
+                "boards.greenhouse.io",
+                "boards.eu.greenhouse.io",
+            }
+        )
     application = urlsplit(application_url)
     receipt = urlsplit(receipt_url)
     if (
@@ -671,6 +766,15 @@ def _validate_greenhouse_routes(
         or not re.fullmatch(r"[0-9]+", application_id)
     ):
         raise ValueError("Greenhouse release route is not an admitted official URL")
+    if current_provider_proof is not None:
+        loader = current_provider_proof.loader_document()
+        if (
+            application_url != current_provider_proof.source_url
+            or receipt_url != loader["confirmation_url"]
+            or current_provider_proof.proof_sha256
+            != current_provider_proof.document()["proof_sha256"]
+        ):
+            raise ValueError("current Greenhouse routes differ from owned navigation")
     application_path = application.path.rstrip("/")
     if (
         not application_path.endswith(f"/jobs/{application_id}")

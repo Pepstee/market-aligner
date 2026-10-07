@@ -1368,13 +1368,15 @@ def test_runner_terminalizes_observed_provider_boundary_before_preparation(
         def attach_page_evidence(self, _page):
             return None
 
-        def record_navigation(self, _navigation):
+        def record_navigation(self, _navigation, *, page=None):
+            assert page is not None
             return None
 
         def finalize_provider_boundary(self, _page, **kwargs):
             calls.append("terminal_boundary")
             assert kwargs["signals"] == ("recaptcha",)
             assert kwargs["network_evidence"][-1]["status"] == 200
+            assert "_current_navigation_capture" not in kwargs["network_evidence"][-1]
 
         def record_prefill(self, _page):
             pytest.fail("prefill must not run across a provider boundary")
@@ -1397,6 +1399,7 @@ def test_runner_terminalizes_observed_provider_boundary_before_preparation(
             "status": 200,
             "method": "GET",
             "redirected_from": None,
+            "_current_navigation_capture": object(),
         },
         prepare_release=lambda *_args: pytest.fail(
             "preparation must not run across a provider boundary"
