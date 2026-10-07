@@ -1727,7 +1727,7 @@ def test_real_processing_opportunity_enrichment_retains_eligibility(
 def test_published_handoff_registry_is_exact_replayable_and_immutable(tmp_path):
     import sqlite3
     from test_jaa_events_v1 import _handoff
-    from market_aligner.research.store import AssessmentStore
+    from market_aligner.research.store import AssessmentStore, _promotion_has_published_handoff
     from market_aligner.applications.canonical import ContractValidationError
 
     handoff = _handoff()
@@ -1828,6 +1828,38 @@ def test_published_handoff_registry_is_exact_replayable_and_immutable(tmp_path):
         )
     with reopened.connection() as connection:
         assert connection.execute("SELECT COUNT(*) FROM published_application_handoffs").fetchone()[0] == 2
+
+    legacy_only = AssessmentStore(tmp_path / "state/legacy-promotion.sqlite3")
+    legacy_only._record_published_handoff(handoff.exact_bytes, receipt)
+    with legacy_only.connection() as connection:
+        assert _promotion_has_published_handoff(
+            connection,
+            handoff.payload["profile_id"],
+            handoff.payload["job_key"],
+        )
+        assert not _promotion_has_published_handoff(
+            connection,
+            handoff.payload["profile_id"],
+            handoff.payload["job_key"] + ":unpublished",
+        )
+
+    current_only = AssessmentStore(tmp_path / "state/current-promotion.sqlite3")
+    current_only._record_published_handoff(
+        current_handoff.exact_bytes,
+        current_receipt,
+        current_runtime=True,
+    )
+    with current_only.connection() as connection:
+        assert _promotion_has_published_handoff(
+            connection,
+            current_handoff.payload["profile_id"],
+            current_handoff.payload["job_key"],
+        )
+        assert not _promotion_has_published_handoff(
+            connection,
+            current_handoff.payload["profile_id"],
+            current_handoff.payload["job_key"] + ":unpublished",
+        )
 
 
 @pytest.mark.parametrize("exact_capture", [False, True])

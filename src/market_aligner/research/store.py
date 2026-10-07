@@ -201,22 +201,51 @@ def _promotion_has_active_research_lease(
 def _promotion_has_published_handoff(
     connection: sqlite3.Connection, profile_id: str, job_key: str
 ) -> bool:
-    from market_aligner.applications.handoff import parse_handoff_v1
+    from market_aligner.applications.canonical import canonical_json_bytes, parse_canonical_json
+    from market_aligner.applications.handoff import (
+        parse_current_runtime_handoff_v1,
+        parse_handoff_v1,
+    )
 
     published = connection.execute(
-        "SELECT application_id,handoff_root_sha256,handoff_exact_bytes "
+        "SELECT application_id,handoff_root_sha256,execution_receipt_sha256,"
+        "handoff_exact_bytes,execution_receipt_bytes "
         "FROM published_application_handoffs"
     ).fetchall()
     for row in published:
         try:
-            handoff = parse_handoff_v1(bytes(row["handoff_exact_bytes"]))
+            receipt_bytes = bytes(row["execution_receipt_bytes"])
+            if hashlib.sha256(receipt_bytes).hexdigest() != row["execution_receipt_sha256"]:
+                raise ValueError
+            receipt = parse_canonical_json(receipt_bytes)
+            if type(receipt) is not dict:
+                raise ValueError
+            current_runtime = (
+                receipt.get("schema_version")
+                == "market-aligner.current-runtime-handoff-execution.v1"
+            )
+            parser = AssessmentStore.select_publication_parser(
+                receipt,
+                current_runtime=current_runtime,
+                legacy_parser=parse_handoff_v1,
+                current_parser=parse_current_runtime_handoff_v1,
+                mode_valid=AssessmentStore._published_handoff_mode_valid,
+            )
+            handoff = parser(bytes(row["handoff_exact_bytes"]))
+            basis = dict(receipt)
+            semantic = basis.pop("semantic_receipt_sha256", None)
+            if (
+                handoff.application_id != row["application_id"]
+                or handoff.root_sha256 != row["handoff_root_sha256"]
+                or receipt.get("application_id") != row["application_id"]
+                or receipt.get("handoff_root_sha256") != row["handoff_root_sha256"]
+                or receipt.get("release_token_issued") is not False
+                or receipt.get("submission_authority") is not False
+                or hashlib.sha256(canonical_json_bytes(basis)).hexdigest() != semantic
+            ):
+                raise ValueError
         except (TypeError, ValueError, KeyError):
             raise ValueError("promotion transition refused") from None
-        if (
-            handoff.application_id != row["application_id"]
-            or handoff.root_sha256 != row["handoff_root_sha256"]
-        ):
-            raise ValueError("promotion transition refused")
         if (
             handoff.payload.get("profile_id") == profile_id
             and handoff.payload.get("job_key") == job_key
