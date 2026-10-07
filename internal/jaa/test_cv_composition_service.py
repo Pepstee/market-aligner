@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -18,9 +19,11 @@ from career_automation.handoff_admission import (
     VerifiedApplicationInput,
 )
 from career_automation.market_aligner_preparation import (
+    _prepare_admitted_market_application,
     prepare_admitted_market_application,
     prepare_admitted_market_application_from_authorities,
 )
+import career_automation.market_aligner_preparation as market_aligner_preparation
 from career_automation.production_recruiter_assessor import (
     ProductionDetachedRecruiterAssessor,
     ProductionRecruiterAssessorError,
@@ -54,6 +57,131 @@ from cv_generation.service import (
 )
 from llm.client import Backend, LLMClient, LLMResponse
 from test_jaa07_independent_acceptance import _source
+
+
+def test_current_pre_review_filters_archive_arguments_for_service_only(
+    monkeypatch, tmp_path
+) -> None:
+    candidate_authority_bytes = b"synthetic candidate authority\n"
+    candidate_authority_sha256 = hashlib.sha256(candidate_authority_bytes).hexdigest()
+    contact_authority_bytes = b"synthetic contact authority\n"
+    contact_authority_sha256 = hashlib.sha256(contact_authority_bytes).hexdigest()
+    listing_text = "Synthetic public listing"
+    request = SimpleNamespace(
+        authority=SimpleNamespace(source_sha256=candidate_authority_sha256),
+        vacancy_sha256=hashlib.sha256(listing_text.encode()).hexdigest(),
+    )
+    base_source = SimpleNamespace(
+        contact=SimpleNamespace(provenance_sha256=contact_authority_sha256)
+    )
+    archive_values = {
+        "candidate_projection": {"projection": "exact"},
+        "decision_receipt": {"decision": "exact"},
+        "market_decision_authority": {"authority": "exact"},
+        "materialization": {"source": "exact"},
+    }
+    orchestration_arguments = {
+        "request": request,
+        "writer_draft": object(),
+        "humanized_draft": object(),
+        "writer_evidence": object(),
+        "humanizer_evidence": object(),
+        "base_source": base_source,
+        "listing_text": listing_text,
+        "form_fields": (),
+        "bindings": (),
+        "materialization_receipt": object(),
+        "cover_letter_request": object(),
+        "cover_letter_writer_draft": object(),
+        "cover_letter_humanized_draft": object(),
+        "cover_letter_writer_evidence": object(),
+        "cover_letter_humanizer_evidence": object(),
+        **archive_values,
+    }
+    service_signature = inspect.signature(run_cv_composition_orchestration)
+    current_options = {
+        "environment": market_aligner_preparation.CURRENT_RUNTIME_ENVIRONMENT,
+        "current_runtime_pre_review": True,
+    }
+    with pytest.raises(TypeError, match="unexpected keyword argument 'candidate_projection'"):
+        service_signature.bind(**orchestration_arguments, **current_options)
+
+    captured: dict[str, object] = {}
+    composition_result = object()
+    preparation_result = object()
+
+    def compose(**kwargs):
+        service_signature.bind(**kwargs)
+        captured["service_arguments"] = kwargs
+        return composition_result
+
+    def persist(**kwargs):
+        captured["persistence_arguments"] = kwargs
+        return preparation_result
+
+    class _Store:
+        def for_boundary(self, application_id, boundary):
+            assert application_id == "app_synthetic"
+            assert boundary == "strategy"
+            return SimpleNamespace(
+                environment=market_aligner_preparation.CURRENT_RUNTIME_ENVIRONMENT
+            )
+
+    monkeypatch.setattr(
+        market_aligner_preparation, "run_cv_composition_orchestration", compose
+    )
+    monkeypatch.setattr(
+        market_aligner_preparation, "_persist_current_runtime_drafts", persist
+    )
+    result = _prepare_admitted_market_application(
+        admission_store=_Store(),
+        application_id="app_synthetic",
+        repository_root=tmp_path / "repo",
+        data_home=tmp_path / "data-home",
+        candidate_authority_bytes=candidate_authority_bytes,
+        candidate_authority_sha256=candidate_authority_sha256,
+        contact_authority_bytes=contact_authority_bytes,
+        contact_authority_sha256=contact_authority_sha256,
+        orchestration_arguments=orchestration_arguments,
+        environment=market_aligner_preparation.CURRENT_RUNTIME_ENVIRONMENT,
+        current_runtime_pre_review=True,
+    )
+
+    assert result is preparation_result
+    service_arguments = captured["service_arguments"]
+    assert isinstance(service_arguments, dict)
+    assert not (set(archive_values) & set(service_arguments))
+    assert service_arguments["materialization_receipt"] is orchestration_arguments[
+        "materialization_receipt"
+    ]
+    assert service_arguments["environment"] == current_options["environment"]
+    assert service_arguments["current_runtime_pre_review"] is True
+    persistence_arguments = captured["persistence_arguments"]
+    assert isinstance(persistence_arguments, dict)
+    assert persistence_arguments["orchestration_arguments"] is orchestration_arguments
+    for key, value in archive_values.items():
+        assert persistence_arguments["orchestration_arguments"][key] is value
+
+    unrecognized_arguments = {
+        **orchestration_arguments,
+        "future_service_option": object(),
+    }
+    with pytest.raises(
+        TypeError, match="unexpected keyword argument 'future_service_option'"
+    ):
+        _prepare_admitted_market_application(
+            admission_store=_Store(),
+            application_id="app_synthetic",
+            repository_root=tmp_path / "repo",
+            data_home=tmp_path / "data-home",
+            candidate_authority_bytes=candidate_authority_bytes,
+            candidate_authority_sha256=candidate_authority_sha256,
+            contact_authority_bytes=contact_authority_bytes,
+            contact_authority_sha256=contact_authority_sha256,
+            orchestration_arguments=unrecognized_arguments,
+            environment=market_aligner_preparation.CURRENT_RUNTIME_ENVIRONMENT,
+            current_runtime_pre_review=True,
+        )
 
 
 class _ScriptedRecruiterBackend(Backend):

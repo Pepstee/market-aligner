@@ -66,6 +66,29 @@ def _json_bytes(value: object) -> bytes:
     return (canonical_json(value) + "\n").encode()
 
 
+_COMPOSITION_ARCHIVE_ONLY_ARGUMENTS = frozenset(
+    {
+        "candidate_projection",
+        "decision_receipt",
+        "market_decision_authority",
+        "materialization",
+    }
+)
+
+
+def _composition_call_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(arguments, Mapping):
+        raise ValueError("invalid composition arguments")
+    items = list(arguments.items())
+    if any(type(key) is not str for key, _ in items):
+        raise ValueError("invalid composition arguments")
+    return {
+        key: value
+        for key, value in items
+        if key not in _COMPOSITION_ARCHIVE_ONLY_ARGUMENTS
+    }
+
+
 def _contact_authority_provenance_sha256(
     contact_authority: CandidateContactAuthority | CurrentContactProvenance,
     *,
@@ -1195,7 +1218,7 @@ def _prepare_admitted_market_application(
         )
     if current_runtime_pre_review:
         current_result = run_cv_composition_orchestration(
-            **dict(orchestration_arguments),
+            **_composition_call_arguments(orchestration_arguments),
             environment=environment,
             current_runtime_pre_review=True,
         )
