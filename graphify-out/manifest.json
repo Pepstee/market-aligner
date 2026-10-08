@@ -3918,9 +3918,9 @@
     "semantic_hash": ""
   },
   "tests/test_llm_pipeline.py": {
-    "mtime": 1791419409.4457467,
-    "seen": 1791419597.064995,
-    "ast_hash": "681a258b7949f4fa4336cc7bc94633b3",
+    "mtime": 1791420485.2777271,
+    "seen": 1791420643.6956348,
+    "ast_hash": "6852c0ffff6b23ffa4352369e381ad0d",
     "semantic_hash": ""
   },
   "tests/test_migration_ledger.py": {
@@ -4278,9 +4278,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/llm/codex_gateway.py": {
-    "mtime": 1791419409.4097466,
-    "seen": 1791419597.0648983,
-    "ast_hash": "1f56b0d366a11e138bc855a20ed80dc6",
+    "mtime": 1791420478.8337274,
+    "seen": 1791420643.6955752,
+    "ast_hash": "ab9d8c7e9ac8a7e284a1518d5d47baaa",
     "semantic_hash": ""
   },
   "src/market_aligner/research/public_provider.py": {

@@ -20,6 +20,7 @@ from market_aligner.llm.codex_gateway import (
     CodexSemanticGateway,
     EXTRACTION_PROMPT_VERSION,
     EXTRACTION_SCHEMA,
+    bind_source_identity_schema,
     VACANCY_ELIGIBILITY_PROMPT_VERSION,
     VACANCY_ELIGIBILITY_SCHEMA,
     SYNTHETIC_CANARY_MARKER,
@@ -357,6 +358,187 @@ class LLMPipelineTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "output hash"):
             accept_extraction(raw, extraction, bad)
+
+    def test_source_identity_schema_binding_isolated_and_canonical(self) -> None:
+        base = {
+            "type": "object",
+            "properties": {
+                "source_content_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "title": {"type": "string", "meta": {"nested": ["keep"]}},
+            },
+            "required": ["source_content_sha256", "title"],
+            "additionalProperties": False,
+        }
+        base_hash = canonical_hash(base)
+        first_digest = "a" * 64
+        second_digest = "b" * 64
+        first = bind_source_identity_schema(base, first_digest)
+        second = bind_source_identity_schema(base, second_digest)
+        self.assertEqual(
+            [first_digest], first["properties"]["source_content_sha256"]["enum"]
+        )
+        self.assertEqual(
+            [second_digest], second["properties"]["source_content_sha256"]["enum"]
+        )
+        self.assertEqual(
+            "^[0-9a-f]{64}$",
+            first["properties"]["source_content_sha256"]["pattern"],
+        )
+        self.assertNotEqual(canonical_hash(first), canonical_hash(second))
+        first["properties"]["source_content_sha256"]["enum"].append("c" * 64)
+        first["properties"]["title"]["meta"]["nested"].append("changed")
+        self.assertEqual(base_hash, canonical_hash(base))
+        self.assertNotIn("enum", base["properties"]["source_content_sha256"])
+
+        class DigestString(str):
+            pass
+
+        for invalid_digest in (
+            None,
+            True,
+            [],
+            {},
+            "A" * 64,
+            "a" * 63,
+            "a" * 64 + "\n",
+            DigestString("a" * 64),
+        ):
+            with self.subTest(invalid_digest=type(invalid_digest).__name__):
+                with self.assertRaises(ValueError):
+                    bind_source_identity_schema(base, invalid_digest)
+
+        for invalid_schema in (
+            None,
+            [],
+            "schema",
+            {},
+            {"properties": {}},
+            {"properties": {"source_content_sha256": None}},
+            {"properties": {"source_content_sha256": "string"}},
+        ):
+            with self.subTest(invalid_schema=type(invalid_schema).__name__):
+                with self.assertRaises(ValueError):
+                    bind_source_identity_schema(invalid_schema, first_digest)
+
+    def test_gateway_binds_source_identity_schema_per_request(self) -> None:
+        digests = ("a" * 64, "b" * 64)
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "codex"
+            binary.write_bytes(b"synthetic codex binary")
+            runner = FakeCodexRunner(
+                [_extraction_payload(digest) for digest in digests]
+            )
+            gateway = CodexSemanticGateway(
+                model="gpt-test-explicit",
+                codex_binary=str(binary),
+                environment={"HOME": temporary, "PATH": "/usr/bin"},
+                runner=runner,
+            )
+            receipts = []
+            for index, digest in enumerate(digests):
+                extraction, receipt = gateway.extract_vacancy(
+                    {
+                        "board": "synthetic",
+                        "job_id": str(index),
+                        "url": f"https://example.invalid/{index}",
+                        "content_sha256": digest,
+                        "raw_text": "synthetic vacancy",
+                    }
+                )
+                self.assertEqual(digest, extraction.source_content_sha256)
+                self.assertEqual(EXTRACTION_PROMPT_VERSION, receipt.prompt_version)
+                receipts.append(receipt)
+
+        captured_schemas = runner.schemas
+        self.assertEqual(
+            [[digest] for digest in digests],
+            [
+                schema["properties"]["source_content_sha256"]["enum"]
+                for schema in captured_schemas
+            ],
+        )
+        schema_hashes = [canonical_hash(schema) for schema in captured_schemas]
+        self.assertEqual(
+            [
+                canonical_hash(bind_source_identity_schema(EXTRACTION_SCHEMA, digest))
+                for digest in digests
+            ],
+            schema_hashes,
+        )
+        self.assertNotEqual(schema_hashes[0], schema_hashes[1])
+        self.assertNotIn(
+            "enum", EXTRACTION_SCHEMA["properties"]["source_content_sha256"]
+        )
+        self.assertEqual(2, len(runner.calls))
+        self.assertIn(
+            "exact top-level content_sha256 input value", runner.calls[0][1]["input"]
+        )
+        self.assertEqual("market-aligner.codex-extraction.v3", EXTRACTION_PROMPT_VERSION)
+        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v5"))
+        self.assertEqual(EXTRACTION_PROMPT_VERSION, receipts[0].prompt_version)
+
+    def test_gateway_rejects_invalid_source_digest_without_invocation(self) -> None:
+        class DigestString(str):
+            pass
+
+        invalid_digests = (
+            None,
+            True,
+            "A" * 64,
+            "a" * 63,
+            "a" * 64 + "\n",
+            DigestString("a" * 64),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "codex"
+            binary.write_bytes(b"synthetic codex binary")
+            runner = FakeCodexRunner([])
+            gateway = CodexSemanticGateway(
+                model="gpt-test-explicit",
+                codex_binary=str(binary),
+                environment={"HOME": temporary, "PATH": "/usr/bin"},
+                runner=runner,
+            )
+            for invalid_digest in invalid_digests:
+                with self.subTest(invalid_digest=type(invalid_digest).__name__):
+                    with self.assertRaisesRegex(
+                        CodexGatewayError, "invalid content_sha256"
+                    ):
+                        gateway.extract_vacancy({"content_sha256": invalid_digest})
+            self.assertEqual([], runner.calls)
+
+    def test_gateway_still_rejects_mismatched_source_identity_response(self) -> None:
+        expected_digest = "a" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "codex"
+            binary.write_bytes(b"synthetic codex binary")
+            runner = FakeCodexRunner([_extraction_payload("b" * 64)])
+            gateway = CodexSemanticGateway(
+                model="gpt-test-explicit",
+                codex_binary=str(binary),
+                environment={"HOME": temporary, "PATH": "/usr/bin"},
+                runner=runner,
+            )
+            with self.assertRaisesRegex(
+                CodexGatewayError, "different source snapshot"
+            ):
+                gateway.extract_vacancy(
+                    {
+                        "board": "synthetic",
+                        "job_id": "1",
+                        "url": "https://example.invalid/1",
+                        "content_sha256": expected_digest,
+                        "raw_text": "synthetic vacancy",
+                    }
+                )
+        self.assertEqual(1, len(runner.calls))
+        self.assertEqual(
+            [expected_digest],
+            runner.schemas[0]["properties"]["source_content_sha256"]["enum"],
+        )
 
     def test_gateway_canonicalizes_work_authorisation_and_binds_both_hashes(
         self,
