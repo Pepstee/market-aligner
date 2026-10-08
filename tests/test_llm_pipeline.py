@@ -536,7 +536,7 @@ class LLMPipelineTests(unittest.TestCase):
         self.assertEqual("minimum_years_experience", facts.source_evidence[0].field)
         self.assertEqual(1, len(runner.calls))
         self.assertEqual(VACANCY_ELIGIBILITY_PROMPT_VERSION, receipt.prompt_version)
-        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v3"))
+        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v4"))
         self.assertIn(
             "distributed working within the UK",
             _PROMPTS["vacancy_eligibility_facts"],
@@ -555,6 +555,7 @@ class LLMPipelineTests(unittest.TestCase):
             runner.schemas[0],
         )
         self.assertIn("alphabetical field order", runner.calls[0][1]["input"])
+        self.assertIn("character-for-character", runner.calls[0][1]["input"])
         self.assertEqual(
             hashlib.sha256(json.dumps(response).encode("utf-8")).hexdigest(),
             receipt.transport.response_sha256,
