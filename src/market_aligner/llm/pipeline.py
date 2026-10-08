@@ -212,6 +212,38 @@ _CONTRACT_QUOTE_PATTERNS = {
     "permanent": (re.compile(r"this is a permanent position\.?"),),
     "temporary": (re.compile(r"this is a temporary position\.?"),),
 }
+_GREENHOUSE_TIME_TYPE_VALUES = {
+    "full_time": "full-time",
+    "part_time": "part-time",
+}
+
+
+def supports_greenhouse_time_type(
+    board: object,
+    contract_type: object,
+    quote: object,
+    source_listing: object,
+) -> bool:
+    """Accept only an exact Greenhouse Time Type single-select value."""
+    if type(board) is not str or board != "greenhouse":
+        return False
+    if type(contract_type) is not str or contract_type not in _GREENHOUSE_TIME_TYPE_VALUES:
+        return False
+    if type(quote) is not str or not quote or not isinstance(source_listing, Mapping):
+        return False
+    metadata = source_listing.get("metadata")
+    if type(metadata) is not list or any(not isinstance(row, Mapping) for row in metadata):
+        return False
+    matches = [row for row in metadata if row.get("name") == "Time Type"]
+    if len(matches) != 1:
+        return False
+    record = matches[0]
+    if record.get("value_type") != "single_select":
+        return False
+    value = record.get("value")
+    if type(value) is not str or quote != value:
+        return False
+    return value.casefold() == _GREENHOUSE_TIME_TYPE_VALUES[contract_type]
 
 
 def quote_supports_eligibility(field: str, value: object, quote: object) -> bool:
@@ -448,12 +480,20 @@ def accept_vacancy_eligibility_facts(
             raise ContractValidationError(
                 "vacancy eligibility quote is not valid UTF-8"
             ) from exc
-        if not any(evidence.quote in fragment for fragment in source_text):
+        value = getattr(facts, evidence.field)
+        greenhouse_time_type_supported = (
+            evidence.field == "contract_type"
+            and supports_greenhouse_time_type(
+                raw.board, value, evidence.quote, source_listing
+            )
+        )
+        if not any(evidence.quote in fragment for fragment in source_text) and not (
+            greenhouse_time_type_supported
+        ):
             raise ContractValidationError(
                 "vacancy eligibility quote is absent from exact public content"
             )
         folded = evidence.quote.casefold()
-        value = getattr(facts, evidence.field)
         if evidence.field in {"work_jurisdiction", "required_residence"}:
             if not re.search(
                 rf"(?<![A-Za-z]){re.escape(value)}(?![A-Za-z])",
@@ -485,6 +525,8 @@ def accept_vacancy_eligibility_facts(
             supported = quote_supports_eligibility(
                 evidence.field, value, evidence.quote
             )
+            if evidence.field == "contract_type":
+                supported = supported or greenhouse_time_type_supported
             if evidence.field == "sponsorship_available":
                 supported = supported or supports_can_sponsor_visas(
                     value, evidence.quote

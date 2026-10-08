@@ -45,6 +45,7 @@ from market_aligner.llm.pipeline import (
     quote_supports_eligibility,
     supports_can_sponsor_visas,
     supports_explicit_uk_work_clause,
+    supports_greenhouse_time_type,
     verified_eligibility_capture,
     vacancy_eligibility_input,
 )
@@ -536,7 +537,7 @@ class LLMPipelineTests(unittest.TestCase):
         self.assertEqual("minimum_years_experience", facts.source_evidence[0].field)
         self.assertEqual(1, len(runner.calls))
         self.assertEqual(VACANCY_ELIGIBILITY_PROMPT_VERSION, receipt.prompt_version)
-        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v4"))
+        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v5"))
         self.assertIn(
             "distributed working within the UK",
             _PROMPTS["vacancy_eligibility_facts"],
@@ -545,6 +546,8 @@ class LLMPipelineTests(unittest.TestCase):
             "Leave required_residence null",
             _PROMPTS["vacancy_eligibility_facts"],
         )
+        self.assertIn("one exact metadata record named ‘Time Type’", _PROMPTS["vacancy_eligibility_facts"])
+        self.assertIn("across every accepted qualification route", _PROMPTS["vacancy_eligibility_facts"])
         self.assertIn(
             "location.name ‘London, United Kingdom’ supports GB",
             _PROMPTS["vacancy_eligibility_facts"],
@@ -1560,6 +1563,111 @@ class VacancyEligibilityContractTests(unittest.TestCase):
             created_at="2026-10-06T00:00:00Z",
         )
         return raw, facts, receipt, inputs
+
+    def _bound_time_type_case(
+        self,
+        *,
+        field: str = "contract_type",
+        value: object = "full_time",
+        quote: str = "full-time",
+        metadata: object | None = None,
+        board: str = "greenhouse",
+    ) -> tuple[RawPosting, VacancyEligibilityFacts, LLMReceipt, dict[str, Any]]:
+        raw, _ = LLMPipelineTests._structured_listing()
+        records = (
+            [{"name": "Time Type", "value_type": "single_select", "value": quote}]
+            if metadata is None
+            else metadata
+        )
+        raw = RawPosting(
+            board=board,
+            job_id=raw.job_id,
+            url=raw.url,
+            fetched_at=raw.fetched_at,
+            raw_json={"description": "Synthetic listing", "metadata": records},
+        )
+        raw = replace(raw, content_sha256=raw_posting_content_sha256(raw))
+        inputs = vacancy_eligibility_input(raw)
+        values = dict.fromkeys(self.fields)
+        values[field] = value
+        facts = VacancyEligibilityFacts(
+            source_content_sha256=str(inputs["content_sha256"]),
+            work_jurisdiction=values["work_jurisdiction"],
+            required_residence=values["required_residence"],
+            sponsorship_available=values["sponsorship_available"],
+            minimum_years_experience=values["minimum_years_experience"],
+            contract_type=values["contract_type"],
+            source_evidence=(VacancyEligibilityEvidence(field=field, quote=quote),),
+            unknown_fields=tuple(name for name in self.fields if values[name] is None),
+        )
+        receipt = LLMReceipt.bind(
+            receipt_id="structured-time-type-eligibility-receipt",
+            task="vacancy_eligibility_facts",
+            model="fixture-model",
+            prompt_version="fixture-v1",
+            inputs=inputs,
+            output=facts,
+            created_at="2026-10-06T00:00:00Z",
+        )
+        return raw, facts, receipt, inputs
+
+    def test_greenhouse_time_type_metadata_is_source_bound_and_narrow(self) -> None:
+        for contract_type, quote in (
+            ("full_time", "full-time"),
+            ("part_time", "part-time"),
+        ):
+            with self.subTest(contract_type=contract_type):
+                raw, facts, receipt, inputs = self._bound_time_type_case(
+                    value=contract_type, quote=quote
+                )
+                self.assertEqual(
+                    facts,
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    ),
+                )
+
+        rejected_cases = (
+            {
+                "metadata": [
+                    {"name": "Time Type", "value_type": "single_select", "value": "full-time"},
+                    {"name": "Time Type", "value_type": "single_select", "value": "full-time"},
+                ]
+            },
+            {
+                "metadata": [
+                    {"name": "Time Type", "value_type": "multi_select", "value": "full-time"}
+                ]
+            },
+            {"value": "part_time", "quote": "full-time"},
+            {"value": "contract", "quote": "contract"},
+            {"board": "lever"},
+            {
+                "field": "minimum_years_experience",
+                "value": 5,
+                "quote": "full-time",
+            },
+        )
+        for case in rejected_cases:
+            with self.subTest(case=case):
+                raw, facts, receipt, inputs = self._bound_time_type_case(**case)
+                with self.assertRaises(ContractValidationError):
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    )
+
+    def test_greenhouse_time_type_quote_remains_bound_to_exact_capture(self) -> None:
+        raw, facts, receipt, inputs = self._bound_time_type_case()
+        metadata = list(raw.raw_json["metadata"])
+        metadata[0] = {**metadata[0], "value": "part-time"}
+        changed_raw = replace(raw, raw_json={**raw.raw_json, "metadata": metadata})
+        changed_raw = replace(
+            changed_raw, content_sha256=raw_posting_content_sha256(changed_raw)
+        )
+        with self.assertRaises(ContractValidationError):
+            accept_vacancy_eligibility_facts(
+                changed_raw, facts, receipt, inputs=inputs
+            )
 
     def test_explicit_uk_work_clause_supports_work_jurisdiction_only(self) -> None:
         quotes = (
