@@ -3744,9 +3744,9 @@
     "semantic_hash": ""
   },
   "src/market_aligner/research/store.py": {
-    "mtime": 1791394840.3731434,
-    "seen": 1791395010.2304213,
-    "ast_hash": "c1818e66eaed41efa2b9815065aa188c",
+    "mtime": 1791425624.9216478,
+    "seen": 1791426095.6120024,
+    "ast_hash": "d5cf0e0d81a7f546fe95970a44c147ff",
     "semantic_hash": ""
   },
   "src/market_aligner/research/worker.py": {
@@ -3972,9 +3972,9 @@
     "semantic_hash": ""
   },
   "tests/test_service.py": {
-    "mtime": 1791424544.9216657,
-    "seen": 1791424705.4215586,
-    "ast_hash": "5cecb450c2583831ac7b6a0f014b8244",
+    "mtime": 1791425732.0816581,
+    "seen": 1791426095.6120617,
+    "ast_hash": "04672381a68d16690a1a2ed1f2dc2497",
     "semantic_hash": ""
   },
   "internal/jaa/career_automation/authority_provisioning.py": {

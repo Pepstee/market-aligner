@@ -281,12 +281,14 @@ class ServiceTests(unittest.TestCase):
             "job_key": "board:1",
             "track": "automation",
             "source_sha256": "a" * 64,
+            "processing_config_sha256": "c" * 64,
             "receipt_sha256": "b" * 64,
             "receipt_bytes": b"prior receipt",
         }
         proposed = {
             **existing,
             "source_sha256": "c" * 64,
+            "processing_config_sha256": "e" * 64,
             "receipt_sha256": "d" * 64,
             "receipt_bytes": b"replacement receipt",
         }
@@ -322,7 +324,16 @@ class ServiceTests(unittest.TestCase):
                     )
         for unchanged in (
             {**proposed, "receipt_sha256": existing["receipt_sha256"]},
-            {**proposed, "source_sha256": existing["source_sha256"]},
+            {
+                **proposed,
+                "source_sha256": existing["source_sha256"],
+                "processing_config_sha256": existing["processing_config_sha256"],
+            },
+            {
+                **proposed,
+                "source_sha256": existing["source_sha256"],
+                "receipt_sha256": existing["receipt_sha256"],
+            },
         ):
             with self.subTest(unchanged=unchanged):
                 with self.assertRaisesRegex(ValueError, "promotion transition refused"):
@@ -344,6 +355,31 @@ class ServiceTests(unittest.TestCase):
                 publication_exists=False,
                 research_lease_active=False,
             )
+
+        class HashSubclass(str):
+            pass
+
+        for invalid_processing_config_sha256 in (
+            "not-a-sha256",
+            "A" * 64,
+            HashSubclass("c" * 64),
+        ):
+            malformed = {
+                **existing,
+                "processing_config_sha256": invalid_processing_config_sha256,
+            }
+            with self.subTest(
+                processing_config_sha256=invalid_processing_config_sha256
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "promotion transition refused"
+                ):
+                    choose_processing_promotion_transition(
+                        malformed,
+                        proposed,
+                        publication_exists=False,
+                        research_lease_active=False,
+                    )
 
     def test_processing_prompt_version_change_misses_old_semantic_cache(self) -> None:
         cached = {
@@ -948,6 +984,114 @@ class ServiceTests(unittest.TestCase):
                 self.assertEqual(
                     first[board]["report_hashes"], replay[board]["report_hashes"]
                 )
+
+    def test_same_source_changed_processing_config_promotes_new_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            service = MarketAlignerService(root)
+            initial_run = ProcessingService(
+                root,
+                FixtureSemanticWorker(
+                    extraction_prompt_version="market-aligner.codex-extraction.v3"
+                ),
+            ).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="promotion-v3-worker",
+                job_key="fixture:1",
+            )
+            initial = service.promote_processing(
+                profile_id=profile_id,
+                track="automation",
+                job_key="fixture:1",
+                processing_receipt_path=Path(initial_run["receipt_path"]),
+            )
+            initial_bytes = initial.receipt_path.read_bytes()
+            current_run = ProcessingService(
+                root,
+                FixtureSemanticWorker(
+                    extraction_prompt_version="market-aligner.codex-extraction.v4",
+                    extracted_remote_policy="unknown",
+                ),
+            ).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="promotion-v4-worker",
+                job_key="fixture:1",
+            )
+            with service.assessments.transaction() as connection:
+                connection.execute(
+                    """UPDATE employer_research_queue SET status='completed',attempts=7
+                       WHERE profile_id=? AND job_key=?""",
+                    (profile_id, "fixture:1"),
+                )
+            current = service.promote_processing(
+                profile_id=profile_id,
+                track="automation",
+                job_key="fixture:1",
+                processing_receipt_path=Path(current_run["receipt_path"]),
+            )
+            initial_receipt = json.loads(initial_bytes)
+            current_bytes = current.receipt_path.read_bytes()
+            current_receipt = json.loads(current_bytes)
+            stored = service.assessments.processing_promotion(profile_id, "fixture:1")
+            replay = service.promote_processing(
+                profile_id=profile_id,
+                track="automation",
+                job_key="fixture:1",
+                processing_receipt_path=Path(current_run["receipt_path"]),
+            )
+            replay_bytes = replay.receipt_path.read_bytes()
+            with service.assessments.connection() as connection:
+                supersede_event = connection.execute(
+                    """SELECT payload_json FROM assessment_events
+                       WHERE profile_id=? AND job_key=?
+                         AND event_type='processing_assessment_promotion_superseded'""",
+                    (profile_id, "fixture:1"),
+                ).fetchone()
+                supersede_count = connection.execute(
+                    """SELECT COUNT(*) FROM assessment_events
+                       WHERE profile_id=? AND job_key=?
+                         AND event_type='processing_assessment_promotion_superseded'""",
+                    (profile_id, "fixture:1"),
+                ).fetchone()[0]
+                queue = connection.execute(
+                    """SELECT status,attempts,lease_owner,lease_until
+                       FROM employer_research_queue WHERE profile_id=? AND job_key=?""",
+                    (profile_id, "fixture:1"),
+                ).fetchone()
+
+        initial_binding = initial_receipt["binding"]
+        current_binding = current_receipt["binding"]
+        self.assertEqual(
+            initial_binding["source_content_sha256"],
+            current_binding["source_content_sha256"],
+        )
+        self.assertNotEqual(
+            initial_binding["processing_config_sha256"],
+            current_binding["processing_config_sha256"],
+        )
+        self.assertNotEqual(initial.receipt_sha256, current.receipt_sha256)
+        self.assertTrue(current.created)
+        self.assertFalse(replay.created)
+        self.assertEqual(current.receipt_sha256, replay.receipt_sha256)
+        self.assertEqual(current_bytes, replay_bytes)
+        self.assertEqual(current.receipt_sha256, stored["receipt_sha256"])
+        self.assertEqual(current_bytes, bytes(stored["receipt_bytes"]))
+        self.assertIsNotNone(supersede_event)
+        audit = json.loads(supersede_event["payload_json"])
+        self.assertEqual(
+            initial_bytes,
+            base64.b64decode(audit["prior_promotion"]["receipt_bytes_base64"]),
+        )
+        self.assertEqual(1, supersede_count)
+        self.assertEqual("queued", queue["status"])
+        self.assertEqual(0, queue["attempts"])
+        self.assertIsNone(queue["lease_owner"])
+        self.assertIsNone(queue["lease_until"])
 
     def test_current_processing_result_promotes_atomically_and_rejects_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

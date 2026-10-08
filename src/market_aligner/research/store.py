@@ -107,12 +107,17 @@ _PROMOTION_TRANSITION_FIELDS = frozenset(
         "job_key",
         "track",
         "source_sha256",
+        "processing_config_sha256",
         "receipt_sha256",
         "receipt_bytes",
     }
 )
 _PROMOTION_TRANSITION_IDENT_FIELDS = ("profile_id", "job_key", "track")
-_PROMOTION_TRANSITION_HASH_FIELDS = ("source_sha256", "receipt_sha256")
+_PROMOTION_TRANSITION_HASH_FIELDS = (
+    "source_sha256",
+    "processing_config_sha256",
+    "receipt_sha256",
+)
 _PROMOTION_TRANSITION_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -140,7 +145,7 @@ def choose_processing_promotion_transition(
     publication_exists: bool,
     research_lease_active: bool,
 ) -> str:
-    """Choose an insert, exact replay or source-and-receipt supersede."""
+    """Choose an insert, exact replay or validated supersede."""
 
     if type(publication_exists) is not bool or type(research_lease_active) is not bool:
         raise ValueError("promotion transition refused")
@@ -156,10 +161,15 @@ def choose_processing_promotion_transition(
     if existing == proposed:
         return "replay"
     if (
-        existing["source_sha256"] == proposed["source_sha256"]
-        or existing["receipt_sha256"] == proposed["receipt_sha256"]
+        existing["receipt_sha256"] == proposed["receipt_sha256"]
         or publication_exists
         or research_lease_active
+    ):
+        raise ValueError("promotion transition refused")
+    if (
+        existing["source_sha256"] == proposed["source_sha256"]
+        and existing["processing_config_sha256"]
+        == proposed["processing_config_sha256"]
     ):
         raise ValueError("promotion transition refused")
     return "supersede"
@@ -171,6 +181,7 @@ def _promotion_transition_record(row: sqlite3.Row) -> dict[str, object]:
         "job_key": row["job_key"],
         "track": row["track"],
         "source_sha256": row["source_content_sha256"],
+        "processing_config_sha256": row["processing_config_sha256"],
         "receipt_sha256": row["receipt_sha256"],
         "receipt_bytes": bytes(row["receipt_bytes"]),
     }
@@ -1838,6 +1849,7 @@ class AssessmentStore:
                 "job_key": job_key,
                 "track": track,
                 "source_sha256": source_content_sha256,
+                "processing_config_sha256": processing_config_sha256,
                 "receipt_sha256": receipt_sha256,
                 "receipt_bytes": receipt_bytes,
             }
