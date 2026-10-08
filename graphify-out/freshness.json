@@ -1,11 +1,11 @@
 {
-  "community_count": 30067,
-  "edge_count": 77864,
-  "node_count": 57711,
+  "community_count": 30052,
+  "edge_count": 77872,
+  "node_count": 57714,
   "outputs": {
-    ".graphify_labels.json": "1e4ee65aca1e2cb78dcd04dd033a813dd2ba57ea267b836995a001a3fab2a50c",
-    "GRAPH_REPORT.md": "1530b6a5ae8881d2776df9f3645dcb7603f53d8b770f123f3e35f28e0a960413",
-    "graph.json": "194c8f6434f18e21c20ebbff349613d6314690b416692fd2b60ba06f33833e1b"
+    ".graphify_labels.json": "cecfff1875bfb8db124f4149504014de5b96e3c50cab8862b2117c18f0e75ae8",
+    "GRAPH_REPORT.md": "8dfd7a383842239bbf831c1ff81c93b374277c7b1ea178accb835774ffc59af1",
+    "graph.json": "b7cf92991a6bca20386683a2f3879e219d23a061c32a358659e02b97f38e31f9"
   },
   "release_authority": false,
   "schema": "market-aligner.graphify-freshness.v1",
@@ -14,7 +14,7 @@
     "note": "Graphify token metering was unavailable for this local rebuild.",
     "output": 0
   },
-  "source_base_commit": "4675e87674b0b6dae55b3e8076071bf62677acc8",
+  "source_base_commit": "6bf664f96b087eeea81ba0037bc55685eb99df6e",
   "sources": {
     ".github/workflows/jaa-operational-gates.yml": "c432549c7f0e6f0b7307b45be69baa946b11bee693bacde652358233eeeb5c70",
     ".gitignore": "f3a6b324a75d79a9297b01c32c7907a63488d2718072bd488e2235d386b9eda9",
@@ -773,9 +773,9 @@
     "src/market_aligner/integrations/__init__.py": "c90774f2e629925d5887af80d407b002b29ac8717736f55cee9a3f02f73d16d8",
     "src/market_aligner/integrations/orchestrator.py": "19f51098196b2cb24aec4a4d3c013835b873b58b300fcf63a0a283d43ce95cfd",
     "src/market_aligner/llm/__init__.py": "2ea86f8e0e07b357c5df697ce1a76ced7825431ea98f783f97ca066be837fff6",
-    "src/market_aligner/llm/codex_gateway.py": "53d364577dd931e501bb674393560c2552031a9fb630b551f4fc484a1d346148",
+    "src/market_aligner/llm/codex_gateway.py": "724d2067ce857d788b09523da7026e7ff517c2e0cda1633ed14a3e59bb4e198d",
     "src/market_aligner/llm/contracts.py": "cba01af90d17c11d246027acdd3def6a9e49c21211b7d2492d36e8ba830a4e11",
-    "src/market_aligner/llm/pipeline.py": "3a641faca291d6ba159ba3911d8b94fccc2b8dc6268c1d267509e12f112d0c81",
+    "src/market_aligner/llm/pipeline.py": "e5c063f0a2ef5864b84b6444fc4241f6c9bd24d9545653906c8d5ee8a56ac33b",
     "src/market_aligner/llm/structured.py": "9182fdfe0541ba70e7f96502cf271406d9e10978a84700e81b8119f4815f9a47",
     "src/market_aligner/normalisation/__init__.py": "b1650ff2aafbda22ea78530df3f5604b68e033c7f07ddd94e80bb642e6373878",
     "src/market_aligner/normalisation/deduplication.py": "c7ca03c2e1cce88c50f3b6c356c07cc0fea6e5ff7531304e3b58561f9cb3598a",
@@ -840,7 +840,7 @@
     "tests/test_jaa_events_v1.py": "98edfd1fb21ffd9f1bacde30b027d70a360cba2d177e4197708660042f2dc2b0",
     "tests/test_legacy_import.py": "00ce475704bf5ba829683365437c43c9804cd32b1d1e812832fcc71741ba1915",
     "tests/test_lineage.py": "322e19db7cf892a373fede67fa36eb1f2c3771aacd9d7cf057c9f6de4f1ada23",
-    "tests/test_llm_pipeline.py": "356cacac2cd4e1db8209c09de723ff40b4f62fc9bacfee5152046993a24e04ba",
+    "tests/test_llm_pipeline.py": "7b1d31aabcc254f1123cc0688faa4d21d30391368ad0b48d583289aa94b8a583",
     "tests/test_market_aligner_jaa_handoff.py": "db5b273b3864b35ebb15bb030a9b7130792999af6204e08faf933c3be3499f63",
     "tests/test_migration_ledger.py": "c68796958547de9caeff93c0f7ba9c169d723eb8b9826b2b96602171bb13baa2",
     "tests/test_migrations.py": "e968fa4158bd4fc6521512007f5ae2659c3b094fdefeba95fa60b0be45de900f",

@@ -477,7 +477,7 @@ class LLMPipelineTests(unittest.TestCase):
             "exact top-level content_sha256 input value", runner.calls[0][1]["input"]
         )
         self.assertEqual("market-aligner.codex-extraction.v3", EXTRACTION_PROMPT_VERSION)
-        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v5"))
+        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v6"))
         self.assertEqual(EXTRACTION_PROMPT_VERSION, receipts[0].prompt_version)
 
     def test_gateway_rejects_invalid_source_digest_without_invocation(self) -> None:
@@ -719,13 +719,21 @@ class LLMPipelineTests(unittest.TestCase):
         self.assertEqual("minimum_years_experience", facts.source_evidence[0].field)
         self.assertEqual(1, len(runner.calls))
         self.assertEqual(VACANCY_ELIGIBILITY_PROMPT_VERSION, receipt.prompt_version)
-        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v5"))
+        self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v6"))
         self.assertIn(
             "distributed working within the UK",
             _PROMPTS["vacancy_eligibility_facts"],
         )
         self.assertIn(
             "Leave required_residence null",
+            _PROMPTS["vacancy_eligibility_facts"],
+        )
+        self.assertIn(
+            "a value whose casefolded label is ‘full-time’, ‘full time’, ‘part-time’, or ‘part time’",
+            _PROMPTS["vacancy_eligibility_facts"],
+        )
+        self.assertIn(
+            "quote the exact original value characters, character-for-character, without normalizing the quote",
             _PROMPTS["vacancy_eligibility_facts"],
         )
         self.assertIn("one exact metadata record named ‘Time Type’", _PROMPTS["vacancy_eligibility_facts"])
@@ -1796,7 +1804,9 @@ class VacancyEligibilityContractTests(unittest.TestCase):
     def test_greenhouse_time_type_metadata_is_source_bound_and_narrow(self) -> None:
         for contract_type, quote in (
             ("full_time", "full-time"),
+            ("full_time", "Full time"),
             ("part_time", "part-time"),
+            ("part_time", "Part time"),
         ):
             with self.subTest(contract_type=contract_type):
                 raw, facts, receipt, inputs = self._bound_time_type_case(
@@ -1822,6 +1832,9 @@ class VacancyEligibilityContractTests(unittest.TestCase):
                 ]
             },
             {"value": "part_time", "quote": "full-time"},
+            {"value": "full_time", "quote": "full_time"},
+            {"value": "full_time", "quote": "Full_time"},
+            {"value": "full_time", "quote": "Full time "},
             {"value": "contract", "quote": "contract"},
             {"board": "lever"},
             {
@@ -1833,6 +1846,84 @@ class VacancyEligibilityContractTests(unittest.TestCase):
         for case in rejected_cases:
             with self.subTest(case=case):
                 raw, facts, receipt, inputs = self._bound_time_type_case(**case)
+                with self.assertRaises(ContractValidationError):
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    )
+
+    def test_greenhouse_time_type_keeps_exact_string_guards(self) -> None:
+        class TextSubclass(str):
+            pass
+
+        listing = {
+            "metadata": [
+                {"name": "Time Type", "value_type": "single_select", "value": "Full time"}
+            ]
+        }
+        self.assertFalse(
+            supports_greenhouse_time_type(
+                TextSubclass("greenhouse"), "full_time", "Full time", listing
+            )
+        )
+        self.assertFalse(
+            supports_greenhouse_time_type(
+                "greenhouse", TextSubclass("full_time"), "Full time", listing
+            )
+        )
+        self.assertFalse(
+            supports_greenhouse_time_type(
+                "greenhouse", "full_time", TextSubclass("Full time"), listing
+            )
+        )
+        subclass_value = {
+            "metadata": [
+                {
+                    "name": "Time Type",
+                    "value_type": "single_select",
+                    "value": TextSubclass("Full time"),
+                }
+            ]
+        }
+        self.assertFalse(
+            supports_greenhouse_time_type(
+                "greenhouse", "full_time", "Full time", subclass_value
+            )
+        )
+
+    def test_work_jurisdiction_accepts_exact_spaced_hyphen_location(self) -> None:
+        for country_code, quote in (
+            ("GB", "London - United Kingdom"),
+            ("GB", "London - UK"),
+        ):
+            with self.subTest(country_code=country_code, quote=quote):
+                raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+                    code=country_code,
+                    quote=quote,
+                    description=quote,
+                    location_name=quote,
+                    offices=None,
+                )
+                self.assertEqual(
+                    facts,
+                    accept_vacancy_eligibility_facts(
+                        raw, facts, receipt, inputs=inputs
+                    ),
+                )
+
+    def test_work_jurisdiction_spaced_hyphen_keeps_country_refusals(self) -> None:
+        for code, quote in (
+            ("GB", "London - Germany"),
+            ("GB", "London - ZZ"),
+            ("GB", "not in London - United Kingdom"),
+        ):
+            with self.subTest(code=code, quote=quote):
+                raw, facts, receipt, inputs = self._bound_jurisdiction_case(
+                    code=code,
+                    quote=quote,
+                    description=quote,
+                    location_name=quote,
+                    offices=None,
+                )
                 with self.assertRaises(ContractValidationError):
                     accept_vacancy_eligibility_facts(
                         raw, facts, receipt, inputs=inputs

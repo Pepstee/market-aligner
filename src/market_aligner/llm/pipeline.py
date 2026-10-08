@@ -213,8 +213,8 @@ _CONTRACT_QUOTE_PATTERNS = {
     "temporary": (re.compile(r"this is a temporary position\.?"),),
 }
 _GREENHOUSE_TIME_TYPE_VALUES = {
-    "full_time": "full-time",
-    "part_time": "part-time",
+    "full_time": ("full-time", "full time"),
+    "part_time": ("part-time", "part time"),
 }
 
 
@@ -243,7 +243,7 @@ def supports_greenhouse_time_type(
     value = record.get("value")
     if type(value) is not str or quote != value:
         return False
-    return value.casefold() == _GREENHOUSE_TIME_TYPE_VALUES[contract_type]
+    return value.casefold() in _GREENHOUSE_TIME_TYPE_VALUES[contract_type]
 
 
 def quote_supports_eligibility(field: str, value: object, quote: object) -> bool:
@@ -374,7 +374,9 @@ def _structured_work_country_quote_supports(
     if has_scope_marker(location_name) or has_scope_marker(quote):
         return False
 
-    location_parts = [part.strip() for part in location_name.split(",")]
+    location_parts = [
+        part.strip() for part in location_name.replace(" - ", ",").split(",")
+    ]
     if any(not part for part in location_parts):
         return False
     if any(
