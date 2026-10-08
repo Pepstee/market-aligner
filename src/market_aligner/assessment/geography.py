@@ -160,13 +160,13 @@ def explicit_country_code(value: str) -> str | None:
 
 
 def retained_location_country(raw_country: object, location: str) -> str:
-    """Reconcile explicit collector country with comma-separated location facts."""
+    """Reconcile explicit collector country with delimited location facts."""
     explicit = None
     if raw_country is not None:
         explicit = explicit_country_code(raw_country)
         if explicit is None:
             raise SelectionBlocked("location_country_unknown", "collector country is unsupported or ambiguous")
-    named = {code for part in location.split(",")
+    named = {code for part in location.replace(" - ", ",").split(",")
              if (code := explicit_country_code(part)) is not None}
     if explicit is not None:
         named.add(explicit)

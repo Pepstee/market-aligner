@@ -756,9 +756,16 @@ def test_retained_country_uses_explicit_evidence_without_region_guessing():
     assert retained_location_country("Germany", "Berlin, Europe") == "DE"
     assert retained_location_country(None, "Berlin, Germany, Europe") == "DE"
     assert retained_location_country("DE", "Berlin, Germany") == "DE"
+    assert retained_location_country(None, "Example City - United Kingdom") == "GB"
+    assert retained_location_country(None, "Example City - Germany") == "DE"
+    assert retained_location_country("GB", "Example City - United Kingdom") == "GB"
     for country, location in ((None, "Europe"), (None, "Berlin"),
                               ("Europe", "Berlin"), ("Germany", "Paris, France"),
-                              (None, "Germany, France")):
+                              (None, "Germany, France"),
+                              ("DE", "Example City - United Kingdom"),
+                              (None, "Example City - United Kingdom, Germany"),
+                              (None, "Example City -United Kingdom"),
+                              (None, "Example City–United Kingdom")):
         with pytest.raises(SelectionBlocked):
             retained_location_country(country, location)
 
