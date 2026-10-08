@@ -23,9 +23,17 @@ Live shape (confirmed):
             "keyword","salary":{"name"},"posting-date","expiration-date"}]}}
     entry_level = experience-level.code in (1 신입, 0 경력무관) OR min == 0.
 
-The access key is read from the env var named by config saramin.access_key_env
-(SARAMIN_ACCESS_KEY); it is NEVER hardcoded. The Open API returns list metadata
-only (no full JD body), so the live fetch sets raw_json to the job object.
+Detail fetching has two modes, selected by config ``saramin.detail_mode``:
+
+    api     (default) re-query the Open API for per-job metadata; raw_json
+            holds the job object, no full JD body (backward compatible).
+    browser render the public detail page with Playwright (scoped
+            sync_playwright per fetch; no extra API call, no API key needed
+            for the fetch itself) and put the rendered HTML (>=200 chars)
+            into raw_text, with rendered_title and a source label in raw_json.
+
+Discovery always uses the official Open API and requires the access key;
+a missing key raises rather than silently succeeding, in either mode.
 
 ``requests`` is lazy-imported only on the live branch, so the module imports and
 the fixture-driven self-test runs with no third-party dependency installed.
@@ -42,11 +50,22 @@ SARAMIN_OAPI = "https://oapi.saramin.co.kr/job-search"
 DEFAULT_DESIGN_JOB_MID_CD = "2"
 DEFAULT_COUNT = 110
 DEFAULT_ACCESS_KEY_ENV = "SARAMIN_ACCESS_KEY"
+DETAIL_MODES = ("api", "browser")
+DEFAULT_DETAIL_MODE = "api"
 
 
 @register
 class SaraminAdapter(Adapter):
     board = "saramin"
+
+    def _detail_mode(self) -> str:
+        cfg = self._board_config()
+        mode = str(cfg.get("detail_mode", DEFAULT_DETAIL_MODE)).strip().lower()
+        if mode not in DETAIL_MODES:
+            raise ValueError(
+                f"[saramin] invalid detail_mode {mode!r}; expected one of {DETAIL_MODES}"
+            )
+        return mode
 
     # ------------------------------------------------------------------ #
     # FIXTURE path (live=False) — used by tests.
@@ -80,6 +99,9 @@ class SaraminAdapter(Adapter):
 
     def fetch(self, job_url: JobUrl, live: bool = False) -> RawPosting:
         if live:
+            mode = self._detail_mode()
+            if mode == "browser":
+                return self._fetch_live_browser(job_url)
             return self._fetch_live(job_url)
         detail = self._load_detail(job_url.job_id)
         return RawPosting(
@@ -96,7 +118,7 @@ class SaraminAdapter(Adapter):
     # ------------------------------------------------------------------ #
     def _discover_live(self, terms: list[str]) -> Iterable[JobUrl]:
         """Query the Open API per keyword under the design job-mid category,
-        paginate, and yield C1 JobUrl records. Bad/missing key -> graceful stop.
+        paginate, and yield C1 JobUrl records. A missing key raises a collection error.
         """
         import requests  # lazy: only imported on the live branch
 
@@ -105,9 +127,9 @@ class SaraminAdapter(Adapter):
         key_env = cfg.get("access_key_env") or DEFAULT_ACCESS_KEY_ENV
         access_key = os.environ.get(key_env)
         if not access_key:
-            # No key -> nothing to discover. Surface a clear message; don't crash.
-            print(f"[saramin] missing access key: set env {key_env}. Skipping saramin.")
-            return
+            raise RuntimeError(
+                f"[saramin] missing access key: export {key_env} before collection"
+            )
         job_mid_cd = str(cfg.get("design_job_mid_cd", DEFAULT_DESIGN_JOB_MID_CD))
         count = int(cfg.get("count", DEFAULT_COUNT))
 
@@ -218,4 +240,52 @@ class SaraminAdapter(Adapter):
             url=job_url.url,
             fetched_at=contracts_now(),
             raw_json=job_obj,   # NOTE full JD requires page fetch
+        )
+
+    def _fetch_live_browser(self, job_url: JobUrl) -> RawPosting:
+        """Render the public detail page (detail_mode=browser). No API key needed
+        for this fetch; discovery already used the official API. Scoped browser
+        per call: canonical workers run in parallel, so a shared persistent page
+        is unsafe. Absent selectors are skipped rather than waited out.
+        """
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(user_agent=USER_AGENT)
+                page.goto(job_url.url, wait_until="domcontentloaded", timeout=45000)
+                try:
+                    page.wait_for_selector("body", timeout=30000)
+                except Exception:
+                    pass
+                html = None
+                for selector in ("main", "#content", ".wrap_jv_cont", ".jv_cont", "body"):
+                    try:
+                        if not page.locator(selector).count():
+                            continue
+                        candidate = page.inner_html(selector)
+                    except Exception:
+                        continue
+                    if candidate and len(candidate) >= 200:
+                        html = candidate
+                        break
+                if not html:
+                    raise RuntimeError(f"Saramin detail body missing for {job_url.job_id}")
+                job_obj: dict[str, Any] = {
+                    "id": job_url.job_id,
+                    "url": job_url.url,
+                    "rendered_title": page.title(),
+                    "source": "saramin_open_api+playwright",
+                }
+            finally:
+                browser.close()
+
+        return RawPosting(
+            board=self.board,
+            job_id=job_url.job_id,
+            url=job_url.url,
+            fetched_at=contracts_now(),
+            raw_json=job_obj,
+            raw_text=html,
         )

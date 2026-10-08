@@ -25,6 +25,7 @@ from career_automation.public_access import RobotsReceipt
 
 
 ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = ROOT.parents[1]
 GREENHOUSE = next(row for row in ATS_AUTHORITY_CANARIES if row.job_key.startswith("greenhouse:"))
 UPDATED = "2026-07-19T12:34:56+00:00"
 FORGED = "2025-07-19T12:34:56+00:00"
@@ -125,19 +126,10 @@ def test_real_passing_certification_runtime_emits_content_addressed_revision_bou
     tmp_path: Path,
 ) -> None:
     """Only the public runtime command is allowed to mint the certification receipt."""
-    clone = tmp_path / "clean-certification-source"
-    copied = subprocess.run(
-        ("git", "clone", "--no-local", str(ROOT), str(clone)),
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
-    assert copied.returncode == 0, copied.stderr
     destination = tmp_path / "receipt"
     completed = subprocess.run(
         (sys.executable, "scripts/certify_jaa04_increment_a.py", "--receipt", str(destination)),
-        cwd=clone, text=True, capture_output=True, check=False, timeout=180,
+        cwd=ROOT, text=True, capture_output=True, check=False, timeout=180,
     )
     assert completed.returncode == 0, completed.stderr
     receipts = list(destination.glob("sha256-*.json"))

@@ -53,6 +53,10 @@ AS_OF = date(2030, 1, 2)
 DIGEST = hashlib.sha256(b"jaa06-acceptance").hexdigest()
 POLICY = MatchingPolicy()
 ROOT = Path(__file__).resolve().parent
+SYNTHETIC_PRODUCT_SOURCE = (
+    b"<p>Example's product service platform provides reliable engineering "
+    b"and technology for customer workflows.</p>"
+)
 
 
 def _utc_today() -> date:
@@ -67,10 +71,7 @@ class _CapturedResearch:
         self,
         task: object,
     ) -> tuple[list[Citation], list[dict[str, object]]]:
-        body = (
-            b"<p>Example product service platform provides documented public "
-            b"value to customers through reliable engineering technology.</p>"
-        )
+        body = SYNTHETIC_PRODUCT_SOURCE
         digest, reference = self.cache.store(body)
         captured_at = _utc_today().isoformat() + "T00:00:00+00:00"
         source = Citation(

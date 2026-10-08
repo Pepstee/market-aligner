@@ -272,10 +272,20 @@ def test_editable_outputs_are_single_column_and_preserve_authoritative_values() 
     ):
         assert value in artifacts.cv_text
         assert value in artifacts.cover_letter_text
-    assert (
-        tuple(heading for heading in CV_SECTION_ORDER if heading in artifacts.cv_text)
-        == CV_SECTION_ORDER
+    outward_section_order = (
+        "Professional Summary",
+        "Skills",
+        "Projects",
+        "Education",
+        "Experience",
+        "Highlights",
+        "Results",
+        "Outcomes",
     )
+    rendered_section_order = tuple(
+        line for line in artifacts.cv_text.splitlines() if line in CV_SECTION_ORDER
+    )
+    assert rendered_section_order == outward_section_order
     assert "Example Ltd operates a documented service." in artifacts.cover_letter_text
     assert "Describe a relevant delivery example." in artifacts.answers_text
     assert artifacts.cv_sha256 == hashlib.sha256(artifacts.cv_text.encode()).hexdigest()
@@ -480,8 +490,9 @@ def test_published_artifacts_verify_without_file_changes_and_reject_absence(
         )
 
 
+@pytest.mark.parametrize("cv_layout", ("legacy", "four_section"))
 def test_production_compiler_resolves_vacancy_contact_claim_and_employer_authority(
-    tmp_path: Path,
+    tmp_path: Path, cv_layout: str,
 ) -> None:
     database, run, requirement = _fit_database(tmp_path, matched=True)
     strategy = ApplicationStrategyStore(database.path).compile_and_record(
@@ -539,6 +550,7 @@ def test_production_compiler_resolves_vacancy_contact_claim_and_employer_authori
                 "Describe a relevant delivery example.",
             )
         },
+        cv_layout=cv_layout,
     )
     verify_application_source(source)
     assert source.strategy_id == strategy.strategy_id
@@ -552,11 +564,31 @@ def test_production_compiler_resolves_vacancy_contact_claim_and_employer_authori
     }
     assert all(row.text == row.approved_source_text for row in source.facts)
     rendered = render_editable_text(source)
+    assert "Relevant evidence" not in rendered.cv_text
+    assert "A relevant example follows." not in rendered.answers_text
+    assert all(not section.style_slot_ids for section in source.cv_sections)
+    assert all(not answer.style_slot_ids for answer in source.answers)
+    answer_fact = next(row for row in source.facts if row.document_kind == "answer")
+    assert rendered.answers_text == (
+        f"{source.answers[0].question}\n{answer_fact.text}\n"
+    )
+    summary = next(
+        section for section in source.cv_sections
+        if section.heading == "Professional Summary"
+    )
+    assert all(
+        next(row for row in source.facts if row.sentence_id == sentence_id).text
+        in rendered.cv_text
+        for sentence_id in summary.sentence_ids
+    )
     for fact in source.facts:
         if fact.document_kind == "cover_letter":
             assert rendered.cover_letter_text.count(fact.text) == 1
     artifacts = render_pdf_artifacts(source)
     assert artifacts.cv_pdf.page_count == 1
+    assert "Relevant evidence" not in "\n".join(
+        line for page in artifacts.cv_pdf.rendered_lines for line in page
+    )
     assert artifacts.cover_letter_pdf.page_count == 1
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -9,49 +10,347 @@ from types import SimpleNamespace
 import pytest
 
 from career_automation.adversarial_recruiter import (
-    RESULT_SCHEMA_VERSION,
     RecruiterAssessmentReceipt,
     assess_application_as_recruiter,
 )
 from career_automation.application_compiler import DocumentSection, StyleSlot
+from career_automation.candidate_application_factory import (
+    CURRENT_RUNTIME_ENVIRONMENT,
+    CandidateApplicationMaterializationReceipt,
+)
+from career_automation.rendering import CV_SECTION_HEADINGS, render_pdf_artifacts
 from career_automation.handoff_admission import (
     HandoffAdmissionError,
     VerifiedApplicationInput,
 )
 from career_automation.market_aligner_preparation import (
+    _prepare_admitted_market_application,
     prepare_admitted_market_application,
     prepare_admitted_market_application_from_authorities,
 )
+import career_automation.market_aligner_preparation as market_aligner_preparation
 from career_automation.production_recruiter_assessor import (
     ProductionDetachedRecruiterAssessor,
     ProductionRecruiterAssessorError,
 )
+from career_automation.testing_adversarial_recruiter import (
+    fixture_recruiter_result,
+)
 from career_automation.candidate_contact_authority import CandidateContactAuthority
 from career_automation.evidence_matching import content_hash
 from cv_generation.adversarial_rebuild import bind_recruiter_improvement
-from cv_generation.constraints import CVConstraintReceipt
+from cv_generation.constraints import (
+    CVConstraintError,
+    CVConstraintReceipt,
+    CandidateSourcePolicyReceipt,
+    validate_generated_cv,
+)
 from cv_generation.benchmark_learning import (
     CVBenchmarkEntry,
     CVBenchmarkFeatures,
     build_benchmark_manifest,
 )
 from cv_generation.editorial_composition import (
+    ApprovedCoverLetterClaim,
     ApprovedCVClaim,
     CVSection,
     CandidateEditorialAuthority,
+    CoverLetterSection,
     EditorialAtom,
+    EditorialCompositionError,
     EditorialStageEvidence,
+    build_cover_letter_editorial_draft,
+    build_cover_letter_editorial_request,
     build_editorial_draft,
     build_editorial_request,
+    COVER_LETTER_SALUTATION,
+    COVER_LETTER_SIGN_OFF,
+    editorial_section_policy,
     humanizer_request_sha256,
 )
 from cv_generation.service import (
+    BASE_CV_POLICY,
     CVCompositionServiceError,
+    _source_for_cover_letter_draft,
+    _validate_artifact_cv,
     _reidentify_source,
+    _source_for_editorial_draft,
     run_cv_composition_orchestration,
 )
 from llm.client import Backend, LLMClient, LLMResponse
 from test_jaa07_independent_acceptance import _source
+
+
+def _synthetic_current_materialization_receipt(source, monkeypatch):
+    monkeypatch.setattr(
+        CandidateApplicationMaterializationReceipt,
+        "__post_init__",
+        lambda self: None,
+    )
+    receipt = object.__new__(CandidateApplicationMaterializationReceipt)
+    object.__setattr__(
+        receipt,
+        "deployment_binding",
+        SimpleNamespace(environment=CURRENT_RUNTIME_ENVIRONMENT),
+    )
+    object.__setattr__(receipt, "application_source_id", source.source_id)
+    object.__setattr__(receipt, "application_source_sha256", source.content_sha256)
+    object.__setattr__(receipt, "receipt_sha256", "f" * 64)
+    return receipt
+
+
+def _current_cover_projection_case(monkeypatch, *, employer_text: str | None = None):
+    source, _ = _source()
+    candidate_fact = next(
+        fact
+        for fact in source.facts
+        if fact.document_kind == "cover_letter" and fact.fact_kind == "candidate"
+    )
+    employer_fact = next(
+        fact
+        for fact in source.facts
+        if fact.document_kind == "cover_letter" and fact.fact_kind == "employer"
+    )
+    authority = CandidateEditorialAuthority(
+        candidate_name=source.contact.full_name,
+        candidate_city=source.contact.city,
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+        current_runtime=True,
+    )
+    claims = (
+        ApprovedCoverLetterClaim(
+            claim_id=candidate_fact.sentence_id,
+            text=candidate_fact.text,
+            text_sha256=hashlib.sha256(candidate_fact.text.encode()).hexdigest(),
+            evidence_ids=(candidate_fact.sentence_id,),
+            fact_kind="candidate",
+            section_heading="Evidence Match",
+        ),
+        ApprovedCoverLetterClaim(
+            claim_id=employer_fact.sentence_id,
+            text=employer_fact.text,
+            text_sha256=hashlib.sha256(employer_fact.text.encode()).hexdigest(),
+            evidence_ids=(employer_fact.sentence_id,),
+            fact_kind="employer",
+            section_heading="Company Fit",
+        ),
+    )
+    request = build_cover_letter_editorial_request(
+        authority=authority,
+        role_title=source.role_title,
+        company_name=source.company_name,
+        vacancy_sha256=source.vacancy_sha256,
+        approved_claims=claims,
+    )
+    sections = (
+        CoverLetterSection(
+            "Opening",
+            (
+                EditorialAtom("connective", COVER_LETTER_SALUTATION),
+                EditorialAtom(
+                    "connective",
+                    f"I am applying for the {source.role_title} role at {source.company_name}.",
+                ),
+            ),
+            current_runtime=True,
+        ),
+        CoverLetterSection(
+            "Evidence Match",
+            (EditorialAtom("approved_claim", candidate_fact.text, candidate_fact.sentence_id),),
+            current_runtime=True,
+        ),
+        CoverLetterSection(
+            "Company Fit",
+            (
+                EditorialAtom(
+                    "approved_claim",
+                    employer_text or employer_fact.text,
+                    employer_fact.sentence_id,
+                ),
+            ),
+            current_runtime=True,
+        ),
+        CoverLetterSection(
+            "Close",
+            (
+                EditorialAtom("connective", "Thank you for considering my application."),
+                EditorialAtom("connective", COVER_LETTER_SIGN_OFF),
+                EditorialAtom("connective", source.contact.full_name),
+            ),
+            current_runtime=True,
+        ),
+    )
+    draft = build_cover_letter_editorial_draft(
+        candidate_name=source.contact.full_name,
+        sections=sections,
+        current_runtime=True,
+    )
+    receipt = _synthetic_current_materialization_receipt(source, monkeypatch)
+    return source, request, draft, receipt, employer_fact
+
+
+def test_current_cover_projection_keeps_unchanged_employer_fact(monkeypatch) -> None:
+    source, request, draft, receipt, employer_fact = _current_cover_projection_case(
+        monkeypatch
+    )
+
+    projected = _source_for_cover_letter_draft(
+        base_source=source,
+        request=request,
+        draft=draft,
+        materialization_receipt=receipt,
+        materialized_source=source,
+    )
+
+    projected_employer = next(
+        fact for fact in projected.facts if fact.sentence_id == employer_fact.sentence_id
+    )
+    assert projected_employer.text == employer_fact.approved_source_text
+    assert projected_employer.pending_current_outward_draft is None
+
+
+def test_current_cover_projection_rejects_changed_employer_fact(monkeypatch) -> None:
+    source, request, draft, receipt, _ = _current_cover_projection_case(
+        monkeypatch, employer_text="Example Ltd has a different unverified claim."
+    )
+
+    with pytest.raises(
+        EditorialCompositionError, match="cover-letter draft changed or invented a claim"
+    ):
+        _source_for_cover_letter_draft(
+            base_source=source,
+            request=request,
+            draft=draft,
+            materialization_receipt=receipt,
+            materialized_source=source,
+        )
+
+
+def test_current_pre_review_filters_archive_arguments_for_service_only(
+    monkeypatch, tmp_path
+) -> None:
+    candidate_authority_bytes = b"synthetic candidate authority\n"
+    candidate_authority_sha256 = hashlib.sha256(candidate_authority_bytes).hexdigest()
+    contact_authority_bytes = b"synthetic contact authority\n"
+    contact_authority_sha256 = hashlib.sha256(contact_authority_bytes).hexdigest()
+    listing_text = "Synthetic public listing"
+    request = SimpleNamespace(
+        authority=SimpleNamespace(source_sha256=candidate_authority_sha256),
+        vacancy_sha256=hashlib.sha256(listing_text.encode()).hexdigest(),
+    )
+    base_source = SimpleNamespace(
+        contact=SimpleNamespace(provenance_sha256=contact_authority_sha256)
+    )
+    archive_values = {
+        "candidate_projection": {"projection": "exact"},
+        "decision_receipt": {"decision": "exact"},
+        "market_decision_authority": {"authority": "exact"},
+        "materialization": {"source": "exact"},
+    }
+    orchestration_arguments = {
+        "request": request,
+        "writer_draft": object(),
+        "humanized_draft": object(),
+        "writer_evidence": object(),
+        "humanizer_evidence": object(),
+        "base_source": base_source,
+        "listing_text": listing_text,
+        "form_fields": (),
+        "bindings": (),
+        "materialization_receipt": object(),
+        "cover_letter_request": object(),
+        "cover_letter_writer_draft": object(),
+        "cover_letter_humanized_draft": object(),
+        "cover_letter_writer_evidence": object(),
+        "cover_letter_humanizer_evidence": object(),
+        **archive_values,
+    }
+    service_signature = inspect.signature(run_cv_composition_orchestration)
+    current_options = {
+        "environment": market_aligner_preparation.CURRENT_RUNTIME_ENVIRONMENT,
+        "current_runtime_pre_review": True,
+    }
+    with pytest.raises(TypeError, match="unexpected keyword argument 'candidate_projection'"):
+        service_signature.bind(**orchestration_arguments, **current_options)
+
+    captured: dict[str, object] = {}
+    composition_result = object()
+    preparation_result = object()
+
+    def compose(**kwargs):
+        service_signature.bind(**kwargs)
+        captured["service_arguments"] = kwargs
+        return composition_result
+
+    def persist(**kwargs):
+        captured["persistence_arguments"] = kwargs
+        return preparation_result
+
+    class _Store:
+        def for_boundary(self, application_id, boundary):
+            assert application_id == "app_synthetic"
+            assert boundary == "strategy"
+            return SimpleNamespace(
+                environment=market_aligner_preparation.CURRENT_RUNTIME_ENVIRONMENT
+            )
+
+    monkeypatch.setattr(
+        market_aligner_preparation, "run_cv_composition_orchestration", compose
+    )
+    monkeypatch.setattr(
+        market_aligner_preparation, "_persist_current_runtime_drafts", persist
+    )
+    result = _prepare_admitted_market_application(
+        admission_store=_Store(),
+        application_id="app_synthetic",
+        repository_root=tmp_path / "repo",
+        data_home=tmp_path / "data-home",
+        candidate_authority_bytes=candidate_authority_bytes,
+        candidate_authority_sha256=candidate_authority_sha256,
+        contact_authority_bytes=contact_authority_bytes,
+        contact_authority_sha256=contact_authority_sha256,
+        orchestration_arguments=orchestration_arguments,
+        environment=market_aligner_preparation.CURRENT_RUNTIME_ENVIRONMENT,
+        current_runtime_pre_review=True,
+    )
+
+    assert result is preparation_result
+    service_arguments = captured["service_arguments"]
+    assert isinstance(service_arguments, dict)
+    assert not (set(archive_values) & set(service_arguments))
+    assert service_arguments["materialization_receipt"] is orchestration_arguments[
+        "materialization_receipt"
+    ]
+    assert service_arguments["environment"] == current_options["environment"]
+    assert service_arguments["current_runtime_pre_review"] is True
+    persistence_arguments = captured["persistence_arguments"]
+    assert isinstance(persistence_arguments, dict)
+    assert persistence_arguments["orchestration_arguments"] is orchestration_arguments
+    for key, value in archive_values.items():
+        assert persistence_arguments["orchestration_arguments"][key] is value
+
+    unrecognized_arguments = {
+        **orchestration_arguments,
+        "future_service_option": object(),
+    }
+    with pytest.raises(
+        TypeError, match="unexpected keyword argument 'future_service_option'"
+    ):
+        _prepare_admitted_market_application(
+            admission_store=_Store(),
+            application_id="app_synthetic",
+            repository_root=tmp_path / "repo",
+            data_home=tmp_path / "data-home",
+            candidate_authority_bytes=candidate_authority_bytes,
+            candidate_authority_sha256=candidate_authority_sha256,
+            contact_authority_bytes=contact_authority_bytes,
+            contact_authority_sha256=contact_authority_sha256,
+            orchestration_arguments=unrecognized_arguments,
+            environment=market_aligner_preparation.CURRENT_RUNTIME_ENVIRONMENT,
+            current_runtime_pre_review=True,
+        )
 
 
 class _ScriptedRecruiterBackend(Backend):
@@ -84,21 +383,14 @@ class _InjectedAssessor:
 
 
 def _recruiter_result() -> dict[str, object]:
-    reaction = {
-        "progression_probability_percent": 54,
-        "verdict": "borderline",
-        "reasons": ["The evidence is relevant but compact."],
-    }
-    return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "calibration_status": "uncalibrated",
-        "fit_percent": 53,
-        "fit_range_percent": {"low": 40, "high": 65},
-        "overall_verdict": "plausible_fit",
-        "ats_reaction": reaction,
-        "human_reaction": reaction,
+    value = fixture_recruiter_result(fit_percent=53)
+    value.update({
         "strengths": [
-            {"location": "cv:summary", "assessment": "Reliable delivery evidence."}
+            {
+                "location": "cv:summary",
+                "assessment": "Reliable delivery evidence.",
+                "outward_evidence_refs": ["cv:char:0:1"],
+            }
         ],
         "risks": [
             {
@@ -106,18 +398,25 @@ def _recruiter_result() -> dict[str, object]:
                 "severity": "medium",
                 "location": "cv",
                 "assessment": "The application has limited production scale detail.",
+                "outward_evidence_refs": ["cv:char:0:1"],
             }
         ],
         "application_improvements": [
             {
+                "rank": 1,
                 "target": "positioning",
                 "recommendation": "Keep the reliable delivery evidence prominent.",
                 "expected_effect": "Preserves the clearest role match.",
+                "support_required": False,
+                "outward_evidence_refs": ["cv:char:0:1"],
             },
             {
+                "rank": 2,
                 "target": "cv",
                 "recommendation": "Add unsupported Kubernetes ownership.",
                 "expected_effect": "Would address an unstated platform gap.",
+                "support_required": True,
+                "outward_evidence_refs": ["job_listing:char:0:1"],
             },
         ],
         "profile_improvements": [
@@ -128,7 +427,8 @@ def _recruiter_result() -> dict[str, object]:
                 "expected_effect": "Would strengthen production-depth evidence.",
             }
         ],
-    }
+    })
+    return value
 
 
 def _claim(claim_id: str, category: str) -> ApprovedCVClaim:
@@ -252,6 +552,265 @@ def _fixture(tmp_path):
     )
     assessor = _InjectedAssessor(tmp_path)
     return base_source, listing, request, draft, writer, humanizer, assessor
+
+
+@pytest.mark.parametrize(
+    "heading",
+    (
+        "Highlights",
+        "Results",
+        "Outcomes",
+        "Skills",
+        "Certifications",
+    ),
+)
+def test_current_renderer_projects_and_renders_policy_headings(heading, monkeypatch) -> None:
+    base_source, _ = _source()
+    cv_fact = next(row for row in base_source.facts if row.document_kind == "cv")
+    categories = editorial_section_policy(current_runtime=True)[heading]
+    assert len(categories) == 1
+    category = next(iter(categories))
+    authority = CandidateEditorialAuthority(
+        candidate_name=base_source.contact.full_name,
+        candidate_city=base_source.contact.city,
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+        current_runtime=True,
+    )
+    claim = ApprovedCVClaim(
+        claim_id=cv_fact.sentence_id,
+        text=cv_fact.text,
+        text_sha256=hashlib.sha256(cv_fact.text.encode()).hexdigest(),
+        evidence_ids=(f"synthetic-evidence-{heading.casefold()}",),
+        category=category,
+    )
+    request = build_editorial_request(
+        authority=authority,
+        role_title=base_source.role_title,
+        company_name=base_source.company_name,
+        vacancy_sha256=base_source.vacancy_sha256,
+        approved_claims=(claim,),
+    )
+    draft = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        current_runtime=True,
+        sections=(
+            CVSection(
+                heading,
+                (EditorialAtom("approved_claim", cv_fact.text, claim.claim_id),),
+            ),
+        ),
+    )
+
+    projected = _source_for_editorial_draft(
+        base_source=base_source,
+        request=request,
+        draft=draft,
+        materialization_receipt=_synthetic_current_materialization_receipt(
+            base_source, monkeypatch
+        ),
+    )
+
+    assert tuple(section.heading for section in projected.cv_sections) == (heading,)
+    assert projected.cv_sections[0].sentence_ids == (cv_fact.sentence_id,)
+    artifacts = render_pdf_artifacts(projected)
+    assert f"\n{heading}\n" in artifacts.editable.cv_text
+    assert any(heading in page for page in artifacts.cv_pdf.rendered_lines)
+
+
+def _current_artifact_validation_case(heading: str, monkeypatch):
+    base_source, _ = _source()
+    cv_fact = next(row for row in base_source.facts if row.document_kind == "cv")
+    summary_text = "Synthetic summary evidence supports reliable delivery."
+    section_text = "Synthetic section evidence records validated results."
+    summary_fact = replace(
+        cv_fact,
+        sentence_id=content_hash(
+            {"fixture": "current-summary-validation", "text": summary_text}
+        ),
+        text=summary_text,
+        approved_source_text=summary_text,
+    )
+    section_fact = replace(
+        cv_fact,
+        sentence_id=content_hash(
+            {"fixture": f"current-{heading.casefold()}-validation", "text": section_text}
+        ),
+        text=section_text,
+        approved_source_text=section_text,
+    )
+    base_source = _reidentify_source(
+        replace(base_source, facts=(*base_source.facts, summary_fact, section_fact))
+    )
+    authority = CandidateEditorialAuthority(
+        candidate_name=base_source.contact.full_name,
+        candidate_city=base_source.contact.city,
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+        current_runtime=True,
+    )
+    section_category = next(iter(editorial_section_policy(current_runtime=True)[heading]))
+    claims = (
+        ApprovedCVClaim(
+            claim_id=summary_fact.sentence_id,
+            text=summary_text,
+            text_sha256=hashlib.sha256(summary_text.encode()).hexdigest(),
+            evidence_ids=("evidence:synthetic-summary-validation",),
+            category="summary",
+        ),
+        ApprovedCVClaim(
+            claim_id=section_fact.sentence_id,
+            text=section_text,
+            text_sha256=hashlib.sha256(section_text.encode()).hexdigest(),
+            evidence_ids=(f"evidence:{heading.casefold()}-validation",),
+            category=section_category,
+        ),
+    )
+    request = build_editorial_request(
+        authority=authority,
+        role_title=base_source.role_title,
+        company_name=base_source.company_name,
+        vacancy_sha256=hashlib.sha256(
+            b"Synthetic role description for current validator."
+        ).hexdigest(),
+        approved_claims=claims,
+    )
+    draft = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        current_runtime=True,
+        sections=(
+            CVSection(
+                "Professional Summary",
+                (
+                    EditorialAtom(
+                        "approved_claim", summary_text, summary_fact.sentence_id
+                    ),
+                ),
+            ),
+            CVSection(
+                heading,
+                (
+                    EditorialAtom(
+                        "approved_claim",
+                        section_text,
+                        section_fact.sentence_id,
+                    ),
+                ),
+            ),
+        ),
+    )
+    source = _source_for_editorial_draft(
+        base_source=base_source,
+        request=request,
+        draft=draft,
+        materialization_receipt=_synthetic_current_materialization_receipt(
+            base_source, monkeypatch
+        ),
+    )
+    artifacts = render_pdf_artifacts(source)
+    return request, draft, source, artifacts
+
+
+@pytest.mark.parametrize("heading", ("Skills", "Highlights", "Results", "Outcomes"))
+def test_current_pre_review_cv_validator_uses_current_section_policy(
+    heading, monkeypatch
+) -> None:
+    request, draft, source, artifacts = _current_artifact_validation_case(
+        heading, monkeypatch
+    )
+
+    receipt = _validate_artifact_cv(
+        request=request,
+        draft=draft,
+        source=source,
+        artifacts=artifacts,
+    )
+
+    assert type(receipt) is CandidateSourcePolicyReceipt
+    assert receipt.release_authority is False
+
+
+@pytest.mark.parametrize("heading", ("Skills", "Highlights", "Results", "Outcomes"))
+def test_legacy_cv_validator_keeps_current_headings_refused(heading) -> None:
+    section_text = "Synthetic section evidence records validated results."
+    cv_text = "Synthetic summary evidence.\nSynthetic capability evidence.\n" + section_text
+    sections = {
+        "Professional Summary": ("Synthetic summary evidence.",),
+        "Core Capabilities": ("Synthetic capability evidence.",),
+        heading: (section_text,),
+    }
+
+    with pytest.raises(CVConstraintError, match="non-standard ATS section heading"):
+        validate_generated_cv(
+            source_id="a" * 64,
+            candidate_name="Synthetic Candidate",
+            candidate_city=None,
+            cv_text=cv_text,
+            cv_sha256=hashlib.sha256(cv_text.encode()).hexdigest(),
+            sections=sections,
+            rendered_pages=(("Synthetic Candidate",),),
+            policy=BASE_CV_POLICY,
+        )
+
+
+def test_current_cv_validator_rejects_unregistered_heading() -> None:
+    cv_text = "Synthetic summary evidence.\nSynthetic unknown section evidence."
+    with pytest.raises(CVConstraintError, match="non-standard ATS section heading"):
+        validate_generated_cv(
+            source_id="a" * 64,
+            candidate_name="Synthetic Candidate",
+            candidate_city=None,
+            cv_text=cv_text,
+            cv_sha256=hashlib.sha256(cv_text.encode()).hexdigest(),
+            sections={
+                "Professional Summary": ("Synthetic summary evidence.",),
+                "Unregistered": ("Synthetic unknown section evidence.",),
+            },
+            rendered_pages=(("Synthetic Candidate",),),
+            policy=BASE_CV_POLICY,
+            section_policy=editorial_section_policy(current_runtime=True),
+            _source_policy_only=True,
+        )
+
+
+def test_current_renderer_headings_do_not_expand_legacy_or_unknown_policy() -> None:
+    expected_legacy_headings = frozenset(
+        {
+            "Professional Summary",
+            "Core Capabilities",
+            "Projects",
+            "Education",
+            "Experience",
+            "Skills",
+        }
+    )
+    assert CV_SECTION_HEADINGS == expected_legacy_headings
+    assert "Highlights" not in editorial_section_policy()
+    assert {
+        "Highlights",
+        "Results",
+        "Outcomes",
+        "Skills",
+        "Certifications",
+    } <= set(editorial_section_policy(current_runtime=True))
+
+    atom = EditorialAtom("approved_claim", "Synthetic approved fact.", "claim")
+    with pytest.raises(EditorialCompositionError, match="section heading is unsupported"):
+        CVSection("Unregistered Heading", (atom,))
+    with pytest.raises(EditorialCompositionError, match="editorial draft layout is invalid"):
+        build_editorial_draft(
+            candidate_name="Synthetic Candidate",
+            candidate_city="Synthetic City",
+            sections=(CVSection("Highlights", (atom,)),),
+        )
+
+    legacy_source, _ = _source()
+    legacy_artifacts = render_pdf_artifacts(legacy_source)
+    assert "Professional Summary" in legacy_artifacts.editable.cv_text
 
 
 def _binding(request, recruiter_receipt: RecruiterAssessmentReceipt):

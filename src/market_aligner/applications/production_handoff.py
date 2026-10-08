@@ -3,36 +3,60 @@
 This module replaces operator-authored handoff manifests.  It reads the exact
 profile, processing promotion, vacancy source and employer-research records
 that already own those facts, revalidates their current bindings, and emits a
-non-release protected outbox bundle.  It never calls a model or a provider.
+non-release protected outbox bundle. The explicit current-runtime path may
+create one source-bound policy canary on a cache miss; legacy remains offline.
 """
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
 import sqlite3
 import stat
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from market_aligner.applications.handoff import canonical_json_bytes
+from market_aligner.applications.handoff import (
+    CURRENT_RUNTIME_NON_RELEASE_PROFILE,
+    canonical_json_bytes,
+    parse_current_runtime_handoff_v1,
+    preparation_geography_document,
+    resolve_preparation_geography,
+)
 from market_aligner.applications.producer import (
     HandoffReference,
     WrittenHandoffBundle,
     write_protected_handoff_bundle,
 )
+from market_aligner.assessment.geography import (
+    EU_REMOTE_COUNTRIES,
+    GeographyMatch,
+    SelectionDecision,
+    SelectionBlocked,
+    retained_location_country,
+)
 from market_aligner.assessment.scoring import ScoringParams
+from market_aligner.collectors.evidence import public_listing_bytes
+from market_aligner.profiler.intent import serialize_candidate_intent
+from market_aligner.profiler.current_activation import (
+    PinnedCurrentActivationArtifact,
+    PinnedRecoveryInputs,
+    build_current_candidate_policy_catalog,
+    compile_current_profile_projection,
+    locate_current_activation_artifact,
+    read_current_profile_projection_bundle,
+    read_current_candidate_policy_canary_for_activation,
+    write_current_candidate_policy_canary,
+)
 from market_aligner.research.models import (
-    RESEARCH_ARCHIVE_ROOT_POLICY_SHA256,
     ClaimSupport,
     ResearchClaim,
     ResearchDossier,
@@ -45,6 +69,7 @@ from market_aligner.research.store import (
 )
 from market_aligner.service.api import MarketAlignerService
 from market_aligner.state.vacancies import JobDatabase, VacancyRefreshConflict
+from market_aligner.state.atomic_publish import publish_noreplace
 
 PRODUCTION_HANDOFF_TRUST_ROOT_ID = "gigabyte-market-aligner-protected-outbox-v1"
 PRODUCTION_VACANCY_MAXIMUM_AGE_SECONDS = 21_600
@@ -56,6 +81,9 @@ PRODUCTION_CANDIDATE_AUTHORITY_SHA256 = (
     "85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9"
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_CURRENT_PROJECTION_AUTHORITY_NAME = re.compile(
+    r"projection-[0-9a-f]{32}-candidate-authority\.json\Z"
+)
 
 
 class ProductionHandoffError(ValueError):
@@ -79,6 +107,11 @@ class _ProductionHandoffDeployment:
     collection_config_file_sha256: str
     deployment_configuration_sha256: str
     research_archive_root_identity: str
+    candidate_authority_path: Path = PRODUCTION_CANDIDATE_AUTHORITY_PATH
+    candidate_authority_sha256: str = PRODUCTION_CANDIDATE_AUTHORITY_SHA256
+    environment: str = "production"
+    trust_root_id: str = PRODUCTION_HANDOFF_TRUST_ROOT_ID
+    freshness_provenance: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,9 +136,11 @@ class ProductionHandoffReceipt:
     execution_receipt_sha256: str
     environment: str = "production"
     release_authority: bool = False
+    trust_root_id: str = PRODUCTION_HANDOFF_TRUST_ROOT_ID
+    freshness_provenance: str | None = None
 
     def document(self) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "application_id": self.application_id,
             "bundle_path": str(self.bundle_path),
             "employer_dossier_sha256": self.employer_dossier_sha256,
@@ -124,16 +159,49 @@ class ProductionHandoffReceipt:
             "source_content_sha256": self.source_content_sha256,
             "processing_promotion_sha256": self.processing_promotion_sha256,
             "release_token_issued": False,
-            "schema_version": "market-aligner.production-handoff-receipt.v2",
+            "schema_version": (
+                "market-aligner.current-runtime-handoff-receipt.v1"
+                if self.environment == "current_runtime"
+                else "market-aligner.production-handoff-receipt.v2"
+            ),
             "source_job_key": self.source_job_key,
             "source_record_sha256": self.source_record_sha256,
             "submission_authority": False,
-            "trust_root_id": PRODUCTION_HANDOFF_TRUST_ROOT_ID,
+            "trust_root_id": self.trust_root_id,
         }
+        if self.environment == "current_runtime":
+            document["release_authority"] = False
+            document["freshness_provenance"] = self.freshness_provenance
+        return document
 
 
 def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _require_explicit_unknown_mode(value: object) -> str:
+    if type(value) is not str or not value.isascii():
+        raise ValueError("remote policy must explicitly state an unknown work mode")
+    for character in "\t\n\r\x0b\x0c":
+        value = value.replace(character, " ")
+    normalized = " ".join(part for part in value.lower().split(" ") if part)
+    if normalized in ("", "unknown", "unspecified", "not specified", "not stated"):
+        return "unknown"
+    raise ValueError("remote policy must explicitly state an unknown work mode")
+
+
+def _profile_allows_soft_uk_mode(profile: object) -> bool:
+    constraints = getattr(profile, "constraints", None)
+    if type(constraints) is not dict:
+        return False
+    return (
+        type(constraints.get("uk_remote_opportunity_override")) is bool
+        and constraints["uk_remote_opportunity_override"] is True
+        and "uk_remote_preference" in constraints
+        and constraints["uk_remote_preference"] is not None
+        and "uk_remote_scoring_policy" in constraints
+        and constraints["uk_remote_scoring_policy"] is not None
+    )
 
 
 def _canonical(value: object) -> bytes:
@@ -339,32 +407,7 @@ def _publish_execution_receipt_noreplace(
     directory_descriptor: int, temporary_name: str, final_name: str
 ) -> bool:
     """Publish one receipt without replacing an independently published replay."""
-
-    libc = ctypes.CDLL(None, use_errno=True)
-    renameat2 = libc.renameat2
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
-    if (
-        renameat2(
-            directory_descriptor,
-            os.fsencode(temporary_name),
-            directory_descriptor,
-            os.fsencode(final_name),
-            1,  # RENAME_NOREPLACE
-        )
-        == 0
-    ):
-        return True
-    error = ctypes.get_errno()
-    if error == errno.EEXIST:
-        return False
-    raise OSError(error, os.strerror(error))
+    return publish_noreplace(directory_descriptor, temporary_name, final_name)
 
 
 def _persist_execution_receipt(root: Path, semantic_sha256: str, exact: bytes) -> Path:
@@ -576,6 +619,24 @@ def _workable_identity(url: str) -> tuple[str | None, str]:
             "official_route", "Workable vacancy URL has unsupported authority"
         )
     return tenant, vacancy_id
+
+
+_GREENHOUSE_ROUTE = re.compile(
+    r"(?i:https)://(?i:job-boards\.greenhouse\.io|job-boards\.eu\.greenhouse\.io)(?::443)?"
+    r"/([A-Za-z0-9][A-Za-z0-9_-]*)/jobs/([1-9][0-9]*)(/)?"
+)
+
+
+def _greenhouse_identity(url: object, source_job_key: object) -> tuple[str, str]:
+    if type(url) is not str or type(source_job_key) is not str or not url.isascii():
+        raise ValueError("official_greenhouse_route_invalid") from None
+    match = _GREENHOUSE_ROUTE.fullmatch(url)
+    if match is None:
+        raise ValueError("official_greenhouse_route_invalid") from None
+    board, vacancy_id = match.group(1), match.group(2)
+    if source_job_key != f"greenhouse:{board}:{vacancy_id}":
+        raise ValueError("official_greenhouse_route_invalid") from None
+    return board, vacancy_id
 
 
 def _protected_candidate_authority(
@@ -995,16 +1056,24 @@ def _research_evidence(
             "research_metadata", "canonical vacancy metadata differs"
         )
     job_parts = source_job_key.split(":")
-    route_tenant, route_id = _workable_identity(canonical_url)
-    if (
-        len(job_parts) != 3
-        or job_parts[0] != "workable"
-        or (route_tenant is not None and job_parts[1] != route_tenant)
-        or job_parts[2] != route_id
-    ):
-        raise ProductionHandoffError(
-            "official_source_route", "source job identity differs"
-        )
+    if job_parts and job_parts[0] == "greenhouse":
+        try:
+            _greenhouse_identity(canonical_url, source_job_key)
+        except ValueError:
+            raise ProductionHandoffError(
+                "official_route", "Greenhouse observation route is not canonical"
+            ) from None
+    else:
+        route_tenant, route_id = _workable_identity(canonical_url)
+        if (
+            len(job_parts) != 3
+            or job_parts[0] != "workable"
+            or (route_tenant is not None and job_parts[1] != route_tenant)
+            or job_parts[2] != route_id
+        ):
+            raise ProductionHandoffError(
+                "official_source_route", "source job identity differs"
+            )
     object_raw = archive.read("objects", str(object_sha))
     envelope = _document(object_raw, "canonical vacancy object")
     schema = envelope.get("schema_version")
@@ -1159,6 +1228,30 @@ def _research_evidence(
     return metadata_raw, object_raw, receipt_raw, observed
 
 
+def _retained_raw_listing(jobs: JobDatabase, job_key: str, posting: Mapping[str, Any]) -> bytes:
+    """Preserve both collector source representations without reserialising captures."""
+    legacy = (str(posting["raw_text"] or "") + str(posting["raw_json"] or "")).encode("utf-8")
+    # Older admitted rows predate immutable snapshots. Preserve their existing
+    # exact-byte contract when it already proves the requested content identity.
+    if legacy and _sha(legacy) == posting["content_hash"]:
+        return legacy
+    try:
+        raw = jobs.load_raw_snapshot(job_key, str(posting["content_hash"]))
+        if raw.public_content_base64 is not None:
+            material = public_listing_bytes(raw)
+        else:
+            material = ((raw.raw_text or "") + (
+                json.dumps(raw.raw_json, ensure_ascii=False) if raw.raw_json is not None else ""
+            )).encode("utf-8")
+        if not material or _sha(material) != posting["content_hash"]:
+            raise ValueError("retained collector source digest differs")
+        return material
+    except (KeyError, ValueError) as exc:
+        raise ProductionHandoffError(
+            "vacancy_hash", "retained collector source is unavailable or differs"
+        ) from exc
+
+
 def _logical_job_key(adapter: str, canonical_url: str, source_job_id: str) -> str:
     return "job_" + _sha(
         _canonical(
@@ -1246,6 +1339,540 @@ def _deterministic_handoff_issuance(
     return handoff_issued_at, vacancy_valid_until, dossier_valid_until
 
 
+def _require_detailed_eligibility(
+    connection: sqlite3.Connection, *, profile_id: str, profile_version: str,
+    track: str, job_key: str, source_content_sha256: str,
+    profile_file_sha256: str, evidence_file_sha256: str,
+    normalized_json_sha256: str, current_profile=None,
+) -> bytes:
+    """Require current, matching eligibility evidence; never grant release."""
+    from market_aligner.processing import (
+        ProcessingRefused, parse_eligibility_receipt,
+        read_current_eligibility_receipt,
+    )
+
+    try:
+        rows = connection.execute(
+            "SELECT operation_id,binding_sha256 FROM eligibility_receipts "
+            "WHERE profile_id=? AND job_key=? AND track=?",
+            (profile_id, job_key, track),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ProductionHandoffError("eligibility_state", "one detailed eligibility receipt is required")
+        raw = read_current_eligibility_receipt(
+            connection, operation_id=rows[0][0], binding_sha256=rows[0][1],
+            opportunity_profile=current_profile)
+        if raw is None:
+            raise ProductionHandoffError("eligibility_state", "detailed eligibility disappeared")
+        receipt = parse_eligibility_receipt(raw)
+        if (receipt["profile_id"], receipt["profile_version"], receipt["job_key"], receipt["track"]) != (
+            profile_id, profile_version, job_key, track
+        ):
+            raise ProductionHandoffError("eligibility_binding", "eligibility subject differs")
+        fit = receipt["fit_receipt"]
+        if (fit["raw"]["source_content_sha256"] != source_content_sha256
+                or fit["profile"]["profile_file_sha256"] != profile_file_sha256
+                or fit["profile"]["evidence_file_sha256"] != evidence_file_sha256
+                or fit["normalised_projection"]["normalized_json_sha256"] != normalized_json_sha256):
+            raise ProductionHandoffError("eligibility_binding", "eligibility product input differs")
+        actual = {row[1]: str(Path(row[2]).resolve())
+                  for row in connection.execute("PRAGMA database_list") if row[1] != "temp"}
+        for alias, name in (("main", "assessments"), ("vacancy", "vacancy")):
+            declared = receipt["databases"][name]
+            if actual.get(alias) != declared["path"]:
+                raise ProductionHandoffError("eligibility_binding", "eligibility database path differs")
+            info = os.stat(actual[alias], follow_symlinks=False)
+            observed = (info.st_dev, info.st_ino, info.st_uid, stat.S_IMODE(info.st_mode), info.st_nlink)
+            expected = tuple(declared[key] for key in ("dev", "ino", "uid", "mode", "nlink"))
+            if observed != expected:
+                raise ProductionHandoffError("eligibility_binding", "eligibility database identity differs")
+        if receipt["decision"] != "pass" or receipt["eligibility_authority"] is not True:
+            raise ProductionHandoffError("eligibility_state", "detailed eligibility did not pass")
+        return raw
+    except ProductionHandoffError:
+        raise
+    except (ProcessingRefused, ValueError, sqlite3.Error, OSError) as exc:
+        raise ProductionHandoffError("eligibility_state", "detailed eligibility evidence refused") from exc
+
+
+def _current_eligibility_receipt(
+    *,
+    binding: Mapping[str, object],
+    candidate_facts: object,
+    vacancy_facts: object,
+) -> bytes:
+    """Join current source-bound facts through the canonical deterministic assessor."""
+    from market_aligner.assessment.eligibility import (
+        EligibilityInput,
+        EligibilityPolicy,
+        assess_eligibility,
+    )
+    from market_aligner.llm.contracts import (
+        VACANCY_ELIGIBILITY_CONTRACT_TYPES,
+        VacancyEligibilityFacts,
+    )
+    from market_aligner.processing import build_current_eligibility_receipt_from_decision
+
+    invalid = "current eligibility inputs are malformed"
+    required_candidate_keys = {
+        "authorised_jurisdictions",
+        "current_residence",
+        "requires_sponsorship",
+        "maximum_years_required",
+        "excluded_contract_types",
+    }
+    if (
+        type(candidate_facts) is not dict
+        or set(candidate_facts) != required_candidate_keys
+        or type(vacancy_facts) is not VacancyEligibilityFacts
+    ):
+        raise ValueError(invalid)
+
+    def country_set(value: object) -> frozenset[str] | None:
+        if value is None:
+            return None
+        if (
+            type(value) is not list
+            or any(
+                type(item) is not str
+                or re.fullmatch(r"[A-Z]{2}", item, flags=re.ASCII) is None
+                for item in value
+            )
+            or len(set(value)) != len(value)
+        ):
+            raise ValueError(invalid)
+        return frozenset(value)
+
+    def contract_set(value: object) -> frozenset[str] | None:
+        if value is None:
+            return None
+        if (
+            type(value) is not list
+            or any(
+                type(item) is not str
+                or item not in VACANCY_ELIGIBILITY_CONTRACT_TYPES
+                for item in value
+            )
+            or len(set(value)) != len(value)
+        ):
+            raise ValueError(invalid)
+        return frozenset(value)
+
+    current_residence = candidate_facts["current_residence"]
+    requires_sponsorship = candidate_facts["requires_sponsorship"]
+    maximum_years = candidate_facts["maximum_years_required"]
+    if current_residence is not None and (
+        type(current_residence) is not str
+        or re.fullmatch(r"[A-Z]{2}", current_residence, flags=re.ASCII) is None
+    ):
+        raise ValueError(invalid)
+    if requires_sponsorship is not None and type(requires_sponsorship) is not bool:
+        raise ValueError(invalid)
+    if maximum_years is not None:
+        if type(maximum_years) not in {int, float}:
+            raise ValueError(invalid)
+        try:
+            maximum_years = float(maximum_years)
+        except OverflowError:
+            raise ValueError(invalid) from None
+        if not math.isfinite(maximum_years) or maximum_years < 0:
+            raise ValueError(invalid)
+    policy = EligibilityPolicy(
+        authorised_jurisdictions=country_set(
+            candidate_facts["authorised_jurisdictions"]
+        ),
+        current_residence=current_residence,
+        requires_sponsorship=requires_sponsorship,
+        maximum_years_required=maximum_years,
+        excluded_contract_types=contract_set(
+            candidate_facts["excluded_contract_types"]
+        ),
+    )
+    facts = EligibilityInput(
+        work_jurisdiction=vacancy_facts.work_jurisdiction,
+        required_residence=vacancy_facts.required_residence,
+        sponsorship_available=vacancy_facts.sponsorship_available,
+        minimum_years_experience=vacancy_facts.minimum_years_experience,
+        contract_type=vacancy_facts.contract_type,
+    )
+    decision = assess_eligibility(facts, policy)
+    return build_current_eligibility_receipt_from_decision(
+        binding=binding, decision=decision
+    )
+
+
+def _admit_current_candidate_policy(
+    *,
+    service: MarketAlignerService,
+    deployment: _ProductionHandoffDeployment,
+    profile: object,
+    profile_id: str,
+    track: str,
+    source_job_key: str,
+    target_job_jurisdiction: str | None,
+    vacancy_facts_receipt: object,
+    current_documents: dict[str, bytes],
+    current_projection: dict[str, Any],
+    recovery_manifest_relative_path: str,
+) -> tuple[Any, str, str]:
+    """Revalidate the saved policy against the pinned activation and live sources."""
+    from dataclasses import fields
+
+    from market_aligner.llm.codex_gateway import (
+        CANDIDATE_POLICY_PROMPT_VERSION,
+        CodexGatewayError,
+        CodexSemanticGateway,
+        PROVIDER_IDENTITY,
+    )
+    from market_aligner.llm.contracts import (
+        LLMReceipt,
+        LLMTransportReceipt,
+        VACANCY_ELIGIBILITY_CONTRACT_TYPES,
+        canonical_hash,
+    )
+    from market_aligner.processing import (
+        _ISO_MEMBER_CODES,
+        admit_current_candidate_facts,
+        admit_saved_candidate_policy,
+        bind_current_candidate_policy_refs,
+        build_current_candidate_policy_canary_document,
+    )
+
+    invalid = "saved current candidate policy failed live validation"
+    try:
+        snapshot = service.profiles.coherent_snapshot(
+            profile_id, require_committed_generation=True
+        )
+        try:
+            if snapshot.profile != profile:
+                raise ValueError(invalid)
+            fresh_documents, projection = read_current_profile_projection_bundle(
+                data_home=deployment.data_home,
+                profile_id=profile_id,
+                candidate_authority_path=deployment.candidate_authority_path,
+                expected_candidate_authority_sha256=(
+                    deployment.candidate_authority_sha256
+                ),
+                profile_sha256=snapshot.hashes["profile_sha256"],
+                evidence_ledger_sha256=snapshot.hashes[
+                    "evidence_ledger_sha256"
+                ],
+            )
+            if (
+                projection != current_projection
+                or fresh_documents != current_documents
+                or projection.get("profile_id") != profile_id
+                or type(projection.get("activation_sha256")) is not str
+                or _SHA256.fullmatch(projection["activation_sha256"]) is None
+            ):
+                raise ValueError(invalid)
+
+            activation_sha256 = projection["activation_sha256"]
+            canary_missing = False
+            try:
+                canary_bytes, canary_sha256 = (
+                    read_current_candidate_policy_canary_for_activation(
+                        data_home=deployment.data_home,
+                        profile_id=profile_id,
+                        track=track,
+                        source_job_key=source_job_key,
+                        activation_sha256=activation_sha256,
+                    )
+                )
+            except FileNotFoundError:
+                canary_bytes = b""
+                canary_sha256 = ""
+                canary_missing = True
+            if canary_missing:
+                activation_name, activation_file_sha256 = (
+                    locate_current_activation_artifact(
+                        data_home=deployment.data_home,
+                        profile_id=profile_id,
+                        activation_sha256=activation_sha256,
+                    )
+                )
+                canary_document = None
+            else:
+                canary_document = _document(
+                    canary_bytes, "current candidate policy canary"
+                )
+                activation_name = canary_document.get("activation_name")
+                activation_file_sha256 = canary_document.get(
+                    "activation_file_sha256"
+                )
+            if (
+                type(activation_name) is not str
+                or type(activation_file_sha256) is not str
+                or _SHA256.fullmatch(activation_file_sha256) is None
+            ):
+                raise ValueError(invalid)
+
+            with PinnedCurrentActivationArtifact(
+                data_home=deployment.data_home,
+                profile_id=profile_id,
+                artifact_name=activation_name,
+                expected_sha256=activation_file_sha256,
+            ) as activation:
+                activation_document = activation.document
+                source_hashes = activation_document.get("source_hashes")
+                approval_id = activation_document.get("approval_id")
+                if (
+                    activation_document.get("profile_id") != profile_id
+                    or activation_document.get("activation_sha256")
+                    != activation_sha256
+                    or type(source_hashes) is not dict
+                    or type(source_hashes.get("recovery_manifest")) is not str
+                    or _SHA256.fullmatch(source_hashes["recovery_manifest"]) is None
+                    or type(approval_id) is not str
+                    or not approval_id
+                ):
+                    raise ValueError(invalid)
+                manifest_sha256 = source_hashes["recovery_manifest"]
+
+                with PinnedRecoveryInputs(
+                    data_home=deployment.data_home,
+                    manifest_relative_path=recovery_manifest_relative_path,
+                    expected_manifest_sha256=manifest_sha256,
+                    approval_id=approval_id,
+                ) as recovered:
+                    compiled_documents = compile_current_profile_projection(
+                        profile_id=profile_id,
+                        activation_bytes=activation.raw_bytes,
+                        expected_activation_sha256=activation.sha256,
+                        manifest_bytes=recovered.manifest_bytes,
+                        expected_manifest_sha256=manifest_sha256,
+                        approval_id=approval_id,
+                        recovered_profile_bytes=recovered.files[
+                            "candidate_profile_and_job_preferences"
+                        ],
+                        recovered_evidence_bytes=recovered.files[
+                            "existing_profile_claims_and_provenance"
+                        ],
+                        snapshot=snapshot,
+                    )
+                    if compiled_documents != fresh_documents:
+                        raise ValueError(invalid)
+                    catalog = build_current_candidate_policy_catalog(snapshot)
+                    selection = activation_document.get("selection")
+                    corrections = (
+                        selection.get("correction_assessments")
+                        if type(selection) is dict
+                        else None
+                    )
+                    if type(corrections) is not list:
+                        raise ValueError(invalid)
+                    invalidated_ids = sorted(
+                        {
+                            evidence_id
+                            for correction in corrections
+                            if type(correction) is dict
+                            and correction.get("relationship")
+                            in {"retracts", "corrects", "contradicts", "limits"}
+                            for evidence_id in correction.get(
+                                "affected_evidence_ids", []
+                            )
+                        }
+                    )
+                    expected_request = {
+                        "schema": "market-aligner.candidate-policy-input.v1",
+                        "target_job_jurisdiction": target_job_jurisdiction,
+                        "factual_catalog": [
+                            {
+                                key: entry[key]
+                                for key in ("evidence_id", "kind", "status", "claim")
+                            }
+                            for entry in catalog.values()
+                        ],
+                        "correction_assessments": corrections,
+                        "invalidated_ids": invalidated_ids,
+                        "allowed_iso_codes": list(_ISO_MEMBER_CODES),
+                        "allowed_contract_types": sorted(
+                            VACANCY_ELIGIBILITY_CONTRACT_TYPES
+                        ),
+                    }
+                    expected_provenance = {
+                        "activation_file_sha256": activation_file_sha256,
+                        "activation_name": activation_name,
+                        "activation_sha256": activation_sha256,
+                        "active_snapshot_hashes": dict(snapshot.hashes),
+                        "profile_id": profile_id,
+                        "recovery_manifest_sha256": manifest_sha256,
+                    }
+                    expected_target = {
+                        "target_job_jurisdiction": target_job_jurisdiction,
+                        "target_job_key": source_job_key,
+                    }
+
+                    def verify_receipt(
+                        value: object, *, inputs: object, output: object
+                    ) -> None:
+                        if type(value) is not dict or set(value) != {
+                            field.name for field in fields(LLMReceipt)
+                        }:
+                            raise ValueError(invalid)
+                        transport_value = value.get("transport")
+                        if (
+                            type(transport_value) is not dict
+                            or set(transport_value)
+                            != {field.name for field in fields(LLMTransportReceipt)}
+                            or any(
+                                type(transport_value[field.name]) is not str
+                                for field in fields(LLMTransportReceipt)
+                                if field.name != "invocation_count"
+                            )
+                            or type(transport_value["invocation_count"]) is not int
+                        ):
+                            raise ValueError(invalid)
+                        transport = LLMTransportReceipt(**transport_value)
+                        receipt_values = dict(value)
+                        if any(
+                            type(receipt_values[field.name]) is not str
+                            for field in fields(LLMReceipt)
+                            if field.name != "transport"
+                        ):
+                            raise ValueError(invalid)
+                        receipt_values["transport"] = transport
+                        receipt = LLMReceipt(**receipt_values)
+                        if (
+                            type(transport.invocation_count) is not int
+                            or transport.invocation_count != 1
+                            or transport.provider_identity != PROVIDER_IDENTITY
+                            or transport.provider_sha256
+                            != canonical_hash({"provider": PROVIDER_IDENTITY})
+                            or receipt.receipt_id != transport.receipt_sha256
+                            or receipt.task != "candidate_policy_extraction"
+                            or receipt.prompt_version
+                            != CANDIDATE_POLICY_PROMPT_VERSION
+                            or receipt.model != transport.model_identity
+                            or receipt.input_sha256 != canonical_hash(inputs)
+                            or receipt.output_sha256 != canonical_hash(output)
+                        ):
+                            raise ValueError(invalid)
+                        return None
+
+                    def admit_document(document: object) -> Any:
+                        return admit_saved_candidate_policy(
+                            document,
+                            expected_provenance=expected_provenance,
+                            expected_target=expected_target,
+                            expected_request=expected_request,
+                            catalog=catalog,
+                            verify_receipt=verify_receipt,
+                            bind_refs=bind_current_candidate_policy_refs,
+                            admit_refs=admit_current_candidate_facts,
+                        )
+
+                    if canary_missing:
+                        if (
+                            type(vacancy_facts_receipt) is not LLMReceipt
+                            or type(vacancy_facts_receipt.transport)
+                            is not LLMTransportReceipt
+                            or type(
+                                vacancy_facts_receipt.transport.invocation_count
+                            ) is not int
+                            or vacancy_facts_receipt.transport.invocation_count != 1
+                            or vacancy_facts_receipt.transport.provider_identity
+                            != PROVIDER_IDENTITY
+                            or vacancy_facts_receipt.transport.provider_sha256
+                            != canonical_hash({"provider": PROVIDER_IDENTITY})
+                            or type(vacancy_facts_receipt.model) is not str
+                            or vacancy_facts_receipt.transport.model_identity
+                            != vacancy_facts_receipt.model
+                        ):
+                            raise ValueError(invalid)
+                        gateway = CodexSemanticGateway(
+                            model=vacancy_facts_receipt.model
+                        )
+                        policy_selection, policy_receipt = (
+                            gateway.extract_candidate_policy(
+                                expected_request["factual_catalog"],
+                                target_job_jurisdiction=target_job_jurisdiction,
+                                correction_assessments=corrections,
+                                iso_codes=expected_request["allowed_iso_codes"],
+                                contract_types=expected_request[
+                                    "allowed_contract_types"
+                                ],
+                            )
+                        )
+                        canary_document = build_current_candidate_policy_canary_document(
+                            activation_file_sha256=activation_file_sha256,
+                            activation_name=activation_name,
+                            activation_sha256=activation_sha256,
+                            active_snapshot_hashes=dict(snapshot.hashes),
+                            profile_id=profile_id,
+                            receipt=policy_receipt,
+                            recovery_manifest_sha256=manifest_sha256,
+                            request=expected_request,
+                            selection=policy_selection,
+                            target_job_jurisdiction=target_job_jurisdiction,
+                            target_job_key=source_job_key,
+                        )
+                        admit_document(canary_document)
+                        canary_bytes = _canonical(canary_document)
+                        canary_sha256 = _sha(canary_bytes)
+                        recovered.revalidate()
+                        activation.revalidate()
+                        snapshot.revalidate()
+                        _persisted_path, persisted_sha256 = (
+                            write_current_candidate_policy_canary(
+                                data_home=deployment.data_home,
+                                profile_id=profile_id,
+                                track=track,
+                                source_job_key=source_job_key,
+                                target_job_jurisdiction=target_job_jurisdiction,
+                                activation_name=activation_name,
+                                activation_sha256=activation_sha256,
+                                activation_file_sha256=activation_file_sha256,
+                                recovery_manifest_sha256=manifest_sha256,
+                                active_snapshot_hashes=dict(snapshot.hashes),
+                                canary_bytes=canary_bytes,
+                                expected_sha256=canary_sha256,
+                            )
+                        )
+                        if persisted_sha256 != canary_sha256:
+                            raise ValueError(invalid)
+                        persisted_bytes, observed_sha256 = (
+                            read_current_candidate_policy_canary_for_activation(
+                                data_home=deployment.data_home,
+                                profile_id=profile_id,
+                                track=track,
+                                source_job_key=source_job_key,
+                                activation_sha256=activation_sha256,
+                            )
+                        )
+                        if (
+                            persisted_bytes != canary_bytes
+                            or observed_sha256 != canary_sha256
+                        ):
+                            raise ValueError(invalid)
+                        canary_document = _document(
+                            persisted_bytes, "current candidate policy canary"
+                        )
+
+                    if type(canary_document) is not dict:
+                        raise ValueError(invalid)
+                    admission = admit_document(canary_document)
+                    recovered.revalidate()
+                    activation.revalidate()
+                    snapshot.revalidate()
+                    return admission, canary_sha256, activation_sha256
+        finally:
+            snapshot.close()
+    except ProductionHandoffError:
+        raise
+    except (
+        CodexGatewayError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        raise ProductionHandoffError(
+            "candidate_policy", "saved current candidate policy failed live validation"
+        ) from None
+
+
 def _build_production_handoff_from_authenticated_time(
     *,
     deployment: _ProductionHandoffDeployment,
@@ -1253,6 +1880,7 @@ def _build_production_handoff_from_authenticated_time(
     track: str,
     source_job_key: str,
     freshness_time: datetime,
+    current_recovery_manifest_relative_path: str | None = None,
     vacancy_maximum_age_seconds: int = PRODUCTION_VACANCY_MAXIMUM_AGE_SECONDS,
     dossier_maximum_age_seconds: int = PRODUCTION_DOSSIER_MAXIMUM_AGE_SECONDS,
 ) -> ProductionHandoffReceipt:
@@ -1274,30 +1902,110 @@ def _build_production_handoff_from_authenticated_time(
     profile_path = profile_directory / "profile.yaml"
     evidence_path = profile_directory / "evidence.jsonl"
     projection_path = profile_directory / "projection-receipt.json"
-    profile_bytes = _read_regular(profile_path, "canonical profile")
+    _profile_bytes = _read_regular(profile_path, "canonical profile")
     evidence_bytes = _read_regular(evidence_path, "canonical evidence ledger")
-    projection = _document(
-        _read_regular(projection_path, "canonical projection receipt"),
-        "canonical projection receipt",
-    )
-    if (
-        projection.get("schema") != "market-aligner.canonical-profile-projection.v1"
-        or projection.get("profile_id") != profile_id
-        or projection.get("release_authority") is not False
-    ):
-        raise ProductionHandoffError(
-            "candidate_projection", "canonical profile projection receipt differs"
-        )
-    authority_path = PRODUCTION_CANDIDATE_AUTHORITY_PATH
+    authority_path = deployment.candidate_authority_path
     repository = deployment.repository_root.absolute()
     if authority_path == repository or repository in authority_path.parents:
         raise ProductionHandoffError(
             "candidate_authority_location",
             "protected candidate authority must be outside the repository",
         )
-    candidate_authority_bytes = _protected_candidate_authority(
-        authority_path, projection, PRODUCTION_CANDIDATE_AUTHORITY_SHA256
+    current_projection_directory = (
+        service.profiles.paths.outputs / "current-profile-facts" / profile_id
     )
+    current_profile_binding_verified = False
+    current_documents: dict[str, bytes] | None = None
+    if authority_path.parent == current_projection_directory:
+        if _CURRENT_PROJECTION_AUTHORITY_NAME.fullmatch(authority_path.name) is None:
+            raise ProductionHandoffError(
+                "candidate_projection", "current profile projection bundle name differs"
+            )
+        authority_probe = _read_regular(
+            authority_path, "protected candidate authority", private=True
+        )
+        if _sha(authority_probe) != deployment.candidate_authority_sha256:
+            raise ProductionHandoffError(
+                "candidate_authority_identity",
+                "protected candidate authority differs from deployment-owned pin",
+            )
+        authority_document = _document(
+            authority_probe, "protected candidate authority"
+        )
+        if authority_document.get("source_kind") != "approved_current_profile_activation":
+            raise ProductionHandoffError(
+                "candidate_projection", "current profile authority source differs"
+            )
+        snapshot = service.profiles.coherent_snapshot(
+            profile_id, require_committed_generation=True
+        )
+        try:
+            if (
+                snapshot.profile != profile
+                or snapshot.hashes.get("profile_file_sha256") != _sha(_profile_bytes)
+                or snapshot.hashes.get("evidence_file_sha256")
+                != _sha(evidence_bytes)
+            ):
+                raise ProductionHandoffError(
+                    "candidate_projection",
+                    "live profile snapshot differs from canonical files",
+                )
+            try:
+                current_documents, projection = read_current_profile_projection_bundle(
+                    data_home=deployment.data_home,
+                    profile_id=profile_id,
+                    candidate_authority_path=authority_path,
+                    expected_candidate_authority_sha256=(
+                        deployment.candidate_authority_sha256
+                    ),
+                    profile_sha256=snapshot.hashes["profile_sha256"],
+                    evidence_ledger_sha256=snapshot.hashes[
+                        "evidence_ledger_sha256"
+                    ],
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProductionHandoffError(
+                    "candidate_projection",
+                    "current profile projection receipt differs",
+                ) from exc
+            candidate_authority_bytes = _protected_candidate_authority(
+                authority_path,
+                projection,
+                deployment.candidate_authority_sha256,
+            )
+            if current_documents["candidate_authority_bytes"] != candidate_authority_bytes:
+                raise ProductionHandoffError(
+                    "candidate_authority_identity",
+                    "current profile projection authority differs from its pinned file",
+                )
+            snapshot.revalidate()
+            current_profile_binding_verified = True
+        finally:
+            snapshot.close()
+    else:
+        projection = _document(
+            _read_regular(projection_path, "canonical projection receipt"),
+            "canonical projection receipt",
+        )
+        if (
+            projection.get("schema")
+            != "market-aligner.canonical-profile-projection.v1"
+            or projection.get("profile_id") != profile_id
+            or projection.get("release_authority") is not False
+        ):
+            raise ProductionHandoffError(
+                "candidate_projection", "canonical profile projection receipt differs"
+            )
+        candidate_authority_bytes = _protected_candidate_authority(
+            authority_path, projection, deployment.candidate_authority_sha256
+        )
+        if _document(
+            candidate_authority_bytes, "protected candidate authority"
+        ).get("source_kind") == "approved_current_profile_activation":
+            raise ProductionHandoffError(
+                "candidate_projection",
+                "current profile authority is not in its pinned projection bundle",
+            )
 
     try:
         promotion_row = service.assessments.processing_promotion(
@@ -1350,12 +2058,7 @@ def _build_production_handoff_from_authenticated_time(
         raise ProductionHandoffError(
             "vacancy_state", "current fetched processing row is absent"
         )
-    # This is the collector's persisted content identity from
-    # VacancyStore.store_raw.  Keep the two components explicit here so a
-    # reviewer can verify both their order and their individual boundaries.
-    raw_text_bytes = str(posting["raw_text"] or "").encode("utf-8")
-    raw_json_bytes = str(posting["raw_json"] or "").encode("utf-8")
-    raw_material = raw_text_bytes + raw_json_bytes
+    raw_material = _retained_raw_listing(service.jobs, source_job_key, posting)
     if (
         not raw_material
         or _sha(raw_material) != posting["content_hash"]
@@ -1445,23 +2148,108 @@ def _build_production_handoff_from_authenticated_time(
             "archived canonical vacancy components differ from collector state",
         )
 
-    location_category = str((result.get("geographic_preference") or {}).get("category"))
+    preference = result.get("geographic_preference")
+    location_category = str((preference or {}).get("category"))
     location_map = {
         "uk_remote": ("UK_REMOTE", 1, "GB", "remote"),
         "uk_hybrid": ("UK_HYBRID", 2, "GB", "hybrid"),
         "uk_onsite": ("UK_ONSITE", 3, "GB", "onsite"),
         "romania_remote": ("RO_REMOTE", 4, "RO", "remote"),
-        "eu_remote": ("EU_REMOTE", 5, "RO", "remote"),
+        "eu_remote": ("EU_REMOTE", 5, None, "remote"),
     }
-    try:
-        geography_bucket, geography_rank, country_code, work_mode = location_map[
-            location_category
-        ]
-    except KeyError as exc:
-        raise ProductionHandoffError(
-            "geography_binding", "processing geography cannot enter the handoff"
-        ) from exc
     raw_location = str(vacancy.get("location") or "")
+    current_runtime = deployment.environment == "current_runtime"
+    soft_uk_mode_allowed = (
+        current_runtime
+        and current_profile_binding_verified
+        and _profile_allows_soft_uk_mode(profile)
+    )
+    if location_category == "unknown_other":
+        expected_preference_facts_sha256 = _sha(
+            _canonical(
+                {
+                    "location": vacancy.get("location"),
+                    "remote_policy": vacancy.get("remote_policy"),
+                }
+            )
+        )
+        policy_sha256 = (
+            preference.get("policy_sha256") if type(preference) is dict else None
+        )
+        if (
+            not soft_uk_mode_allowed
+            or type(preference) is not dict
+            or type(preference.get("rank")) is not int
+            or preference.get("rank") != 5
+            or preference.get("facts_sha256") != expected_preference_facts_sha256
+            or not isinstance(policy_sha256, str)
+            or preference.get("policy_sha256") != policy_sha256
+            or not _SHA256.fullmatch(policy_sha256)
+        ):
+            raise ProductionHandoffError(
+                "geography_binding", "unknown work mode lacks verified soft-policy authority"
+            )
+        try:
+            work_mode = _require_explicit_unknown_mode(vacancy.get("remote_policy"))
+        except ValueError as exc:
+            raise ProductionHandoffError(
+                "geography_binding", "unknown work mode is not explicit in vacancy facts"
+            ) from exc
+        raw_country = expected_raw_json.get("country") if isinstance(expected_raw_json, dict) else None
+        try:
+            country_code = retained_location_country(raw_country, raw_location)
+            if country_code != "GB":
+                raise SelectionBlocked(
+                    "location_country_invalid", "unknown work mode is scoped to explicit GB"
+                )
+            preparation_geography = resolve_preparation_geography(
+                country_code=country_code,
+                work_mode=work_mode,
+                current_runtime=current_runtime,
+                unknown_uk_mode_allowed=soft_uk_mode_allowed,
+            )
+        except (ValueError, SelectionBlocked) as exc:
+            raise ProductionHandoffError(
+                "geography_binding", "unknown work mode is not admitted by the current profile"
+            ) from exc
+        geography_bucket = preparation_geography.geography_bucket
+        geography_rank = preparation_geography.geography_priority_rank
+        work_mode = preparation_geography.work_mode
+    else:
+        try:
+            geography_bucket, geography_rank, country_code, work_mode = location_map[
+                location_category
+            ]
+        except KeyError as exc:
+            raise ProductionHandoffError(
+                "geography_binding", "processing geography cannot enter the handoff"
+            ) from exc
+        if location_category == "eu_remote":
+            raw_country = expected_raw_json.get("country") if isinstance(expected_raw_json, dict) else None
+            try:
+                country_code = retained_location_country(raw_country, raw_location)
+                if country_code not in EU_REMOTE_COUNTRIES:
+                    raise SelectionBlocked(
+                        "location_country_invalid", "country does not belong to EU_REMOTE"
+                    )
+            except (ValueError, SelectionBlocked) as exc:
+                raise ProductionHandoffError(
+                    "geography_binding",
+                    "EU-remote country evidence is absent or conflicting",
+                ) from exc
+        try:
+            preparation_geography = resolve_preparation_geography(
+                country_code=country_code,
+                work_mode=work_mode,
+                current_runtime=current_runtime,
+                unknown_uk_mode_allowed=soft_uk_mode_allowed,
+            )
+        except ValueError as exc:
+            raise ProductionHandoffError(
+                "geography_binding", "processing geography is not supported"
+            ) from exc
+        geography_bucket = preparation_geography.geography_bucket
+        geography_rank = preparation_geography.geography_priority_rank
     location = {
         "country_code": country_code,
         "locality": raw_location.split(",", 1)[0].strip(),
@@ -1522,7 +2310,157 @@ def _build_production_handoff_from_authenticated_time(
         "vacancy_snapshot_sha256": vacancy_snapshot_sha,
     }
 
+    current_policy_receipt_sha256 = None
+    current_activation_sha256 = None
+    current_eligibility = current_runtime and current_profile_binding_verified
+    if current_eligibility:
+        if (
+            current_documents is None
+            or current_recovery_manifest_relative_path is None
+        ):
+            raise ProductionHandoffError(
+                "candidate_policy", "current candidate policy inputs are unavailable"
+            )
+        try:
+            from market_aligner.llm.codex_gateway import (
+                VACANCY_ELIGIBILITY_PROMPT_VERSION,
+            )
+            from market_aligner.llm.pipeline import vacancy_eligibility_input
+            from market_aligner.service.processing import _cached_vacancy_eligibility
+
+            source_content_sha256 = posting["content_hash"]
+            raw_posting = service.jobs.load_raw_snapshot(
+                source_job_key, source_content_sha256
+            )
+            vacancy_inputs = vacancy_eligibility_input(
+                raw_posting, source_content_sha256=source_content_sha256
+            )
+            cached_eligibility = _cached_vacancy_eligibility(
+                result,
+                raw_posting,
+                inputs=vacancy_inputs,
+                expected_prompt_version=VACANCY_ELIGIBILITY_PROMPT_VERSION,
+            )
+            if cached_eligibility is None:
+                raise ValueError("source-bound vacancy eligibility is absent")
+            vacancy_facts, vacancy_facts_receipt = cached_eligibility
+            candidate_admission, current_policy_receipt_sha256, current_activation_sha256 = (
+                _admit_current_candidate_policy(
+                    service=service,
+                    deployment=deployment,
+                    profile=profile,
+                    profile_id=profile_id,
+                    track=track,
+                    source_job_key=source_job_key,
+                    target_job_jurisdiction=vacancy_facts.work_jurisdiction,
+                    vacancy_facts_receipt=vacancy_facts_receipt,
+                    current_documents=current_documents,
+                    current_projection=projection,
+                    recovery_manifest_relative_path=(
+                        current_recovery_manifest_relative_path
+                    ),
+                )
+            )
+            promotion_binding = promotion_document.get("binding")
+            if (
+                type(promotion_binding) is not dict
+                or type(promotion_binding.get("processing_receipt_sha256")) is not str
+                or _SHA256.fullmatch(
+                    promotion_binding["processing_receipt_sha256"]
+                ) is None
+                or type(candidate_admission.staged_canonical) is not bytes
+                or type(candidate_admission.status_downgraded) is not bool
+            ):
+                raise ValueError("current eligibility bindings are malformed")
+            candidate_facts_sha256 = _sha(
+                _canonical(
+                    {
+                        "effective": candidate_admission.effective,
+                        "staged_sha256": _sha(candidate_admission.staged_canonical),
+                        "status_downgraded": candidate_admission.status_downgraded,
+                    }
+                )
+            )
+            current_eligibility_binding = {
+                "profile_id": profile_id,
+                "profile_version": profile.version,
+                "track": track,
+                "source_job_key": source_job_key,
+                "profile_file_sha256": _sha(_profile_bytes),
+                "evidence_file_sha256": _sha(evidence_bytes),
+                "normalized_json_sha256": _sha(_canonical(vacancy)),
+                "source_content_sha256": str(posting["content_hash"]),
+                "processing_receipt_sha256": promotion_binding[
+                    "processing_receipt_sha256"
+                ],
+                "promotion_receipt_sha256": str(promotion_row["receipt_sha256"]),
+                "candidate_policy_receipt_sha256": current_policy_receipt_sha256,
+                "vacancy_facts_receipt_sha256": _sha(
+                    _canonical(asdict(vacancy_facts_receipt))
+                ),
+                "activation_receipt_sha256": current_activation_sha256,
+                "candidate_facts_sha256": candidate_facts_sha256,
+                "vacancy_facts_sha256": _sha(
+                    _canonical(asdict(vacancy_facts))
+                ),
+            }
+            detailed_eligibility_bytes = _current_eligibility_receipt(
+                binding=current_eligibility_binding,
+                candidate_facts=candidate_admission.effective,
+                vacancy_facts=vacancy_facts,
+            )
+            from market_aligner.processing import parse_current_eligibility_receipt
+
+            detailed_receipt = parse_current_eligibility_receipt(
+                detailed_eligibility_bytes,
+                expected_binding=current_eligibility_binding,
+            )
+            detailed_eligibility_status = (
+                "include"
+                if detailed_receipt["decision"] == "pass"
+                and detailed_receipt["eligibility_authority"] is True
+                else detailed_receipt["decision"]
+            )
+        except ProductionHandoffError:
+            raise
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            raise ProductionHandoffError(
+                "eligibility_state", "current source-bound eligibility was refused"
+            ) from exc
+    else:
+        eligibility_connection = service.assessments.connect()
+        try:
+            eligibility_connection.row_factory = None
+            eligibility_connection.execute(
+                "ATTACH DATABASE ? AS vacancy", (str(service.jobs.path),)
+            )
+            eligibility_connection.execute("PRAGMA query_only=ON")
+            eligibility_connection.execute("BEGIN")
+            detailed_eligibility_bytes = _require_detailed_eligibility(
+                eligibility_connection,
+                profile_id=profile_id,
+                profile_version=profile.version,
+                track=track,
+                job_key=source_job_key,
+                source_content_sha256=str(posting["content_hash"]),
+                profile_file_sha256=_sha(_profile_bytes),
+                evidence_file_sha256=_sha(evidence_bytes),
+                normalized_json_sha256=_sha(_canonical(vacancy)),
+                current_profile=profile,
+            )
+        finally:
+            eligibility_connection.close()
+        detailed_receipt = json.loads(detailed_eligibility_bytes)
+        detailed_eligibility_status = "include"
+
+    from market_aligner.assessment.eligibility import EligibilityDecision
+    detailed_checks = EligibilityDecision(
+        detailed_receipt["decision"], tuple(detailed_receipt["reasons"]),
+        tuple(detailed_receipt["unknowns"])).checks
     eligibility_sources = {
+        "detailed_eligibility": {"decision": detailed_eligibility_status,
+                                 "receipt": detailed_receipt,
+                                 "checks": [asdict(check) for check in detailed_checks]},
         "first_job_scope": result.get("first_job_scope"),
         "vacancy_viability": result.get("viability"),
     }
@@ -1572,13 +2510,18 @@ def _build_production_handoff_from_authenticated_time(
             "selection_policy_passed",
         }
     )
+    selection_decision = SelectionDecision(
+        GeographyMatch(geography_bucket, geography_rank).bucket,
+        geography_rank,
+        tuple(rationale_codes),
+    )
     selection_receipt_document = {
         "decision": "selected_for_application",
-        "geography_bucket": geography_bucket,
-        "geography_priority_rank": geography_rank,
-        "hard_gate_passed": True,
+        "geography_bucket": selection_decision.geography_bucket,
+        "geography_priority_rank": selection_decision.geography_priority_rank,
+        "hard_gate_passed": selection_decision.hard_gate_passed,
         "promotion_receipt_sha256": str(promotion_row["receipt_sha256"]),
-        "rationale_codes": rationale_codes,
+        "rationale_codes": list(selection_decision.rationale_codes),
         "source_job_key": source_job_key,
     }
     selection_receipt_bytes = _canonical(selection_receipt_document)
@@ -1599,18 +2542,12 @@ def _build_production_handoff_from_authenticated_time(
         "role_track_ids": sorted(profile.tracks),
         "schema_version": "market-aligner.candidate-intent.v1",
     }
-    candidate_intent_bytes = _canonical(candidate_intent_document)
+    # The excavated intent authority module owns this wire contract.  Keep the
+    # production bytes identical while refusing drift from the strict schema.
+    candidate_intent_bytes = serialize_candidate_intent(candidate_intent_document)
 
     scoring_parameters_bytes = json.dumps(
-        {
-            "blend": ScoringParams().blend,
-            "epsilon": ScoringParams().epsilon,
-            "fit_weights": [list(row) for row in ScoringParams().fit_weights],
-            "mean_p": ScoringParams().mean_p,
-            "opportunity_weights": [
-                list(row) for row in ScoringParams().opportunity_weights
-            ],
-        },
+        ScoringParams().reference_payload,
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
@@ -1630,6 +2567,18 @@ def _build_production_handoff_from_authenticated_time(
     }
     selection.pop("promotion_receipt_sha256")
     selection.pop("source_job_key")
+    if current_runtime:
+        policy_sha256 = (
+            preference.get("policy_sha256")
+            if type(preference) is dict
+            else None
+        )
+        if type(policy_sha256) is not str or _SHA256.fullmatch(policy_sha256) is None:
+            raise ProductionHandoffError(
+                "geography_binding",
+                "current geographic preference policy is not hash-bound",
+            )
+        selection["geographic_preference_policy_sha256"] = policy_sha256
     eligibility = {
         "checks": checks,
         "decision": "eligible",
@@ -1656,12 +2605,53 @@ def _build_production_handoff_from_authenticated_time(
             "vacancy_snapshot_sha256": vacancy_snapshot_sha,
         },
     }
+    if current_runtime:
+        manifest["preparation_geography"] = preparation_geography_document(
+            preparation_geography,
+            current_runtime=current_runtime,
+            unknown_uk_mode_allowed=soft_uk_mode_allowed,
+        )
     handoff = service.handoff(
         profile_id,
         source_job_key,
         manifest,
         handoff_job_key=handoff_job_key,
+        current_runtime=current_runtime,
     )
+    if current_runtime:
+        from career_automation.market_aligner_handoff import (
+            ParsedHandoff as JAAPparsedHandoff,
+            parse_handoff as parse_legacy_handoff,
+            parse_handoff_for_runtime,
+        )
+
+        try:
+            consumer_handoff = parse_handoff_for_runtime(
+                handoff.exact_bytes,
+                current_runtime=True,
+                require_strict_profile=False,
+                legacy_parser=parse_legacy_handoff,
+                current_parser=parse_current_runtime_handoff_v1,
+                make_parsed=JAAPparsedHandoff,
+            )
+        except ValueError:
+            raise ProductionHandoffError(
+                "handoff_consumer",
+                "current-runtime consumer rejected the emitted handoff",
+            ) from None
+        if (
+            type(consumer_handoff) is not JAAPparsedHandoff
+            or consumer_handoff.original_bytes != handoff.exact_bytes
+            or consumer_handoff.root_sha256 != handoff.root_sha256
+            or consumer_handoff.application_id != handoff.application_id
+            or consumer_handoff.strict_profile
+            or consumer_handoff.emission_profile
+            != CURRENT_RUNTIME_NON_RELEASE_PROFILE
+        ):
+            raise ProductionHandoffError(
+                "handoff_consumer",
+                "current-runtime consumer identity or non-release profile differs",
+            )
 
     profile_subject = {"profile_id": profile_id, "profile_version": profile.version}
     active_until = handoff_issued_at + timedelta(days=30)
@@ -1791,34 +2781,47 @@ def _build_production_handoff_from_authenticated_time(
         output,
         handoff,
         references=references,
-        environment="production",
-        trust_root_id=PRODUCTION_HANDOFF_TRUST_ROOT_ID,
+        environment=deployment.environment,
+        trust_root_id=deployment.trust_root_id,
         issued_at=_utc(handoff_issued_at),
         source_job_key=source_job_key,
     )
+    current_runtime = deployment.environment == "current_runtime"
     receipt_basis = {
         "application_id": handoff.application_id,
         "bundle_identity": f"bundles/{written.source_record_sha256}",
         "employer_dossier_sha256": _sha(dossier_bytes),
-        "environment": "production",
+        "environment": deployment.environment,
         "handoff_job_key": handoff_job_key,
         "handoff_root_sha256": written.handoff_root_sha256,
         "manifest_sha256": written.manifest_sha256,
         "processing_promotion_sha256": str(promotion_row["receipt_sha256"]),
         "producer_commit_sha": producer_commit,
         "release_token_issued": False,
-        "schema_version": "market-aligner.production-handoff-execution.v2",
+        "schema_version": (
+            "market-aligner.current-runtime-handoff-execution.v1"
+            if current_runtime
+            else "market-aligner.production-handoff-execution.v2"
+        ),
         "source_job_key": source_job_key,
         "source_record_sha256": written.source_record_sha256,
         "submission_authority": False,
-        "trust_root_id": PRODUCTION_HANDOFF_TRUST_ROOT_ID,
+        "trust_root_id": deployment.trust_root_id,
     }
+    if current_runtime:
+        receipt_basis["release_authority"] = False
+        receipt_basis["freshness_provenance"] = deployment.freshness_provenance
     receipt_semantic_sha = _sha(_canonical(receipt_basis))
     receipt_bytes = _canonical(
         {**receipt_basis, "semantic_receipt_sha256": receipt_semantic_sha}
     )
     receipt_path = _persist_execution_receipt(
         deployment.output_root, receipt_semantic_sha, receipt_bytes
+    )
+    service.assessments._record_published_handoff(
+        handoff.exact_bytes,
+        receipt_bytes,
+        current_runtime=current_runtime,
     )
     return ProductionHandoffReceipt(
         source_job_key=source_job_key,
@@ -1839,6 +2842,10 @@ def _build_production_handoff_from_authenticated_time(
         employer_dossier_sha256=_sha(dossier_bytes),
         execution_receipt_path=receipt_path,
         execution_receipt_sha256=_sha(receipt_bytes),
+        environment=deployment.environment,
+        release_authority=False,
+        trust_root_id=deployment.trust_root_id,
+        freshness_provenance=deployment.freshness_provenance,
     )
 
 

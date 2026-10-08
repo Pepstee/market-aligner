@@ -23,15 +23,18 @@ JSON fallback; `jsonschema` is optional (light manual validation if absent).
 from __future__ import annotations
 
 import hashlib
+import errno
 import re
 import json
 import os
 import shutil
+import stat
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 # --------------------------------------------------------------------------- #
 # Paths — everything this module writes lives under llm/data/ (per protocol).
@@ -42,10 +45,469 @@ _CACHE_DIR = _DATA_DIR / "cache"
 _USAGE_LOG = _DATA_DIR / "usage.jsonl"
 _REPO_ROOT = _MODULE_DIR.parent
 _CONFIG_PATH = _REPO_ROOT / "skeleton" / "config.yaml"
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_MAX_STRUCTURED_IMAGES = 8
+_MAX_STRUCTURED_IMAGE_BYTES = 16 * 1024 * 1024
+_MAX_STRUCTURED_IMAGE_SET_BYTES = 32 * 1024 * 1024
+
+
+def _validate_structured_images(images: Sequence[bytes]) -> tuple[bytes, ...]:
+    if not isinstance(images, (tuple, list)) or len(images) > _MAX_STRUCTURED_IMAGES:
+        raise ValueError("structured review image count is invalid")
+    normalized = tuple(images)
+    total_bytes = 0
+    for image in normalized:
+        if type(image) is not bytes or not image.startswith(_PNG_SIGNATURE):
+            raise ValueError("structured review image is not a PNG")
+        if len(image) > _MAX_STRUCTURED_IMAGE_BYTES:
+            raise ValueError("structured review image exceeds its byte limit")
+        total_bytes += len(image)
+    if total_bytes > _MAX_STRUCTURED_IMAGE_SET_BYTES:
+        raise ValueError("structured review image set exceeds its byte limit")
+    return normalized
 
 
 class LLMError(RuntimeError):
     """Any client-level failure (backend exhausted retries, bad structured output)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        backend_failure: dict[str, object] | None = None,
+    ) -> None:
+        self.backend_failure = (
+            dict(backend_failure) if backend_failure is not None else None
+        )
+        super().__init__(message)
+
+
+class StructuredOutputError(LLMError):
+    """A provider response did not satisfy its requested JSON contract."""
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_MAX_BACKEND_DIAGNOSTIC_BYTES = 16 * 1024
+_OPERATION_FIELD_RE = re.compile(
+    r'''(?i)["']?operation["']?\s*[:=]\s*["']?([a-z][a-z0-9_-]{0,31})'''
+)
+_PATH_FIELD_RE = re.compile(
+    r'''(?i)["']?path["']?\s*[:=]\s*(?P<path>"[^"]*"|'[^']*'|[^\s,;}]+)'''
+)
+_ERRNO_FIELD_RE = re.compile(
+    r'''(?i)["']?errno["']?\s*[:=]\s*["']?([a-z][a-z0-9]*|[0-9]{1,3})(?![a-z0-9_])'''
+)
+_ERRNO_TOKEN_RE = re.compile(r"\bE[A-Z0-9]+\b")
+_SAFE_BACKEND_OPERATIONS = frozenset(
+    {
+        "bind",
+        "chdir",
+        "connect",
+        "exec",
+        "execve",
+        "listen",
+        "mkdir",
+        "open",
+        "openat",
+        "read",
+        "rename",
+        "socket",
+        "spawn",
+        "stat",
+        "unlink",
+        "write",
+    }
+)
+_KNOWN_ERRNO_NAMES = frozenset(errno.errorcode.values())
+_SAFE_BACKEND_PATH_CLASSES = frozenset(
+    {"absolute", "dev", "etc", "home", "proc", "relative", "run", "srv", "tmp", "url", "var", "windows"}
+)
+_SAFE_BACKEND_CATEGORIES = frozenset(
+    {
+        "authentication_error",
+        "backend_error",
+        "filesystem_read_only",
+        "permission_denied",
+        "process_exit",
+        "sandbox_runtime_denied",
+        "timeout",
+    }
+)
+_SAFE_PRIVATE_CAPTURE_STATUSES = frozenset(
+    {"configuration_invalid", "not_requested", "write_failed", "written"}
+)
+
+
+def _bounded_diagnostic_bytes(value: bytes, limit: int) -> bytes:
+    if len(value) <= limit:
+        return value
+    marker = b"\n[diagnostic truncated]\n"
+    available = limit - len(marker)
+    prefix_size = available // 2
+    suffix_size = available - prefix_size
+    return value[:prefix_size] + marker + value[-suffix_size:]
+
+
+def _capture_backend_output(
+    stdout: str | None, stderr: str | None
+) -> tuple[str, str]:
+    stdout_bytes = (stdout or "").encode("utf-8", errors="replace")
+    stderr_bytes = (stderr or "").encode("utf-8", errors="replace")
+    diagnostic_hash = hashlib.sha256(stdout_bytes + b"\n" + stderr_bytes).hexdigest()
+    stream_budget = (_MAX_BACKEND_DIAGNOSTIC_BYTES - 1) // 2
+    bounded_stdout = _bounded_diagnostic_bytes(stdout_bytes, stream_budget)
+    bounded_stderr = _bounded_diagnostic_bytes(stderr_bytes, stream_budget)
+    bounded = bounded_stdout + b"\n" + bounded_stderr
+    return bounded.decode("utf-8", errors="replace"), diagnostic_hash
+
+
+def _write_private_backend_capture(
+    directory_value: str | None, stdout: str | None, stderr: str | None
+) -> dict[str, object]:
+    if not directory_value:
+        return {
+            "private_capture_status": "not_requested",
+            "private_capture_sha256": None,
+            "private_capture_errno": None,
+        }
+    try:
+        directory = Path(directory_value)
+        if not directory.is_absolute() or directory.is_symlink():
+            raise ValueError
+        resolved = directory.resolve(strict=True)
+        temporary_root = Path("/tmp").resolve(strict=True)
+        project_root = _MODULE_DIR.parents[2].resolve(strict=True)
+        if (
+            not resolved.is_relative_to(temporary_root)
+            or resolved.is_relative_to(project_root)
+        ):
+            raise ValueError
+        status = resolved.lstat()
+        if (
+            not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != os.getuid()
+            or stat.S_IMODE(status.st_mode) != 0o700
+        ):
+            raise ValueError
+        stdout_bytes = (stdout or "").encode("utf-8", errors="replace")
+        stderr_bytes = (stderr or "").encode("utf-8", errors="replace")
+        stream_budget = (_MAX_BACKEND_DIAGNOSTIC_BYTES - 1) // 2
+        artifact = {
+            "schema_version": "jaa.private-backend-process-capture.v1",
+            "stdout_bytes": len(stdout_bytes),
+            "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+            "stdout_excerpt": _bounded_diagnostic_bytes(
+                stdout_bytes, stream_budget
+            ).decode("utf-8", errors="replace"),
+            "stderr_bytes": len(stderr_bytes),
+            "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+            "stderr_excerpt": _bounded_diagnostic_bytes(
+                stderr_bytes, stream_budget
+            ).decode("utf-8", errors="replace"),
+        }
+        payload = json.dumps(
+            artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        target = resolved / "child-process-output.json"
+        descriptor = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return {
+            "private_capture_status": "written",
+            "private_capture_sha256": hashlib.sha256(payload).hexdigest(),
+            "private_capture_errno": None,
+        }
+    except OSError as error:
+        return {
+            "private_capture_status": "write_failed",
+            "private_capture_sha256": None,
+            "private_capture_errno": errno.errorcode.get(error.errno),
+        }
+    except (RuntimeError, ValueError):
+        return {
+            "private_capture_status": "configuration_invalid",
+            "private_capture_sha256": None,
+            "private_capture_errno": None,
+        }
+
+
+def _without_incidental_path_alias_warning(value: str) -> str:
+    retained_lines = []
+    for line in value.splitlines():
+        lowered = line.lower()
+        if "path aliases" in lowered and any(
+            marker in lowered
+            for marker in (
+                "read-only file system",
+                "read-only filesystem",
+                "erofs",
+            )
+        ):
+            line = re.sub(
+                r"(?i)read-only\s+(?:file\s+system|filesystem)|\bEROFS\b",
+                "",
+                line,
+            )
+        retained_lines.append(line)
+    return "\n".join(retained_lines)
+
+
+def _backend_path_class(value: str) -> str:
+    path = value.strip().strip("\"'")
+    if re.match(r"(?i)^[a-z][a-z0-9+.-]*://", path) or path.lower().startswith("file:"):
+        return "url"
+    if re.match(r"^[A-Za-z]:[\\/]", path):
+        return "windows"
+    if path.startswith("/"):
+        if path.startswith("//"):
+            return "absolute"
+        root = path.split("/", 2)[1].lower()
+        return root if root in {"dev", "etc", "home", "proc", "run", "srv", "tmp", "var"} else "absolute"
+    return "relative"
+
+
+def _normalise_backend_errno(value: object) -> str | None:
+    if isinstance(value, str):
+        upper = value.upper()
+        if upper in _KNOWN_ERRNO_NAMES:
+            return upper
+        if value.isascii() and value.isdigit() and len(value) <= 3:
+            return errno.errorcode.get(int(value))
+    elif isinstance(value, int) and not isinstance(value, bool):
+        return errno.errorcode.get(value)
+    return None
+
+
+def _backend_diagnostic_fields(value: str | None) -> dict[str, str | None]:
+    if not value:
+        return {
+            "error_category": "process_exit",
+            "operation": None,
+            "path_class": None,
+            "errno": None,
+        }
+    source = _bounded_diagnostic_bytes(
+        value.encode("utf-8", errors="replace"), _MAX_BACKEND_DIAGNOSTIC_BYTES
+    ).decode("utf-8", errors="replace")
+    source = _ANSI_ESCAPE_RE.sub("", source)
+    source = _without_incidental_path_alias_warning(source)
+    operation_match = _OPERATION_FIELD_RE.search(source)
+    operation = operation_match.group(1).lower() if operation_match else None
+    if operation not in _SAFE_BACKEND_OPERATIONS:
+        operation = None
+    errno_matches = list(_ERRNO_FIELD_RE.finditer(source))
+    errno_values = [match.group(1) for match in errno_matches]
+    errno_name = next(
+        (
+            _normalise_backend_errno(value)
+            for value in errno_values
+            if not (value.isascii() and value.isdigit())
+            and _normalise_backend_errno(value)
+        ),
+        None,
+    )
+    if errno_name is None:
+        errno_name = next(
+            (_normalise_backend_errno(value) for value in errno_values if _normalise_backend_errno(value)),
+            None,
+        )
+    if errno_name is None:
+        errno_match = _ERRNO_TOKEN_RE.search(source)
+        if errno_match and errno_match.group(0) in _KNOWN_ERRNO_NAMES:
+            errno_name = errno_match.group(0)
+    category = _backend_process_error_category(source)
+    if errno_name is None and category == "filesystem_read_only":
+        errno_name = "EROFS"
+    path_match = _PATH_FIELD_RE.search(source)
+    path_class = _backend_path_class(path_match.group("path")) if path_match else None
+    return {
+        "error_category": category,
+        "operation": operation,
+        "path_class": path_class,
+        "errno": errno_name,
+    }
+
+
+def redact_backend_diagnostic(value: str | None) -> str | None:
+    if not value:
+        return None
+    details = _backend_diagnostic_fields(value)
+    fields = [str(details["error_category"])]
+    if details["operation"]:
+        fields.append(f"operation={details['operation']}")
+    if details["errno"]:
+        fields.append(f"errno={details['errno']}")
+    if details["path_class"]:
+        fields.append("path=[PATH]")
+    if fields == ["process_exit"]:
+        fields.append("unstructured stderr omitted")
+    return " ".join(fields)
+
+
+def sanitize_backend_failure_record(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    raw_diagnosis = value.get("stderr_diagnosis")
+    diagnosis = raw_diagnosis if isinstance(raw_diagnosis, str) else None
+    details = _backend_diagnostic_fields(diagnosis)
+    raw_category = value.get("error_category")
+    category = (
+        raw_category
+        if isinstance(raw_category, str) and raw_category in _SAFE_BACKEND_CATEGORIES
+        else details["error_category"]
+    )
+    if category not in _SAFE_BACKEND_CATEGORIES:
+        category = "backend_error"
+    raw_exit_code = value.get("exit_code")
+    exit_code = (
+        raw_exit_code
+        if isinstance(raw_exit_code, int) and not isinstance(raw_exit_code, bool)
+        else None
+    )
+    raw_operation = value.get("operation")
+    operation = (
+        raw_operation
+        if isinstance(raw_operation, str) and raw_operation in _SAFE_BACKEND_OPERATIONS
+        else details["operation"]
+    )
+    raw_path_class = value.get("path_class")
+    path_class = (
+        raw_path_class
+        if isinstance(raw_path_class, str) and raw_path_class in _SAFE_BACKEND_PATH_CLASSES
+        else None
+    )
+    errno_name = _normalise_backend_errno(value.get("errno")) or details["errno"]
+    raw_hash = value.get("diagnostic_sha256")
+    diagnostic_hash = (
+        raw_hash
+        if isinstance(raw_hash, str) and re.fullmatch(r"[0-9a-f]{64}", raw_hash)
+        else None
+    )
+    raw_capture_status = value.get("private_capture_status")
+    capture_status = (
+        raw_capture_status
+        if isinstance(raw_capture_status, str)
+        and raw_capture_status in _SAFE_PRIVATE_CAPTURE_STATUSES
+        else "not_requested"
+    )
+    raw_capture_hash = value.get("private_capture_sha256")
+    capture_hash = (
+        raw_capture_hash
+        if isinstance(raw_capture_hash, str)
+        and re.fullmatch(r"[0-9a-f]{64}", raw_capture_hash)
+        else None
+    )
+    capture_errno = _normalise_backend_errno(value.get("private_capture_errno"))
+    return {
+        "error_category": category,
+        "exit_code": exit_code,
+        "operation": operation,
+        "path_class": path_class,
+        "errno": errno_name,
+        "diagnostic_sha256": diagnostic_hash,
+        "stderr_diagnosis": redact_backend_diagnostic(diagnosis),
+        "private_capture_status": capture_status,
+        "private_capture_sha256": capture_hash,
+        "private_capture_errno": capture_errno,
+    }
+
+
+def _backend_failure_record(
+    exit_code: int,
+    stdout: str | None,
+    stderr: str | None,
+    private_capture_metadata: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    diagnostic, diagnostic_hash = _capture_backend_output(stdout, stderr)
+    details = _backend_diagnostic_fields(diagnostic)
+    return sanitize_backend_failure_record(
+        {
+            **details,
+            "exit_code": exit_code,
+            "diagnostic_sha256": diagnostic_hash,
+            "stderr_diagnosis": redact_backend_diagnostic(diagnostic),
+            **dict(private_capture_metadata or {}),
+        }
+    )
+
+
+def _backend_process_error_category(stderr: str | None) -> str:
+    lowered = _without_incidental_path_alias_warning(stderr or "").lower()
+    if "sandbox_runtime_denied" in lowered or re.search(
+        r"sandbox.{0,40}(?:denied|blocked)", lowered
+    ):
+        return "sandbox_runtime_denied"
+    if any(
+        marker in lowered
+        for marker in ("permission denied", "operation not permitted", "eperm", "eacces")
+    ):
+        return "permission_denied"
+    if any(
+        marker in lowered
+        for marker in ("not logged in", "unauthorized", "authentication failed")
+    ):
+        return "authentication_error"
+    if any(
+        marker in lowered
+        for marker in ("read-only file system", "read-only filesystem", "erofs")
+    ):
+        return "filesystem_read_only"
+    return "process_exit"
+
+
+class BackendProcessFailure(RuntimeError):
+    def __init__(
+        self,
+        backend: str,
+        *,
+        exit_code: int,
+        stderr: str | None,
+        stdout: str | None = None,
+        private_capture_metadata: Mapping[str, object] | None = None,
+    ) -> None:
+        self.backend_failure = _backend_failure_record(
+            exit_code, stdout, stderr, private_capture_metadata
+        )
+        category = self.backend_failure["error_category"]
+        diagnosis = self.backend_failure["stderr_diagnosis"]
+        detail = diagnosis or "stderr empty"
+        super().__init__(f"{backend} exited {exit_code} ({category}): {detail}")
+
+
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    status = path.lstat()
+    if not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid():
+        raise LLMError(f"LLM runtime directory is unsafe: {path}")
+    if stat.S_IMODE(status.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+
+
+def _require_private_file(path: Path, descriptor: int) -> None:
+    status = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(status.st_mode)
+        or status.st_uid != os.getuid()
+        or status.st_nlink != 1
+        or stat.S_IMODE(status.st_mode) != 0o600
+    ):
+        raise LLMError(f"LLM runtime file is unsafe: {path}")
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written < 1:
+            raise LLMError("LLM runtime file write made no progress")
+        offset += written
 
 
 # --------------------------------------------------------------------------- #
@@ -121,6 +583,15 @@ class LLMResponse:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     model: str = ""
+    # Secret-free provider/transport evidence for authority-bearing callers.
+    # Cache entries deliberately omit this field: a prior provider exchange
+    # must never be replayed as evidence for a fresh call.
+    transport_evidence: Optional[dict[str, str]] = None
+    # Exact provider bytes are private runtime material. The client persists
+    # them create-only before returning, then clears this in-memory field.
+    private_transport_payload: Optional[dict[str, bytes]] = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def total_tokens(self) -> int:
@@ -358,7 +829,7 @@ class CodexCliBackend(Backend):
     """Shell out to the locally-installed `codex` CLI (OpenAI Codex, headless).
 
     Pure TRANSPORT, mirror of ClaudeCliBackend: invokes
-        codex exec --skip-git-repo-check -s read-only \
+        codex exec --json --ephemeral --skip-git-repo-check -s read-only \
               --output-last-message <tmpfile> [-m <model>] -
     with the prompt on STDIN and reads the agent's final message from the
     tmpfile (avoids parsing the JSONL event stream). Sandbox is read-only —
@@ -389,7 +860,38 @@ class CodexCliBackend(Backend):
         return self.resolve_binary() is not None
 
     def complete(self, system: str, user: str, temperature: float) -> LLMResponse:
+        return self._complete_with_cli(system, user, temperature)
+
+    def complete_structured(
+        self,
+        system: str,
+        user: str,
+        temperature: float,
+        *,
+        schema: dict[str, Any],
+        task: str = "generic",
+        image_bytes: Sequence[bytes] = (),
+    ) -> LLMResponse:
+        return self._complete_with_cli(
+            system,
+            user,
+            temperature,
+            schema=schema,
+            image_bytes=image_bytes,
+        )
+
+    def _complete_with_cli(
+        self,
+        system: str,
+        user: str,
+        temperature: float,
+        *,
+        schema: dict[str, Any] | None = None,
+        image_bytes: Sequence[bytes] = (),
+    ) -> LLMResponse:
         import tempfile
+
+        normalized_images = _validate_structured_images(image_bytes)
 
         codex = self.resolve_binary()
         if codex is None:
@@ -401,11 +903,48 @@ class CodexCliBackend(Backend):
 
         prompt = f"{system}\n\n{user}" if system else user
 
-        with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as tf:
-            out_path = Path(tf.name)
+        out_path: Path | None = None
+        schema_path: Path | None = None
+        image_paths: list[Path] = []
         try:
-            cmd = [codex, "exec", "--skip-git-repo-check", "-s", "read-only",
+            with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as tf:
+                out_path = Path(tf.name)
+            if schema is not None:
+                schema_fd, schema_name = tempfile.mkstemp(
+                    prefix="jaa-codex-output-schema-",
+                    suffix=".json",
+                )
+                schema_path = Path(schema_name)
+                with os.fdopen(schema_fd, "w", encoding="utf-8") as schema_file:
+                    os.fchmod(schema_file.fileno(), 0o600)
+                    json.dump(
+                        schema,
+                        schema_file,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    schema_file.write("\n")
+                    schema_file.flush()
+                    os.fsync(schema_file.fileno())
+            for image in normalized_images:
+                image_fd, image_name = tempfile.mkstemp(
+                    prefix="jaa-codex-review-page-",
+                    suffix=".png",
+                )
+                image_path = Path(image_name)
+                image_paths.append(image_path)
+                with os.fdopen(image_fd, "wb") as image_file:
+                    os.fchmod(image_file.fileno(), 0o600)
+                    image_file.write(image)
+                    image_file.flush()
+                    os.fsync(image_file.fileno())
+            cmd = [codex, "exec", "--json", "--ephemeral", "--skip-git-repo-check", "-s", "read-only",
                    "--output-last-message", str(out_path)]
+            if schema_path is not None:
+                cmd += ["--output-schema", str(schema_path)]
+            for image_path in image_paths:
+                cmd += ["--image", str(image_path)]
             if self.model:
                 cmd += ["-m", self.model]
             cmd += ["-"]   # read the prompt from stdin
@@ -421,18 +960,37 @@ class CodexCliBackend(Backend):
             except OSError as exc:
                 raise LLMError(f"failed to launch codex CLI ({codex}): {exc}") from exc
 
-            blob = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+            blob, _ = _capture_backend_output(proc.stdout, proc.stderr)
             low = blob.lower()
             if ("login" in low and ("not logged in" in low or "codex login" in low
                                     or "please log in" in low or "need to log in" in low)):
+                private_capture_metadata = _write_private_backend_capture(
+                    os.environ.get("JAA_LLM_DIAGNOSTIC_CAPTURE_DIR"),
+                    proc.stdout,
+                    proc.stderr,
+                )
                 raise LLMError(
                     "codex CLI not logged in — run `codex login` on this machine "
-                    "(uses your ChatGPT account)."
+                    "(uses your ChatGPT account).",
+                    backend_failure=_backend_failure_record(
+                        proc.returncode,
+                        proc.stdout,
+                        proc.stderr,
+                        private_capture_metadata,
+                    ),
                 )
             if proc.returncode != 0:
-                raise RuntimeError(
-                    f"codex CLI exited {proc.returncode}: "
-                    f"{(proc.stderr or proc.stdout or '').strip()[:300]}"
+                private_capture_metadata = _write_private_backend_capture(
+                    os.environ.get("JAA_LLM_DIAGNOSTIC_CAPTURE_DIR"),
+                    proc.stdout,
+                    proc.stderr,
+                )
+                raise BackendProcessFailure(
+                    "codex CLI",
+                    exit_code=proc.returncode,
+                    stderr=proc.stderr,
+                    stdout=proc.stdout,
+                    private_capture_metadata=private_capture_metadata,
                 )
 
             text = ""
@@ -442,9 +1000,10 @@ class CodexCliBackend(Backend):
                 # Some codex builds print the final message to stdout instead.
                 text = (proc.stdout or "").strip()
             if not text:
+                diagnosis = redact_backend_diagnostic(proc.stderr) or "stderr empty"
                 raise RuntimeError(
                     "codex CLI returned an empty result "
-                    f"(stderr: {(proc.stderr or '').strip()[:200] or 'none'})"
+                    f"({diagnosis})"
                 )
             return LLMResponse(
                 text=text,
@@ -453,10 +1012,12 @@ class CodexCliBackend(Backend):
                 model=self.model or "codex-default",
             )
         finally:
-            try:
-                out_path.unlink()
-            except FileNotFoundError:
-                pass
+            for temporary_path in (*image_paths, schema_path, out_path):
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink()
+                    except FileNotFoundError:
+                        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -467,6 +1028,7 @@ def make_backend(cfg: dict[str, Any]) -> Backend:
 
       claude_cli -> ClaudeCliBackend (model + cli_timeout_seconds from config)
       codex_cli  -> CodexCliBackend  (codex_model + cli_timeout_seconds from config)
+      openai_responses -> OpenAIResponsesBackend (direct structured Responses API)
       mock       -> MockBackend       (offline, deterministic)
       stub       -> StubBackend       (real-provider shape; unwired)
 
@@ -483,6 +1045,22 @@ def make_backend(cfg: dict[str, Any]) -> Backend:
         return CodexCliBackend(
             model=str(cfg.get("codex_model", "") or ""),   # "" = codex CLI default
             cli_timeout_seconds=float(cfg.get("cli_timeout_seconds", 120) or 120),
+        )
+    if name == "openai_responses":
+        # Lazy import avoids a module cycle: the provider implements Backend.
+        from .openai_responses import OpenAIResponsesBackend, OpenAIResponsesConfig
+
+        return OpenAIResponsesBackend(
+            OpenAIResponsesConfig(
+                requested_model=str(
+                    cfg.get("openai_model", cfg.get("model", "")) or ""
+                ),
+                api_key_environment_variable=str(
+                    cfg.get("openai_api_key_env", "OPENAI_API_KEY")
+                    or "OPENAI_API_KEY"
+                ),
+                timeout_seconds=int(cfg.get("openai_timeout_seconds", 90) or 90),
+            )
         )
     if name == "stub":
         return StubBackend(model=str(cfg.get("model", "REPLACE_ME") or "REPLACE_ME"))
@@ -507,6 +1085,7 @@ class LLMClient:
     cache_enabled: bool = True
     cache_dir: Path = _CACHE_DIR
     usage_log: Path = _USAGE_LOG
+    transport_archive_dir: Optional[Path] = None
     price_per_1k_prompt: float = 0.0      # cost knobs; 0 for mock/unpriced runs
     price_per_1k_completion: float = 0.0
     _backoff_base: float = 0.2            # seconds; overridable so tests stay fast
@@ -514,8 +1093,11 @@ class LLMClient:
     def __post_init__(self) -> None:
         self.cache_dir = Path(self.cache_dir)
         self.usage_log = Path(self.usage_log)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.usage_log.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_private_directory(self.cache_dir)
+        _ensure_private_directory(self.usage_log.parent)
+        if self.transport_archive_dir is not None:
+            self.transport_archive_dir = Path(self.transport_archive_dir)
+            _ensure_private_directory(self.transport_archive_dir)
 
     # -- factory: build from skeleton/config.yaml --------------------------- #
     @classmethod
@@ -526,9 +1108,13 @@ class LLMClient:
         **overrides: Any,
     ) -> "LLMClient":
         cfg = load_llm_config(config_path)
+        selected_backend = backend if backend is not None else make_backend(cfg)
+        configured_model = cfg.get("model", "REPLACE_ME")
+        if selected_backend.name.startswith("openai.responses.https@sha256:"):
+            configured_model = cfg.get("openai_model", configured_model)
         kwargs: dict[str, Any] = dict(
-            backend=backend if backend is not None else make_backend(cfg),
-            model=cfg.get("model", "REPLACE_ME"),
+            backend=selected_backend,
+            model=configured_model,
             temperature=float(cfg.get("temperature", 0.0) or 0.0),
             max_retries=int(cfg.get("max_retries", 3) or 3),
             cache_enabled=bool(cfg.get("cache", True)),
@@ -563,28 +1149,58 @@ class LLMClient:
         p = self._cache_path(key)
         if not p.exists():
             return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-            return LLMResponse(**d)
-        except Exception:
+            descriptor = os.open(p, flags)
+        except FileNotFoundError:
             return None
+        except OSError as exc:
+            raise LLMError(f"LLM cache entry cannot be opened safely: {p}") from exc
+        try:
+            _require_private_file(p, descriptor)
+            with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as handle:
+                document = json.load(handle)
+            return LLMResponse(**document)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise LLMError(f"LLM cache entry is invalid: {p}") from exc
+        finally:
+            os.close(descriptor)
 
     def _cache_put(self, key: str, resp: LLMResponse) -> None:
         if not self.cache_enabled:
             return
         p = self._cache_path(key)
-        p.write_text(
-            json.dumps(
-                {
-                    "text": resp.text,
-                    "prompt_tokens": resp.prompt_tokens,
-                    "completion_tokens": resp.completion_tokens,
-                    "model": resp.model,
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
+        payload = json.dumps(
+            {
+                "text": resp.text,
+                "prompt_tokens": resp.prompt_tokens,
+                "completion_tokens": resp.completion_tokens,
+                "model": resp.model,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(p, flags, 0o600)
+        except FileExistsError:
+            try:
+                descriptor = os.open(
+                    p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                )
+            except OSError as exc:
+                raise LLMError(f"LLM cache entry cannot be opened safely: {p}") from exc
+            try:
+                _require_private_file(p, descriptor)
+            finally:
+                os.close(descriptor)
+            return
+        try:
+            os.fchmod(descriptor, 0o600)
+            _require_private_file(p, descriptor)
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     # -- usage / cost log --------------------------------------------------- #
     def _log_usage(self, task: str, resp: LLMResponse, cache_hit: bool) -> None:
@@ -599,14 +1215,117 @@ class LLMClient:
             "total_tokens": resp.total_tokens,
             "cost_usd": round(self._cost(resp), 6),
         }
-        with self.usage_log.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        payload = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
+        create_flags = (
+            os.O_WRONLY
+            | os.O_APPEND
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        created = False
+        try:
+            descriptor = os.open(self.usage_log, create_flags, 0o600)
+            created = True
+        except FileExistsError:
+            try:
+                descriptor = os.open(
+                    self.usage_log,
+                    os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except OSError as exc:
+                raise LLMError(
+                    f"LLM usage log cannot be opened safely: {self.usage_log}"
+                ) from exc
+        try:
+            if created:
+                os.fchmod(descriptor, 0o600)
+            _require_private_file(self.usage_log, descriptor)
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def _cost(self, resp: LLMResponse) -> float:
         return (
             resp.prompt_tokens / 1000.0 * self.price_per_1k_prompt
             + resp.completion_tokens / 1000.0 * self.price_per_1k_completion
         )
+
+    @staticmethod
+    def _write_private_create_only(path: Path, payload: bytes) -> None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            _require_private_file(path, descriptor)
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _archive_private_transport(self, response: LLMResponse) -> None:
+        payload = response.private_transport_payload
+        if payload is None:
+            return
+        if set(payload) != {"request", "response"} or any(
+            not isinstance(value, bytes) or not value for value in payload.values()
+        ):
+            raise LLMError("private provider transport payload is malformed")
+        evidence = response.transport_evidence
+        if evidence is None:
+            raise LLMError("private provider bytes lack public transport evidence")
+        if (
+            hashlib.sha256(payload["request"]).hexdigest()
+            != evidence.get("request_sha256")
+            or hashlib.sha256(payload["response"]).hexdigest()
+            != evidence.get("response_sha256")
+        ):
+            raise LLMError("private provider bytes disagree with transport evidence")
+        if self.transport_archive_dir is None:
+            raise LLMError(
+                "exact provider transport requires a private archive directory"
+            )
+        root = Path(self.transport_archive_dir)
+        _ensure_private_directory(root)
+        exchange_id = evidence.get("client_request_id", "")
+        if not re.fullmatch(r"[0-9a-f-]{36}", exchange_id):
+            raise LLMError("provider exchange identity is malformed")
+        # UUID parsing rejects a merely shape-compatible directory name.
+        try:
+            uuid.UUID(exchange_id)
+        except ValueError as exc:
+            raise LLMError("provider exchange identity is malformed") from exc
+        exchange_dir = root / exchange_id
+        try:
+            exchange_dir.mkdir(mode=0o700)
+        except FileExistsError as exc:
+            raise LLMError("provider exchange archive already exists") from exc
+        _ensure_private_directory(exchange_dir)
+        self._write_private_create_only(exchange_dir / "request.json", payload["request"])
+        self._write_private_create_only(
+            exchange_dir / "response.json", payload["response"]
+        )
+        manifest = {
+            "schema_version": "jaa.llm.private-provider-exchange.v1",
+            "transport_evidence": dict(evidence),
+        }
+        manifest_bytes = (
+            json.dumps(
+                manifest,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode()
+        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        self._write_private_create_only(
+            exchange_dir / "manifest.json", manifest_bytes
+        )
+        evidence["archive_manifest_sha256"] = manifest_sha256
+        response.private_transport_payload = None
 
     # -- core call ---------------------------------------------------------- #
     def complete(self, system: str, user: str, *, task: str = "generic") -> LLMResponse:
@@ -634,7 +1353,95 @@ class LLMClient:
                 last = exc
                 if attempt < self.max_retries:
                     time.sleep(self._backoff_base * (2 ** (attempt - 1)))
-        raise LLMError(f"backend failed after {self.max_retries} attempts: {last}")
+        raise LLMError(
+            f"backend failed after {self.max_retries} attempts: {last}",
+            backend_failure=getattr(last, "backend_failure", None),
+        )
+
+    def _complete_structured(
+        self,
+        system: str,
+        user: str,
+        *,
+        schema: dict[str, Any],
+        task: str,
+        image_bytes: tuple[bytes, ...] = (),
+    ) -> LLMResponse:
+        """Use a provider-native structured-output seam when one is present.
+
+        The ordinary Backend contract remains unchanged for existing CLI and
+        offline implementations. A native structured backend is discovered by
+        its explicit ``complete_structured`` method and still passes through
+        the client's cache, retry and usage-accounting boundaries.
+        """
+
+        structured = getattr(self.backend, "complete_structured", None)
+        if not callable(structured):
+            if image_bytes:
+                raise LLMError("configured backend cannot accept review images")
+            return self.complete(system, user, task=task)
+        cache_user = user
+        if image_bytes:
+            image_hashes = [hashlib.sha256(image).hexdigest() for image in image_bytes]
+            cache_user += "\n\nREVIEW IMAGE SHA256 LIST:" + json.dumps(image_hashes)
+        key = self.cache_key(
+            system,
+            cache_user,
+            self.temperature,
+            self.model,
+            backend=self.backend.name,
+        )
+        cached = self._cache_get(key)
+        if cached is not None:
+            self._log_usage(task, cached, cache_hit=True)
+            return cached
+
+        last: Optional[Exception] = None
+        if image_bytes:
+            try:
+                import inspect
+
+                parameters = inspect.signature(structured).parameters.values()
+            except (TypeError, ValueError):
+                parameters = ()
+            if not any(
+                parameter.name == "image_bytes"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            ):
+                raise LLMError("configured backend cannot accept review images")
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                structured_kwargs: dict[str, Any] = {
+                    "schema": schema,
+                    "task": task,
+                }
+                if image_bytes:
+                    structured_kwargs["image_bytes"] = image_bytes
+                response = structured(
+                    system,
+                    user,
+                    self.temperature,
+                    **structured_kwargs,
+                )
+                if not isinstance(response, LLMResponse):
+                    raise LLMError(
+                        "structured backend returned an unsupported response"
+                    )
+                self._archive_private_transport(response)
+                self._cache_put(key, response)
+                self._log_usage(task, response, cache_hit=False)
+                return response
+            except LLMError:
+                raise
+            except Exception as exc:
+                last = exc
+                if attempt < self.max_retries:
+                    time.sleep(self._backoff_base * (2 ** (attempt - 1)))
+        raise LLMError(
+            f"structured backend failed after {self.max_retries} attempts: {last}",
+            backend_failure=getattr(last, "backend_failure", None),
+        )
 
     # -- structured output helper ------------------------------------------ #
     def complete_json(
@@ -646,6 +1453,25 @@ class LLMClient:
         task: str = "generic",
         json_attempts: int = 2,
     ) -> dict[str, Any]:
+        data, _response = self.complete_json_with_response(
+            system,
+            user,
+            schema=schema,
+            task=task,
+            json_attempts=json_attempts,
+        )
+        return data
+
+    def complete_json_with_response(
+        self,
+        system: str,
+        user: str,
+        *,
+        schema: Optional[dict[str, Any]] = None,
+        task: str = "generic",
+        json_attempts: int = 2,
+        image_bytes: Sequence[bytes] = (),
+    ) -> tuple[dict[str, Any], LLMResponse]:
         """Complete, parse JSON (leniently), validate against `schema`.
 
         The schema is included in the model request, not merely applied after
@@ -655,8 +1481,11 @@ class LLMClient:
         Lenient parse tolerates markdown fences and prose around the object
         (real models do this despite instructions). On a bad response the cache
         entry is EVICTED before retrying, so a poisoned answer can never satisfy
-        this or any future lookup. Raises LLMError with a response preview on
-        final failure."""
+        this or any future lookup. Raises StructuredOutputError after final
+        structured-output rejection."""
+        normalized_images = _validate_structured_images(image_bytes)
+        if normalized_images and schema is None:
+            raise ValueError("review images require structured output")
         schema_contract = ""
         if schema is not None:
             schema_contract = (
@@ -667,7 +1496,6 @@ class LLMClient:
             )
 
         last_err = ""
-        preview = ""
         for attempt in range(1, json_attempts + 1):
             attempt_system = system + schema_contract
             if attempt > 1 and last_err:
@@ -676,24 +1504,48 @@ class LLMClient:
                     + last_err
                     + "\nCorrect that error and return the complete JSON object only."
                 )
-            resp = self.complete(attempt_system, user, task=task)
+            resp = (
+                self._complete_structured(
+                    attempt_system,
+                    user,
+                    schema=schema,
+                    task=task,
+                    image_bytes=normalized_images,
+                )
+                if schema is not None
+                else self.complete(attempt_system, user, task=task)
+            )
             try:
                 data = _coerce_json(resp.text)
                 if schema is not None:
                     validate_json(data, schema)
-                return data
+                if not isinstance(data, dict):
+                    raise LLMError("structured output root must be an object")
+                return data, resp
             except (json.JSONDecodeError, LLMError) as exc:
                 last_err = str(exc)
-                preview = repr((resp.text or "")[:200])
-                self._evict(attempt_system, user)  # never retain a poisoned answer
-        raise LLMError(
-            f"structured output failed for task '{task}' after {json_attempts} "
-            f"attempts: {last_err}; last response preview: {preview}"
+                self._evict(
+                    attempt_system,
+                    user,
+                    image_bytes=normalized_images,
+                )
+        raise StructuredOutputError(
+            f"structured output failed for task '{task}' after {json_attempts} attempts"
         )
 
-    def _evict(self, system: str, user: str) -> None:
+    def _evict(
+        self,
+        system: str,
+        user: str,
+        *,
+        image_bytes: tuple[bytes, ...] = (),
+    ) -> None:
         """Remove a cached response so the next call re-hits the backend."""
-        key = self.cache_key(system, user, self.temperature, self.model,
+        cache_user = user
+        if image_bytes:
+            image_hashes = [hashlib.sha256(image).hexdigest() for image in image_bytes]
+            cache_user += "\n\nREVIEW IMAGE SHA256 LIST:" + json.dumps(image_hashes)
+        key = self.cache_key(system, cache_user, self.temperature, self.model,
                              backend=self.backend.name)
         try:
             self._cache_path(key).unlink()

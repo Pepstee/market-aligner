@@ -331,7 +331,8 @@ _MATERIAL_IMPERATIVE = re.compile(
     r"use|work with|analyse|analyze)\b"
 )
 _KNOWN_PROVIDER_CHROME_SPAN = re.compile(
-    r"^create (?:a )?(?:job )?alert(?: required)?$"
+    r"^(?:create (?:a )?(?:job )?alert(?: required)?|"
+    r"indicates a required field)$"
 )
 _OPAQUE_GENERIC_WORDS = SEMANTIC_STOP_WORDS | frozenset(
     {
@@ -615,6 +616,38 @@ def _equivalence_metrics(
     }
 
 
+def _vacancy_equivalence_text(body: bytes) -> str:
+    decoded = body.decode("utf-8", errors="replace")
+    if not decoded.lstrip().startswith(("{", "[")):
+        return decoded
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError("invalid JSON constant")
+
+    try:
+        document = json.loads(
+            decoded,
+            object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+    except ValueError:
+        raise ValueError("vacancy JSON body is invalid") from None
+    if type(document) is not dict:
+        raise ValueError("vacancy JSON body must be an object")
+    content = document.get("content")
+    if type(content) is not str or not content.strip():
+        raise ValueError("vacancy JSON content is invalid")
+    return html.unescape(content)
+
+
 def verify_vacancy_body_equivalence(
     source_body: bytes,
     destination_body: bytes,
@@ -622,16 +655,12 @@ def verify_vacancy_body_equivalence(
     """Bind a current browser destination to the archived vacancy meaning."""
     if not source_body or not destination_body:
         raise ValueError("vacancy equivalence requires both exact bodies")
-    source_tokens = _semantic_token_sha256s(
-        source_body.decode("utf-8", errors="replace")
-    )
-    destination_tokens = _semantic_token_sha256s(
-        destination_body.decode("utf-8", errors="replace")
-    )
-    source_atoms = _atom_sha256s(source_body.decode("utf-8", errors="replace"))
-    destination_atoms = _atom_sha256s(
-        destination_body.decode("utf-8", errors="replace")
-    )
+    source_text = _vacancy_equivalence_text(source_body)
+    destination_text = _vacancy_equivalence_text(destination_body)
+    source_tokens = _semantic_token_sha256s(source_text)
+    destination_tokens = _semantic_token_sha256s(destination_text)
+    source_atoms = _atom_sha256s(source_text)
+    destination_atoms = _atom_sha256s(destination_text)
     metrics = _equivalence_metrics(
         source_tokens, destination_tokens, source_atoms, destination_atoms
     )

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 import os
 import base64
-from dataclasses import dataclass
+import copy
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
@@ -15,6 +17,7 @@ from typing import Mapping
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from pypdf import PdfReader
 
 from .application_compiler import CandidateContact
 from .evidence_matching import canonical_json
@@ -46,6 +49,366 @@ PLACEHOLDER = re.compile(
 
 def _json_bytes(value: object) -> bytes:
     return (canonical_json(value) + "\n").encode("utf-8")
+
+
+_CURRENT_CONTACT_FIELDS = ("full_name", "email", "phone", "city")
+_CURRENT_CONTACT_BINDINGS = frozenset(
+    {"manifest_sha256", "activation_sha256", "profile_sha256", "approval_id"}
+)
+_CURRENT_CONTACT_ERROR = "current_contact_provenance_invalid"
+_CURRENT_CONTACT_EMAIL = re.compile(
+    r"(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![A-Z0-9._%+-])",
+    re.IGNORECASE,
+)
+_CURRENT_CONTACT_PHONE = re.compile(
+    r"(?<![A-Za-z0-9])\+\s?[0-9](?:[0-9\s()./-]{6,}[0-9])(?![A-Za-z0-9])"
+)
+_CURRENT_CONTACT_NAME = re.compile(
+    r"^[^\W\d_][\w’'.-]*(?:[ \t]+[^\W\d_][\w’'.-]*){1,4}$",
+    re.UNICODE,
+)
+_NON_NAME_HEADER_LINES = frozenset(
+    {
+        "cv",
+        "curriculum vitae",
+        "resume",
+        "résumé",
+        "profile",
+        "professional summary",
+        "contact",
+        "experience",
+        "employment history",
+        "education",
+        "projects",
+        "skills",
+        "core capabilities",
+    }
+)
+
+
+@dataclass(frozen=True)
+class CurrentContactProvenance:
+    """Current contact projection bound to approved recovery inputs, not a signer."""
+
+    contact: CandidateContact
+    encoded_document: bytes = field(repr=False)
+    sha256: str
+
+    def __post_init__(self) -> None:
+        try:
+            document = json.loads(self.encoded_document)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError(_CURRENT_CONTACT_ERROR) from None
+        if (
+            type(self.contact) is not CandidateContact
+            or type(self.encoded_document) is not bytes
+            or type(document) is not dict
+            or self.encoded_document != _json_bytes(document)
+            or document.get("schema_version") != "current-contact-provenance-v1"
+            or type(document.get("contact")) is not dict
+            or document["contact"]
+            != {
+                "full_name": self.contact.full_name,
+                "email": self.contact.email,
+                "phone": self.contact.phone,
+                "city": self.contact.city,
+            }
+            or type(self.sha256) is not str
+            or not HEX_64.fullmatch(self.sha256)
+            or hashlib.sha256(self.encoded_document).hexdigest() != self.sha256
+            or document.get("provenance_sha256") != self.contact.provenance_sha256
+            or self.contact.city is not None
+        ):
+            raise ValueError(_CURRENT_CONTACT_ERROR)
+
+    @property
+    def source_hashes(self) -> tuple[str, ...]:
+        self.__post_init__()
+        document = json.loads(self.encoded_document)
+        return tuple(document["allowed_hashes"])
+
+    def document(self) -> dict[str, object]:
+        self.__post_init__()
+        return json.loads(self.encoded_document)
+
+
+def _saved_cv_contact_text(value: bytes) -> str:
+    if type(value) is not bytes or not value or len(value) > 8 * 1024 * 1024:
+        raise ValueError(_CURRENT_CONTACT_ERROR)
+    try:
+        reader = PdfReader(io.BytesIO(value), strict=True)
+        if reader.is_encrypted or not reader.pages:
+            raise ValueError
+        text = reader.pages[0].extract_text()
+    except Exception:
+        raise ValueError(_CURRENT_CONTACT_ERROR) from None
+    if type(text) is not str or not text.strip():
+        raise ValueError(_CURRENT_CONTACT_ERROR)
+    return text
+
+
+def _contact_values_from_first_page(
+    text: str,
+) -> tuple[str, str, str, int, int, int]:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    name_value: str | None = None
+    name_line_number = 0
+    for line_number, line in enumerate(lines[:12], start=1):
+        if (
+            _CURRENT_CONTACT_NAME.fullmatch(line)
+            and line.casefold() not in _NON_NAME_HEADER_LINES
+            and "@" not in line
+        ):
+            name_value = line
+            name_line_number = name_line_number or line_number
+            break
+    email_matches = list(_CURRENT_CONTACT_EMAIL.finditer(text))
+    phone_matches = list(_CURRENT_CONTACT_PHONE.finditer(text))
+    emails = list(dict.fromkeys(match.group(0) for match in email_matches))
+    phones = list(dict.fromkeys(match.group(0) for match in phone_matches))
+    normalized_phones = {
+        "+" + "".join(character for character in value if "0" <= character <= "9")
+        for value in phones
+    }
+    if (
+        name_value is None
+        or len(emails) != 1
+        or len(normalized_phones) != 1
+        or not 8 <= len(next(iter(normalized_phones))[1:]) <= 15
+    ):
+        raise ValueError(_CURRENT_CONTACT_ERROR)
+    phone = re.sub(r"\s+", " ", phones[0]).strip()
+    email_line_number = text.count("\n", 0, email_matches[0].start()) + 1
+    phone_line_number = text.count("\n", 0, phone_matches[0].start()) + 1
+    return (
+        name_value,
+        emails[0],
+        phone,
+        name_line_number,
+        email_line_number,
+        phone_line_number,
+    )
+
+
+def load_current_contact_provenance(
+    *,
+    saved_cv_bytes: object,
+    saved_cv_descriptors: object,
+    bindings: object,
+) -> CurrentContactProvenance:
+    """Extract only agreed contact fields from already-pinned CV bytes."""
+    if (
+        type(saved_cv_bytes) is not dict
+        or type(saved_cv_descriptors) is not list
+        or not saved_cv_descriptors
+    ):
+        raise ValueError(_CURRENT_CONTACT_ERROR)
+    rows: list[tuple[str, str, str, int, int, int, str, str]] = []
+    paths: set[str] = set()
+    for index, descriptor in enumerate(saved_cv_descriptors, start=1):
+        if (
+            type(descriptor) is not dict
+            or any(type(key) is not str for key in descriptor)
+            or set(descriptor) != {"relative_path", "sha256", "bytes"}
+        ):
+            raise ValueError(_CURRENT_CONTACT_ERROR)
+        relative_path = descriptor["relative_path"]
+        source_hash = descriptor["sha256"]
+        size = descriptor["bytes"]
+        if (
+            type(relative_path) is not str
+            or not relative_path
+            or relative_path.startswith("/")
+            or "\\" in relative_path
+            or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+            or relative_path in paths
+            or type(source_hash) is not str
+            or not HEX_64.fullmatch(source_hash)
+            or type(size) is not int
+            or not 0 < size <= 8 * 1024 * 1024
+        ):
+            raise ValueError(_CURRENT_CONTACT_ERROR)
+        paths.add(relative_path)
+        value = saved_cv_bytes.get(relative_path)
+        if (
+            type(value) is not bytes
+            or len(value) != size
+            or hashlib.sha256(value).hexdigest() != source_hash
+        ):
+            raise ValueError(_CURRENT_CONTACT_ERROR)
+        name, email, phone, name_line, email_line, phone_line = _contact_values_from_first_page(
+            _saved_cv_contact_text(value)
+        )
+        rows.append(
+            (
+                name,
+                email,
+                phone,
+                name_line,
+                email_line,
+                phone_line,
+                source_hash,
+                f"saved_cv_{index}",
+            )
+        )
+    if set(saved_cv_bytes) != paths:
+        raise ValueError(_CURRENT_CONTACT_ERROR)
+
+    names = {" ".join(row[0].split()).casefold() for row in rows}
+    emails = {row[1].casefold() for row in rows}
+    phones = {
+        "+" + "".join(character for character in row[2] if "0" <= character <= "9")
+        for row in rows
+    }
+    if len(names) != 1 or len(emails) != 1 or len(phones) != 1:
+        raise ValueError(_CURRENT_CONTACT_ERROR)
+
+    contact = {
+        "full_name": rows[0][0],
+        "email": rows[0][1],
+        "phone": rows[0][2],
+        "city": None,
+    }
+    source_columns = {"full_name": 3, "email": 4, "phone": 5}
+    field_sources = {
+        field_name: [
+            {
+                "sha256": row[6],
+                "locator": f"{row[7]}.page1.line{row[line_column]}",
+            }
+            for row in rows
+        ]
+        for field_name, line_column in source_columns.items()
+    }
+    allowed_hashes = sorted({row[6] for row in rows})
+    bound = bind_contact_sources(contact, field_sources, allowed_hashes, bindings)
+    provenance_sha256 = str(bound["provenance_sha256"])
+    contact_model = CandidateContact(
+        full_name=contact["full_name"],
+        email=contact["email"],
+        phone=contact["phone"],
+        city=None,
+        record_id=f"current-contact-{provenance_sha256}",
+        record_version=1,
+        provenance_sha256=provenance_sha256,
+    )
+    encoded = _json_bytes(bound)
+    return CurrentContactProvenance(
+        contact=contact_model,
+        encoded_document=encoded,
+        sha256=hashlib.sha256(encoded).hexdigest(),
+    )
+
+
+def bind_contact_sources(
+    contact: object,
+    field_sources: object,
+    allowed_hashes: object,
+    bindings: object,
+) -> dict[str, object]:
+    """Bind a current contact projection to exact approved input identities."""
+    if (
+        type(contact) is not dict
+        or any(type(key) is not str for key in contact)
+        or set(contact) != set(_CURRENT_CONTACT_FIELDS)
+        or any(contact[field] is None for field in ("full_name", "email"))
+    ):
+        raise ValueError(_CURRENT_CONTACT_ERROR)
+    live_fields = [field for field in _CURRENT_CONTACT_FIELDS if contact[field] is not None]
+    if (
+        type(field_sources) is not dict
+        or any(type(key) is not str for key in field_sources)
+        or set(field_sources) != set(live_fields)
+        or type(allowed_hashes) is not list
+        or not allowed_hashes
+    ):
+        raise ValueError(_CURRENT_CONTACT_ERROR)
+
+    hashes: list[str] = []
+    for value in allowed_hashes:
+        if type(value) is not str or HEX_64.fullmatch(value) is None:
+            raise ValueError(_CURRENT_CONTACT_ERROR)
+        hashes.append(value)
+    if len(set(hashes)) != len(hashes):
+        raise ValueError(_CURRENT_CONTACT_ERROR)
+    allowed = set(hashes)
+
+    def clean_text(value: object) -> str:
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError(_CURRENT_CONTACT_ERROR)
+        return value
+
+    sources: dict[str, list[dict[str, str]]] = {}
+    for field in live_fields:
+        rows = field_sources[field]
+        if type(rows) is not list or not rows:
+            raise ValueError(_CURRENT_CONTACT_ERROR)
+        normalized: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            if (
+                type(row) is not dict
+                or any(type(key) is not str for key in row)
+                or set(row) != {"sha256", "locator"}
+            ):
+                raise ValueError(_CURRENT_CONTACT_ERROR)
+            source_hash = row["sha256"]
+            if type(source_hash) is not str or HEX_64.fullmatch(source_hash) is None:
+                raise ValueError(_CURRENT_CONTACT_ERROR)
+            locator = clean_text(row["locator"])
+            identity = (source_hash, locator)
+            if source_hash not in allowed or identity in seen:
+                raise ValueError(_CURRENT_CONTACT_ERROR)
+            seen.add(identity)
+            normalized.append({"sha256": source_hash, "locator": locator})
+        sources[field] = normalized
+
+    if (
+        type(bindings) is not dict
+        or any(type(key) is not str for key in bindings)
+        or set(bindings) != _CURRENT_CONTACT_BINDINGS
+    ):
+        raise ValueError(_CURRENT_CONTACT_ERROR)
+    normalized_bindings = {
+        "manifest_sha256": bindings["manifest_sha256"],
+        "activation_sha256": bindings["activation_sha256"],
+        "profile_sha256": bindings["profile_sha256"],
+        "approval_id": clean_text(bindings["approval_id"]),
+    }
+    for name in ("manifest_sha256", "activation_sha256", "profile_sha256"):
+        if (
+            type(normalized_bindings[name]) is not str
+            or HEX_64.fullmatch(normalized_bindings[name]) is None
+        ):
+            raise ValueError(_CURRENT_CONTACT_ERROR)
+    document: dict[str, object] = {
+        "schema_version": "current-contact-provenance-v1",
+        "contact": copy.deepcopy(contact),
+        "field_sources": sources,
+        "allowed_hashes": hashes,
+        "bindings": normalized_bindings,
+    }
+    try:
+        encoded = (
+            json.dumps(
+                document,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise ValueError(_CURRENT_CONTACT_ERROR) from None
+    document["provenance_sha256"] = hashlib.sha256(encoded).hexdigest()
+    return document
 
 
 @dataclass(frozen=True)
@@ -481,10 +844,50 @@ def load_candidate_contact_authority(
     )
 
 
+def resolve_native_contact(
+    *,
+    current_runtime,
+    provenance,
+    signed_path,
+    current_type,
+    validate_current,
+    load_legacy,
+):
+    if type(current_runtime) is not bool:
+        raise TypeError("current_runtime must be exactly bool")
+    if not isinstance(current_type, type):
+        raise TypeError("current_type must be a class")
+    if not callable(validate_current):
+        raise TypeError("validate_current must be callable")
+    if not callable(load_legacy):
+        raise TypeError("load_legacy must be callable")
+
+    if current_runtime:
+        if signed_path is not None:
+            raise ValueError("current mode refuses a legacy signed contact path")
+        if type(provenance) is not current_type:
+            raise ValueError("current mode requires exact typed contact provenance")
+        result = validate_current(provenance)
+        if result is not None:
+            raise ValueError("current contact validation did not return None")
+        return provenance
+
+    if provenance is not None:
+        raise ValueError("legacy mode refuses current contact provenance")
+    is_nonempty_str = isinstance(signed_path, str) and signed_path != ""
+    if not is_nonempty_str and not isinstance(signed_path, os.PathLike):
+        raise ValueError("legacy mode requires a signed contact path")
+    return load_legacy(signed_path)
+
+
 __all__ = [
     "ATTESTATION",
     "CandidateContactAuthority",
     "CandidateContactResourceLease",
+    "CurrentContactProvenance",
+    "bind_contact_sources",
+    "load_current_contact_provenance",
+    "resolve_native_contact",
     "SCHEMA_VERSION",
     "PUBLIC_KEY_ENV",
     "REGISTRY_ATTESTATION",

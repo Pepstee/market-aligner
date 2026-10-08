@@ -10,6 +10,7 @@ from playwright.sync_api import Route, sync_playwright
 from form_filling.ats_forensics import (
     ATSForensicReceipt,
     ATSForensicRecorder,
+    load_forensic_receipt,
     redact_text,
     runtime_fingerprint,
     sanitize_url,
@@ -81,6 +82,53 @@ def test_records_only_redacted_content_addressed_diagnostics(tmp_path: Path) -> 
     assert verified["diagnostic_only"] is True
     assert verified["release_authority"] is False
     assert verified["submission_authority"] is False
+
+
+def test_load_forensic_receipt_replays_exact_binding_and_refuses_drift(
+    tmp_path: Path,
+) -> None:
+    recorder = _recorder(tmp_path)
+    recorder.record_checkpoint("ready")
+    receipt = recorder.finalize(outcome="prepared")
+    binding = {
+        "application_id": "synthetic-application",
+        "application_url": (
+            "https://jobs.ashbyhq.com/example/application?token=secret"
+        ),
+        "ats_name": "ashby",
+        "runtime_sha256": "a" * 64,
+        "artifact_set_sha256": "c" * 64,
+        "release_manifest_sha256": "b" * 64,
+    }
+    loaded = load_forensic_receipt(tmp_path, attempt_id="synthetic-attempt-1", **binding)
+    assert loaded == receipt
+    assert verify_forensic_receipt(tmp_path, loaded)["attempt_id"] == receipt.attempt_id
+    with pytest.raises(ValueError, match="binding differs"):
+        load_forensic_receipt(
+            tmp_path, attempt_id="synthetic-attempt-1",
+            **{**binding, "application_id": "foreign-application"},
+        )
+    with pytest.raises(ValueError, match="binding differs"):
+        load_forensic_receipt(
+            tmp_path, attempt_id="synthetic-attempt-1",
+            **{**binding, "runtime_sha256": "0" * 64},
+        )
+    with pytest.raises(KeyError):
+        load_forensic_receipt(
+            tmp_path, attempt_id="absent-attempt", **binding
+        )
+    # A valid receipt under a foreign filename must not satisfy this request.
+    (tmp_path / "manifests" / "other-attempt.json").write_bytes(
+        (tmp_path / receipt.manifest_path).read_bytes()
+    )
+    with pytest.raises(ValueError, match="binding differs: attempt_id"):
+        load_forensic_receipt(tmp_path, attempt_id="other-attempt", **binding)
+    with pytest.raises(ValueError, match="runtime hash"):
+        load_forensic_receipt(
+            tmp_path, attempt_id="synthetic-attempt-1",
+            **{**binding, "runtime_sha256": None},
+        )
+
 
 
 def test_receipt_and_verifier_fail_closed_on_authority_and_path_escape(

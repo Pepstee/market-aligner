@@ -1,0 +1,11 @@
+# Runtime receipts may include private canary documents, application artifacts,
+# or operator identity evidence. Keep this corpus out of the architecture graph.
+/internal/jaa/runtime_evidence/
+/internal/jaa/.venv-scrapling/
+*.pdf
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.ppt
+*.pptx

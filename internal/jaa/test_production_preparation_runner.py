@@ -7,13 +7,416 @@ import os
 import sqlite3
 import subprocess
 import sys
+from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from career_automation import candidate_application_factory as candidate_factory
 from career_automation import market_aligner_preparation as preparation
 from career_automation import production_preparation_runner as runner
 from career_automation.market_aligner_preparation import MarketApplicationPreparation
+from career_automation.rendering import EditableArtifacts
+
+
+def _cv_binding_row(sentence_id: str, text: str, document_kind: str = "cv") -> dict[str, str]:
+    return {
+        "document_kind": document_kind,
+        "sentence_id": sentence_id,
+        "text": text,
+        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
+def test_current_contact_json_codecs_keep_artifact_and_wire_formats_separate() -> None:
+    artifact_bytes = b'{"value":1}\n'
+    wire_bytes = b'{"value":1}'
+
+    assert runner._decode_current_artifact_document(artifact_bytes) == {"value": 1}
+    with pytest.raises(ValueError):
+        runner._decode_current_artifact_document(wire_bytes)
+    assert runner.decode_canonical_json(wire_bytes, label="selection receipt") == {
+        "value": 1
+    }
+    with pytest.raises(runner.HandoffContractError):
+        runner.decode_canonical_json(artifact_bytes, label="selection receipt")
+    with pytest.raises(TypeError, match="label"):
+        runner.decode_canonical_json(wire_bytes)
+
+
+def test_current_runtime_tool_paths_resolve_available_tools(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tool_directory = tmp_path / "tools"
+    tool_directory.mkdir(mode=0o700)
+    names = ("codex", *runner.PRODUCTION_POPPLER_SHA256)
+    tool_paths = {}
+    for name in names:
+        tool_path = tool_directory / name
+        tool_path.write_bytes(b"tool")
+        tool_path.chmod(0o700)
+        tool_paths[name] = tool_path
+    monkeypatch.setattr(
+        runner.shutil,
+        "which",
+        lambda name: str(tool_paths[name]) if name in tool_paths else None,
+    )
+
+    codex_path, poppler_directory = runner._current_runtime_tool_paths()
+
+    assert codex_path == tool_paths["codex"]
+    assert poppler_directory == tool_directory
+
+
+def test_current_evidence_archive_is_exact_and_content_addressed() -> None:
+    document = {"schema_version": "fixture.v1", "rows": [{"id": "row-1"}]}
+    references, objects = preparation._current_evidence_archive(
+        {"materialization": document, "duplicate": document, "absent": None}
+    )
+    encoded = preparation._json_bytes(document)
+    digest = hashlib.sha256(encoded).hexdigest()
+
+    assert references == {"materialization": digest, "duplicate": digest}
+    assert objects == {digest: encoded}
+
+
+def test_current_evidence_archive_projects_materialization_without_mutation() -> None:
+    class Projection:
+        def __init__(self, payload: dict[str, str]) -> None:
+            self.payload = payload
+
+        def document(self) -> dict[str, str]:
+            return dict(self.payload)
+
+    source = Projection({"source_id": "synthetic-source"})
+    receipt = Projection({"receipt_id": "synthetic-receipt"})
+    editable = EditableArtifacts(
+        cv_text="synthetic cv",
+        cover_letter_text="synthetic cover letter",
+        answers_text="synthetic answers",
+        cv_sha256="a" * 64,
+        cover_letter_sha256="b" * 64,
+        answers_sha256="c" * 64,
+        form_answers=(("question-1", "answer-1", "d" * 64),),
+    )
+    materialization = candidate_factory.CandidateApplicationMaterialization(
+        source=source,
+        editable=editable,
+        vacancy_requirements=("requirement-1", "requirement-2"),
+        receipt=receipt,
+    )
+
+    legacy_document = preparation._input_document(materialization)
+    assert legacy_document["source"] is source
+    assert legacy_document["editable"] is editable
+    assert legacy_document["receipt"] is receipt
+
+    expected = {
+        "source": {"source_id": "synthetic-source"},
+        "editable": asdict(editable),
+        "vacancy_requirements": ("requirement-1", "requirement-2"),
+        "receipt": {"receipt_id": "synthetic-receipt"},
+    }
+    document = preparation._current_evidence_document(materialization)
+    assert document == expected
+    assert document["editable"]["form_answers"] == (
+        ("question-1", "answer-1", "d" * 64),
+    )
+    assert preparation._current_evidence_document("synthetic primitive") == (
+        preparation._input_document("synthetic primitive")
+    )
+
+    references, objects = preparation._current_evidence_archive(
+        {
+            "materialization": materialization,
+            "same-document": Projection(expected),
+            "absent": None,
+        }
+    )
+    encoded = preparation._json_bytes(expected)
+    digest = hashlib.sha256(encoded).hexdigest()
+    assert references == {"materialization": digest, "same-document": digest}
+    assert objects == {digest: encoded}
+    assert source.payload == {"source_id": "synthetic-source"}
+    assert receipt.payload == {"receipt_id": "synthetic-receipt"}
+    assert materialization.vacancy_requirements == (
+        "requirement-1",
+        "requirement-2",
+    )
+
+
+def test_cv_binding_partition_excludes_whole_rejected_rows_and_preserves_order() -> None:
+    first = _cv_binding_row("cv-1", "Synthetic first supported statement.")
+    cover = _cv_binding_row(
+        "cover-1", "Synthetic internal review cover detail.", "cover_letter"
+    )
+    excluded_text = "Synthetic positive claim with an internal review qualification."
+    excluded = _cv_binding_row("cv-2", excluded_text)
+    last = _cv_binding_row("cv-3", "Synthetic final supported statement.")
+    rows = [first, cover, excluded, last]
+    seen: list[str] = []
+
+    def prohibited_text(text: str) -> bool:
+        seen.append(text)
+        return "internal review" in text
+
+    accepted, exclusions = candidate_factory.partition_cv_claim_bindings(
+        rows, prohibited_text=prohibited_text
+    )
+
+    assert accepted == (first, last)
+    assert accepted[0] is first
+    assert accepted[1] is last
+    assert seen == [first["text"], excluded_text, last["text"]]
+    assert exclusions == (
+        {
+            "sentence_id": "cv-2",
+            "text_sha256": excluded["text_sha256"],
+            "reason": "internal_evidence_only",
+        },
+    )
+    assert "text" not in exclusions[0]
+    assert excluded_text not in str(exclusions)
+    assert excluded["text"] == excluded_text
+
+
+def test_cv_binding_partition_refuses_empty_or_all_excluded_cv_sets() -> None:
+    with pytest.raises(ValueError, match="no accepted CV rows"):
+        candidate_factory.partition_cv_claim_bindings(
+            [], prohibited_text=lambda text: False
+        )
+    with pytest.raises(ValueError, match="no accepted CV rows"):
+        candidate_factory.partition_cv_claim_bindings(
+            [_cv_binding_row("cv-1", "Synthetic internal review only.")],
+            prohibited_text=lambda text: True,
+        )
+
+
+def test_cv_binding_partition_rejects_duplicate_ids_across_document_kinds() -> None:
+    rows = [
+        _cv_binding_row("same-id", "Synthetic CV statement."),
+        _cv_binding_row("same-id", "Synthetic cover statement.", "cover_letter"),
+    ]
+
+    with pytest.raises(ValueError, match="duplicate sentence_id"):
+        candidate_factory.partition_cv_claim_bindings(
+            rows, prohibited_text=lambda text: False
+        )
+
+
+def test_cv_binding_partition_rejects_malformed_rows_and_hashes() -> None:
+    invalid_id = _cv_binding_row("cv-1", "Synthetic statement.")
+    invalid_id["sentence_id"] = ""
+    invalid_kind = _cv_binding_row("cv-2", "Synthetic statement.")
+    invalid_kind["document_kind"] = "report"
+    invalid_text = _cv_binding_row("cv-3", "Synthetic statement.")
+    invalid_text["text"] = ""
+    invalid_hash_type = _cv_binding_row("cv-4", "Synthetic statement.")
+    invalid_hash_type["text_sha256"] = 7
+    invalid_hash = _cv_binding_row("cv-5", "Synthetic statement.")
+    invalid_hash["text_sha256"] = "0" * 64
+    uppercase_hash = _cv_binding_row("cv-6", "Synthetic statement.")
+    uppercase_hash["text_sha256"] = uppercase_hash["text_sha256"].upper()
+    cases = (
+        "not-a-row-list",
+        ["not-a-dict"],
+        [{"document_kind": "cv"}],
+        [invalid_id],
+        [invalid_kind],
+        [invalid_text],
+        [invalid_hash_type],
+        [invalid_hash],
+        [uppercase_hash],
+    )
+
+    for rows in cases:
+        with pytest.raises(ValueError):
+            candidate_factory.partition_cv_claim_bindings(
+                rows, prohibited_text=lambda text: False
+            )
+
+
+def test_cv_binding_partition_rejects_invalid_predicates_and_results() -> None:
+    rows = [
+        _cv_binding_row("cv-1", "Synthetic first statement."),
+        _cv_binding_row("cv-2", "Synthetic second statement."),
+    ]
+    with pytest.raises(ValueError, match="prohibited_text must be callable"):
+        candidate_factory.partition_cv_claim_bindings(
+            rows, prohibited_text="not-callable"
+        )
+    with pytest.raises(ValueError, match="callback returned non-bool"):
+        candidate_factory.partition_cv_claim_bindings(
+            rows, prohibited_text=lambda text: 1
+        )
+
+    calls = 0
+
+    def non_bool_on_second(text: str) -> object:
+        nonlocal calls
+        calls += 1
+        return False if calls == 1 else "not-bool"
+
+    with pytest.raises(ValueError, match="callback returned non-bool"):
+        candidate_factory.partition_cv_claim_bindings(
+            rows, prohibited_text=non_bool_on_second
+        )
+
+
+def test_current_cv_binding_partition_uses_existing_rejection_predicate() -> None:
+    safe = _cv_binding_row("cv-safe", "Synthetic supported project result.")
+    qualified_text = "Synthetic supported work with an internal review qualification."
+    qualified = _cv_binding_row("cv-qualified", qualified_text)
+    rows = [safe, qualified]
+    snapshot = [dict(row) for row in rows]
+
+    accepted, exclusions = candidate_factory.partition_current_cv_claim_bindings(rows)
+
+    assert accepted == (safe,)
+    assert exclusions == (
+        {
+            "sentence_id": "cv-qualified",
+            "text_sha256": qualified["text_sha256"],
+            "reason": "internal_evidence_only",
+        },
+    )
+    assert rows == snapshot
+    assert qualified["text"] == qualified_text
+
+
+def test_current_preparation_uses_luna_and_legacy_model_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    legacy = _deployment(tmp_path)
+    current = runner._current_preparation_deployment(
+        SimpleNamespace(
+            data_home=tmp_path,
+            repository_root=tmp_path / "repo",
+            output_root=tmp_path / "outbox",
+            candidate_authority_path=tmp_path / "candidate.json",
+            candidate_authority_sha256="a" * 64,
+        ),
+        "recovered-inputs/approved/recovery-manifest.json",
+    )
+
+    assert legacy.model == "gpt-test"
+    assert runner.PRODUCTION_CODEX_MODEL == "gpt-5.6-sol"
+    assert current.model == "gpt-6-luna"
+
+
+def test_current_contact_projection_bundle_keeps_receipt_separate() -> None:
+    activation_sha256 = "a" * 64
+    documents = {"candidate_projection_bytes": b'{"projection":"current"}\n'}
+    receipt = {"activation_sha256": activation_sha256}
+
+    assert runner._projection_from_current_bundle(
+        documents,
+        receipt,
+        expected_activation_sha256=activation_sha256,
+    ) == {"projection": "current"}
+    with pytest.raises(ValueError):
+        runner._projection_from_current_bundle(
+            receipt,
+            documents,
+            expected_activation_sha256=activation_sha256,
+        )
+    with pytest.raises(ValueError):
+        runner._projection_from_current_bundle(
+            documents,
+            receipt,
+            expected_activation_sha256="b" * 64,
+        )
+
+
+def _current_selection_and_promotion() -> tuple[dict[str, object], dict[str, object]]:
+    profile_id = "profile-current"
+    source_job_key = "greenhouse:example:123"
+    promotion_sha256 = "1" * 64
+    selection = {
+        "decision": "selected_for_application",
+        "geography_bucket": "uk_remote",
+        "geography_priority_rank": 0,
+        "hard_gate_passed": True,
+        "promotion_receipt_sha256": promotion_sha256,
+        "rationale_codes": [],
+        "source_job_key": source_job_key,
+    }
+    promotion = {
+        "binding": {
+            "schema_version": "market-aligner.assessment-promotion-binding.v1",
+            "profile_id": profile_id,
+            "job_key": source_job_key,
+            "track": "Applied_AI_Engineer",
+        },
+        "decision": "pass",
+        "job_key": source_job_key,
+        "profile_id": profile_id,
+        "receipt_sha256": promotion_sha256,
+        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+    }
+    return selection, promotion
+
+
+def test_current_selected_track_comes_from_linked_promotion() -> None:
+    selection, promotion = _current_selection_and_promotion()
+    selection.update(
+        {
+            "job_key": "internal-not-source-key",
+            "profile_id": "untrusted-profile",
+            "profile_version": "untrusted-version",
+            "schema_version": "untrusted-selection-schema",
+            "track": "untrusted-track",
+        }
+    )
+
+    assert runner._resolve_current_selected_track(
+        selection,
+        promotion,
+        expected_profile_id="profile-current",
+        expected_source_job_key="greenhouse:example:123",
+    ) == "Applied_AI_Engineer"
+
+
+def test_current_selected_track_rejects_unbound_promotion_and_gate() -> None:
+    selection, promotion = _current_selection_and_promotion()
+    unlinked_promotion = dict(promotion, receipt_sha256="2" * 64)
+    with pytest.raises(ValueError, match="selected track binding invalid"):
+        runner._resolve_current_selected_track(
+            selection,
+            unlinked_promotion,
+            expected_profile_id="profile-current",
+            expected_source_job_key="greenhouse:example:123",
+        )
+
+    failed_gate = dict(selection, hard_gate_passed=1)
+    with pytest.raises(ValueError, match="selected track binding invalid"):
+        runner._resolve_current_selected_track(
+            failed_gate,
+            promotion,
+            expected_profile_id="profile-current",
+            expected_source_job_key="greenhouse:example:123",
+        )
+
+
+def test_current_selected_track_rejects_profile_or_source_mismatch() -> None:
+    selection, promotion = _current_selection_and_promotion()
+    wrong_profile = dict(promotion, profile_id="other-profile")
+    with pytest.raises(ValueError, match="selected track binding invalid"):
+        runner._resolve_current_selected_track(
+            selection,
+            wrong_profile,
+            expected_profile_id="profile-current",
+            expected_source_job_key="greenhouse:example:123",
+        )
+
+    with pytest.raises(ValueError, match="selected track binding invalid"):
+        runner._resolve_current_selected_track(
+            selection,
+            promotion,
+            expected_profile_id="profile-current",
+            expected_source_job_key="greenhouse:other:456",
+        )
 
 
 def test_candidate_editorial_authority_uses_exact_candidate_policy() -> None:
@@ -45,6 +448,7 @@ def _deployment(tmp_path: Path) -> runner._ProductionPreparationDeployment:
     binary.chmod(0o700)
     return runner._ProductionPreparationDeployment(
         repository_root=tmp_path / "repository",
+        data_home=tmp_path / "data-home",
         admission_database=tmp_path / "admissions.sqlite3",
         outbox_root=tmp_path / "outbox",
         candidate_authority_path=tmp_path / "candidate.json",
@@ -54,6 +458,7 @@ def _deployment(tmp_path: Path) -> runner._ProductionPreparationDeployment:
         output_root=tmp_path / "preparations",
         recruiter_archive_root=tmp_path / "recruiter",
         codex_binary=binary,
+        poppler_bin=tmp_path,
         model="gpt-test",
         timeout_seconds=30,
     )
@@ -67,11 +472,11 @@ def _write_admission_fixture(
     stored_producer: str | None = None,
     canonical: bool = True,
     context_sha256: str | None = None,
+    handoff_root_sha256: str = "4" * 64,
 ) -> None:
-    handoff_root = "4" * 64
     context = {
         "environment": "production",
-        "handoff_root_sha256": handoff_root,
+        "handoff_root_sha256": handoff_root_sha256,
         "producer_commit_sha": context_producer,
         "producer_product": "market-aligner",
         "source_record_sha256": "3" * 64,
@@ -100,7 +505,7 @@ def _write_admission_fixture(
             "market-aligner",
             "production",
             runner.PRODUCTION_HANDOFF_TRUST_ROOT_ID,
-            handoff_root,
+            handoff_root_sha256,
         ),
     )
     connection.commit()
@@ -122,10 +527,11 @@ def _real_preflight_deployment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> tuple[runner._ProductionPreparationDeployment, dict[str, Path]]:
     data_home = tmp_path / "data-home"
-    admission_root = data_home / "state" / "jaa-production-admissions"
-    admission_root.mkdir(parents=True, mode=0o700)
-    (data_home / "state").chmod(0o700)
-    admission_root.chmod(0o700)
+    data_home.mkdir(mode=0o700)
+    data_state = data_home / "state"
+    data_state.mkdir(mode=0o700)
+    admission_root = data_state / "jaa-production-admissions"
+    admission_root.mkdir(mode=0o700)
     database = admission_root / "admissions.sqlite3"
     connection = sqlite3.connect(database)
     connection.execute("CREATE TABLE fixture (identity TEXT NOT NULL)")
@@ -139,23 +545,27 @@ def _real_preflight_deployment(
     outbox.mkdir(mode=0o700)
     poppler = tmp_path / "poppler"
     poppler.mkdir(mode=0o700)
-    poppler_libraries = tmp_path / "poppler-libraries"
+    library_root = tmp_path / "lib"
+    library_root.mkdir(mode=0o700)
+    poppler_libraries = library_root / "x86_64-linux-gnu"
     poppler_libraries.mkdir(mode=0o700)
     codex = tmp_path / "codex"
     codex.write_bytes(b"exact codex")
     codex.chmod(0o755)
+    authority_root = tmp_path / "authority"
+    authority_root.mkdir(mode=0o700)
+    contact_root = tmp_path / "contact"
+    contact_root.mkdir(mode=0o700)
     paths = {
-        "candidate": tmp_path / "authority" / "candidate.json",
-        "contact": tmp_path / "contact" / "contact.json",
-        "public_key": tmp_path / "contact" / "public.pem",
-        "registry": tmp_path / "contact" / "registry.json",
+        "candidate": authority_root / "candidate.json",
+        "contact": contact_root / "contact.json",
+        "public_key": contact_root / "public.pem",
+        "registry": contact_root / "registry.json",
         "codex": codex,
         "database": database,
         "output": tmp_path / "output",
         "recruiter": tmp_path / "recruiter",
     }
-    paths["candidate"].parent.mkdir(mode=0o700)
-    paths["contact"].parent.mkdir(mode=0o700)
     for name in ("candidate", "contact", "public_key", "registry"):
         value = (
             b'{"prior_registry_sha256":null}'
@@ -180,6 +590,7 @@ def _real_preflight_deployment(
 
     deployment = runner._ProductionPreparationDeployment(
         repository_root=repository,
+        data_home=data_home,
         admission_database=database,
         outbox_root=outbox,
         candidate_authority_path=paths["candidate"],
@@ -189,6 +600,7 @@ def _real_preflight_deployment(
         output_root=paths["output"],
         recruiter_archive_root=paths["recruiter"],
         codex_binary=codex,
+        poppler_bin=poppler,
         model="gpt-test",
         timeout_seconds=30,
     )
@@ -320,6 +732,48 @@ def test_registry_chain_predecessors_remain_in_the_resource_lease(
         resources.close()
 
 
+def test_installed_deployment_resolves_host_paths_bound_to_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    values = {
+        "data_home": tmp_path / "private-state",
+        "repository_root": Path(__file__).resolve().parents[2],
+        "outbox_root": tmp_path / "private-outbox",
+        "candidate_authority_path": tmp_path / "authority" / "candidate.json",
+        "contact_authority_path": tmp_path / "authority" / "contact.json",
+        "contact_public_key_path": tmp_path / "authority" / "operator.pem",
+        "contact_registry_path": tmp_path / "authority" / "registry.json",
+        "codex_binary": tmp_path / "codex" / "bin" / "codex.js",
+        "poppler_bin": tmp_path / "poppler" / "usr" / "bin",
+    }
+    raw = runner.production_preparation_configuration_bytes(**values)
+    monkeypatch.setattr(runner, "_read_root_owned_configuration", lambda _path: raw)
+    monkeypatch.setattr(
+        runner,
+        "installed_production_handoff_deployment",
+        lambda: SimpleNamespace(
+            data_home=values["data_home"],
+            repository_root=values["repository_root"],
+            output_root=values["outbox_root"],
+            candidate_authority_path=values["candidate_authority_path"],
+            candidate_authority_sha256=runner.PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
+        ),
+    )
+
+    deployment = runner.installed_production_preparation_deployment()
+
+    assert deployment.data_home == values["data_home"]
+    assert deployment.repository_root == values["repository_root"]
+    assert deployment.outbox_root == values["outbox_root"]
+    assert deployment.candidate_authority_path == values["candidate_authority_path"]
+    assert deployment.admission_database == (
+        values["data_home"] / "state/jaa-production-admissions/admissions.sqlite3"
+    )
+    assert deployment.poppler_library_directory == (
+        values["poppler_bin"].parent / "lib/x86_64-linux-gnu"
+    )
+
+
 def test_source_record_binds_exact_sealed_producer_context(tmp_path: Path) -> None:
     application_id = "app_" + "1" * 64
     database = tmp_path / "admissions.sqlite3"
@@ -429,6 +883,225 @@ def test_admitted_producer_rejects_authority_change_and_nonancestor(
         os.close(descriptor)
 
 
+def _verified_current_strategy_input(
+    application_id: str,
+    handoff_root_sha256: str,
+) -> runner.VerifiedApplicationInput:
+    return runner.VerifiedApplicationInput(
+        application_id=application_id,
+        admission_kind=runner.ADMISSION_KIND_CURRENT_RUNTIME,
+        environment=runner.CURRENT_RUNTIME_ENVIRONMENT,
+        authority_scope=runner.CURRENT_RUNTIME_AUTHORITY_SCOPE,
+        handoff_root_sha256=handoff_root_sha256,
+        vacancy_source_identity="source-identity",
+        profile_id="profile-test",
+        profile_version="v1",
+        candidate_authority_sha256="a" * 64,
+        job_key="greenhouse:example:1",
+        vacancy_snapshot_sha256="b" * 64,
+        raw_listing_sha256="c" * 64,
+        raw_listing_bytes=b"listing",
+        requirements_sha256="d" * 64,
+        requirements_bytes=b"requirements",
+        canonical_url="https://example.test/jobs/1",
+        company_name="Example",
+        role_title="Engineer",
+        location={},
+        admission_receipt_sha256="e" * 64,
+        current_boundary="strategy",
+        current_boundary_receipt_sha256="f" * 64,
+    )
+
+
+def test_current_reader_change_requires_revalidated_original_bundle(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.name", "Artiom Gutu")
+    _git(repository, "config", "user.email", "gutu.artiom444@gmail.com")
+    producer = repository / runner._HANDOFF_AUTHORITY_PATHS[0]
+    reader_names = tuple(sorted(runner._CURRENT_RUNTIME_READER_PATHS))
+    producer.parent.mkdir(parents=True)
+    for reader_name in reader_names:
+        (repository / reader_name).parent.mkdir(parents=True, exist_ok=True)
+    producer.write_text("original producer\n")
+    for reader_name in reader_names:
+        (repository / reader_name).write_text("original reader\n")
+    _git(repository, "add", runner._HANDOFF_AUTHORITY_PATHS[0], *reader_names)
+    _git(repository, "commit", "-qm", "admitted producer")
+    admitted = _git(repository, "rev-parse", "HEAD")
+    for reader_name in reader_names:
+        (repository / reader_name).write_text("compatible current reader\n")
+    _git(repository, "add", *reader_names)
+    _git(repository, "commit", "-qm", "current reader repair")
+    current = _git(repository, "rev-parse", "HEAD")
+    application_id = "app_" + "1" * 64
+    handoff_root_sha256 = "2" * 64
+    verified = _verified_current_strategy_input(
+        application_id, handoff_root_sha256
+    )
+    descriptor = os.open(repository, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(
+            runner.ProductionPreparationDeploymentError,
+            match="current reader compatibility not established",
+        ):
+            runner._require_compatible_admitted_producer(
+                repository_descriptor=descriptor,
+                admitted_producer_commit=admitted,
+                current_commit=current,
+                current_runtime=True,
+                expected_application_id=application_id,
+                expected_handoff_root_sha256=handoff_root_sha256,
+            )
+        runner._require_compatible_admitted_producer(
+            repository_descriptor=descriptor,
+            admitted_producer_commit=admitted,
+            current_commit=current,
+            current_runtime=True,
+            verified_current_input=verified,
+            expected_application_id=application_id,
+            expected_handoff_root_sha256=handoff_root_sha256,
+        )
+        with pytest.raises(
+            runner.ProductionPreparationDeploymentError,
+            match="handoff authority changed",
+        ):
+            runner._require_compatible_admitted_producer(
+                repository_descriptor=descriptor,
+                admitted_producer_commit=admitted,
+                current_commit=current,
+            )
+        producer.write_text("changed producer\n")
+        _git(repository, "add", runner._HANDOFF_AUTHORITY_PATHS[0])
+        _git(repository, "commit", "-qm", "producer mutation")
+        changed_producer = _git(repository, "rev-parse", "HEAD")
+        with pytest.raises(
+            runner.ProductionPreparationDeploymentError,
+            match="current reader compatibility not established",
+        ):
+            runner._require_compatible_admitted_producer(
+                repository_descriptor=descriptor,
+                admitted_producer_commit=admitted,
+                current_commit=changed_producer,
+                current_runtime=True,
+                verified_current_input=verified,
+                expected_application_id=application_id,
+                expected_handoff_root_sha256=handoff_root_sha256,
+            )
+    finally:
+        os.close(descriptor)
+
+
+def test_consumer_compatibility_helper_fails_closed_on_invalid_reports() -> None:
+    admitted = "a" * 40
+    current = "b" * 40
+    protected = frozenset(runner._HANDOFF_AUTHORITY_PATHS)
+    readers = runner._CURRENT_RUNTIME_READER_PATHS
+    assert readers == frozenset(
+        {
+            "internal/jaa/career_automation/handoff_admission.py",
+            "internal/jaa/career_automation/production_handoff_admission_runner.py",
+        }
+    )
+    common = {
+        "admitted_commit": admitted,
+        "current_commit": current,
+        "ancestor_status": 0,
+        "diff_status": 0,
+        "changed_paths": tuple(sorted(readers)),
+        "protected_paths": protected,
+        "reader_paths": readers,
+        "current_runtime": True,
+        "current_bundle_revalidated": True,
+    }
+    assert runner.require_consumer_compatibility(**common) == (
+        "current_reader_revalidated"
+    )
+    for change in (
+        {"current_runtime": False},
+        {"current_bundle_revalidated": False},
+        {"changed_paths": (runner._HANDOFF_AUTHORITY_PATHS[0],)},
+        {"changed_paths": ("untracked-protected.py",)},
+        {"ancestor_status": 1},
+        {"diff_status": 1},
+        {"current_runtime": 1},
+        {"ancestor_status": True},
+        {"changed_paths": [next(iter(readers))]},
+        {"changed_paths": (next(iter(readers)), next(iter(readers)))},
+    ):
+        with pytest.raises(ValueError):
+            runner.require_consumer_compatibility(**(common | change))
+    assert runner.require_consumer_compatibility(
+        admitted_commit=admitted,
+        current_commit=admitted,
+        ancestor_status=0,
+        diff_status=0,
+        changed_paths=(),
+        protected_paths=protected,
+        reader_paths=readers,
+        current_runtime=False,
+    ) == "same_commit"
+
+
+def test_current_strategy_boundary_precedes_compatibility_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application_id = "app_" + "3" * 64
+    handoff_root_sha256 = "4" * 64
+    verified = _verified_current_strategy_input(
+        application_id, handoff_root_sha256
+    )
+    events: list[str] = []
+
+    class _Store:
+        def for_boundary(self, requested_application_id: str, boundary: str):
+            assert requested_application_id == application_id
+            assert boundary == "strategy"
+            events.append("authenticated_boundary")
+            return verified
+
+    class _Adapter:
+        handoff_bytes = b"authenticated current handoff"
+
+    class _Handoff:
+        root_sha256 = handoff_root_sha256
+
+    monkeypatch.setattr(
+        runner,
+        "_parse_current_runtime_handoff",
+        lambda raw: _Handoff(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_git_commit",
+        lambda path, **kwargs: "5" * 40,
+    )
+
+    def require_compatibility(**kwargs):
+        assert kwargs["verified_current_input"] is verified
+        events.append("compatibility")
+
+    monkeypatch.setattr(
+        runner,
+        "_require_compatible_admitted_producer",
+        require_compatibility,
+    )
+    result = runner._current_runtime_strategy_input(
+        store=_Store(),
+        application_id=application_id,
+        adapter=_Adapter(),
+        repository_root=Path("/registered/canon"),
+        repository_descriptor=9,
+        admitted_producer_commit="6" * 40,
+        current_commit="5" * 40,
+    )
+    assert result is verified
+    assert events == ["authenticated_boundary", "compatibility"]
+
+
 def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -474,10 +1147,10 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
         path.write_bytes(name.encode())
         hashes[name] = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
     monkeypatch.setattr(runner, "PRODUCTION_POPPLER_SHA256", hashes)
-    monkeypatch.setattr(runner, "PRODUCTION_POPPLER_LIBRARY_DIRECTORY", tmp_path)
+    deployment.poppler_library_directory.mkdir(mode=0o700, parents=True)
     library_hashes = {}
     for name in runner.PRODUCTION_POPPLER_LIBRARY_SHA256:
-        path = tmp_path / name
+        path = deployment.poppler_library_directory / name
         path.write_bytes(name.encode())
         library_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     monkeypatch.setattr(
@@ -499,11 +1172,14 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     )
 
     descriptor_holder: dict[str, int] = {}
+    pin_calls: list[tuple[Path, dict[str, object]]] = []
 
     class _Resources:
         def __init__(self):
             self.directory_descriptors: list[int] = []
-        def pin_file(self, *args, **kwargs): return args[0]
+        def pin_file(self, *args, **kwargs):
+            pin_calls.append((args[0], dict(kwargs)))
+            return args[0]
         def pin_private_directory(self, path):
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
             return path
@@ -616,10 +1292,21 @@ def test_fixed_runner_wires_cv_cover_and_recruiter_without_release(
     monkeypatch.setattr(runner, "prepare_admitted_market_application_from_authorities", prepare)
     result = runner._run_production_preparation(application_id, deployment)
     assert result == expected
+    legacy_file_pins = {path: values for path, values in pin_calls}
+    for name, digest in hashes.items():
+        poppler_pin = legacy_file_pins[tmp_path / name]
+        assert poppler_pin["expected_sha256"] == digest
+        assert poppler_pin["expected_mode"] == 0o755
+        assert poppler_pin["expected_uid"] == os.geteuid()
+    codex_pin = legacy_file_pins[deployment.codex_binary]
+    assert codex_pin["expected_sha256"] == runner.PRODUCTION_CODEX_BINARY_SHA256
+    assert codex_pin["expected_mode"] == 0o755
+    assert codex_pin["expected_uid"] == runner.PRODUCTION_CODEX_OWNER_UID
     assert stages == [
         "resume_writer", "humanizer", "cover_letter_writer", "cover_letter_humanizer"
     ]
     assert captured["environment"] == "production"
+    assert captured["input_materializer"].materialization_only is False
     assert captured["editorial_runtime"].document_kind == "cv"
     assert captured["cover_letter_editorial_runtime"].document_kind == "cover_letter"
     assert captured["editorial_runtime"] is not captured["cover_letter_editorial_runtime"]
@@ -685,7 +1372,6 @@ def test_poppler_substitution_rejects_before_provider_availability(
 ) -> None:
     deployment = _deployment(tmp_path)
     calls = {"adapter": 0, "recruiter": 0}
-    monkeypatch.setattr(runner, "PRODUCTION_POPPLER_BIN", tmp_path)
     monkeypatch.setattr(runner, "PRODUCTION_POPPLER_SHA256", {"pdfinfo": "0" * 64})
     (tmp_path / "pdfinfo").write_bytes(b"substituted")
     monkeypatch.setattr(
@@ -701,6 +1387,49 @@ def test_poppler_substitution_rejects_before_provider_availability(
     with pytest.raises(runner.ProductionPreparationDeploymentError, match="Poppler"):
         runner._run_production_preparation("app_" + "1" * 64, deployment)
     assert calls == {"adapter": 0, "recruiter": 0}
+
+
+@pytest.mark.parametrize(
+    ("authority", "change", "message"),
+    (
+        ("candidate", "missing", "compiled authority file is unavailable"),
+        ("candidate", "tampered", "compiled authority file identity differs"),
+        ("contact", "missing", "compiled authority file is unavailable"),
+        ("contact", "tampered", "compiled authority file identity differs"),
+    ),
+)
+def test_materialization_only_still_rejects_missing_or_tampered_shared_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    authority: str,
+    change: str,
+    message: str,
+) -> None:
+    deployment, paths = _real_preflight_deployment(monkeypatch, tmp_path)
+    calls = {"materializer": 0}
+    monkeypatch.setattr(
+        runner,
+        "installed_production_preparation_deployment",
+        lambda: deployment,
+    )
+    monkeypatch.setattr(
+        runner,
+        "prepare_admitted_market_application_from_authorities",
+        lambda **kwargs: calls.__setitem__("materializer", calls["materializer"] + 1),
+    )
+    path = paths[authority]
+    if change == "missing":
+        path.unlink()
+    else:
+        original = path.read_bytes()
+        path.write_bytes(bytes((original[0] ^ 1,)) + original[1:])
+        path.chmod(0o600)
+
+    with pytest.raises(runner.ProductionPreparationDeploymentError, match=message):
+        runner.run_production_market_materialization(
+            application_id="app_" + "1" * 64
+        )
+    assert calls["materializer"] == 0
 
 
 def test_pinned_file_rejects_hash_mode_link_and_symlink_substitution(
@@ -965,3 +1694,20 @@ def test_cli_help_bootstraps_from_unrelated_locked_working_directory(
     )
     assert completed.returncode == 0, completed.stderr
     assert "--application-id" in completed.stdout
+
+
+@pytest.mark.parametrize("substitution", ["symlink", "different-directory"])
+def test_directory_descriptor_rejects_path_substitution(tmp_path: Path, substitution: str) -> None:
+    original = tmp_path / "original"
+    original.mkdir()
+    target = tmp_path / "target"
+    if substitution == "symlink":
+        target.symlink_to(original, target_is_directory=True)
+    else:
+        target.mkdir()
+    descriptor = os.open(original, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError):
+            runner._require_descriptor_path_identity(descriptor, str(target))
+    finally:
+        os.close(descriptor)

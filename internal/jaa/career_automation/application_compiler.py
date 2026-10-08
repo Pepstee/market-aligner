@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -69,6 +69,9 @@ CV_SECTION_ORDER = (
     "Education",
     "Experience",
     "Skills",
+    "Highlights",
+    "Results",
+    "Outcomes",
 )
 LETTER_SECTION_ORDER = (
     "Opening",
@@ -77,6 +80,145 @@ LETTER_SECTION_ORDER = (
     "Close",
 )
 ALLOWED_FACT_KINDS = frozenset({"candidate", "employer"})
+OUTWARD_REWRITE_ISSUER_ID = "career-automation.outward-source-span-policy.v1"
+OUTWARD_REWRITE_SCHEMA_VERSION = "jaa.candidate-outward-rewrite-resolution.v3"
+_CV_SUBJECT_ELISION_VERBS = (
+    "architected",
+    "built",
+    "completed",
+    "contributed",
+    "created",
+    "delivered",
+    "designed",
+    "developed",
+    "directed",
+    "earned",
+    "graduated",
+    "implemented",
+    "led",
+    "managed",
+    "provided",
+    "shipped",
+    "sold",
+    "tested",
+    "validated",
+)
+
+# Candidate-specific wording remains an exact, closed policy. Keeping the policy
+# beside the compiler contract lets verification recompute it rather than trust
+# caller-supplied hashes; the factory imports these names instead of duplicating
+# the authority.
+EXACT_OUTWARD_PROFILE_REWRITES: Mapping[str, str] = {
+    "E-001": (
+        "First-Class BSc (Hons) Computer Science, Birmingham Newman "
+        "University, July 2026."
+    ),
+    "E-002": (
+        "Dissertation: SCAFAD: A Seven-Layer, Privacy-Preserving, Explainable "
+        "Anomaly-Detection Pipeline for Serverless Workloads."
+    ),
+    "E-011": (
+        "I led the end-to-end development of Market Aligner, covering its "
+        "collectors, validation, caching, SQLite persistence, retries and resumability."
+    ),
+    "E-013": (
+        "My GitHub portfolio is available under the username Pepstee, with work "
+        "covering orchestration, SCAFAD and delivered software projects."
+    ),
+    "E-012": (
+        "I architect and operate a multi-agent orchestration platform, owning "
+        "requirements, system architecture, evaluation gates and acceptance decisions."
+    ),
+    "E-014": (
+        "I provided product direction and validated the working Dubbing Studio MVP."
+    ),
+    "E-015": (
+        "Dubbing Studio has 709 passing automated tests and a real command-line "
+        "synthesis check that produced a timeline-correct WAV."
+    ),
+    "E-016": (
+        "Built Learning Accelerator, a tested system for LLM-assisted question "
+        "generation, spaced repetition, review sessions, persistence and analytics."
+    ),
+    "E-017": "The public scafad-delta repository contains the SCAFAD implementation.",
+    "E-018": (
+        "An earlier public orchestrator repository documents the development of "
+        "my orchestration architecture."
+    ),
+}
+EXACT_OUTWARD_LETTER_REWRITES: Mapping[str, str] = {
+    "E-011": (
+        "In Market Aligner, I led work on collectors, validation, caching, "
+        "SQLite persistence, retries and resumability."
+    ),
+}
+EXACT_OUTWARD_REWRITE_POLICY_SHA256 = content_hash(
+    {
+        "schema_version": "jaa.candidate-outward-rewrite-policy.v1",
+        "mode": "exact_allowlist",
+        "rewrites": dict(EXACT_OUTWARD_PROFILE_REWRITES),
+        "letter_rewrites": dict(EXACT_OUTWARD_LETTER_REWRITES),
+    }
+)
+GENERIC_OUTWARD_REWRITE_POLICY_SHA256 = content_hash(
+    {
+        "schema_version": "jaa.candidate-outward-rewrite-policy.v3",
+        "mode": "bounded_subject_and_auxiliary_elision",
+        "cv_subject_elision_verbs": list(_CV_SUBJECT_ELISION_VERBS),
+        "cv_subject_elision_capitalizes_first_letter": True,
+        "cv_auxiliary_elision_prefixes": ["I had ", "I have "],
+    }
+)
+CURRENT_RUNTIME_OUTWARD_REWRITE_POLICY_SHA256 = content_hash(
+    {
+        "schema_version": "jaa.candidate-outward-rewrite-policy.current-runtime.v1",
+        "generic_policy_sha256": GENERIC_OUTWARD_REWRITE_POLICY_SHA256,
+        "temporal_phrase_rewrite": (
+            "has/have/had not yet occurred -> has/have/had yet to occur; "
+            "preserve surrounding text"
+        ),
+    }
+)
+
+
+def _case_insensitive_ascii(word: str) -> str:
+    return "".join(f"[{character.lower()}{character.upper()}]" for character in word)
+
+
+_CURRENT_RUNTIME_TEMPORAL_PHRASE = re.compile(
+    r"\b(?P<aux>"
+    + "|".join(
+        _case_insensitive_ascii(word) for word in ("has", "have", "had")
+    )
+    + r") "
+    + _case_insensitive_ascii("not")
+    + r" "
+    + _case_insensitive_ascii("yet")
+    + r" "
+    + _case_insensitive_ascii("occurred")
+    + r"\b"
+)
+
+
+def neutral_current_temporal_text(
+    text: str,
+    *,
+    current_runtime: bool = False,
+) -> str:
+    if type(text) is not str or not text or type(current_runtime) is not bool:
+        raise ValueError("current_temporal_text_invalid")
+    if not current_runtime:
+        return text
+
+    def replace_phrase(match: re.Match[str]) -> str:
+        tail = "YET TO OCCUR" if match.group(0).isupper() else "yet to occur"
+        return f"{match.group('aux')} {tail}"
+
+    rewritten, replacement_count = _CURRENT_RUNTIME_TEMPORAL_PHRASE.subn(
+        replace_phrase,
+        text,
+    )
+    return rewritten if replacement_count else text
 
 # Operator doctrine, ratified 2026-08-07: employer-facing documents carry the
 # strongest framing the approved evidence will support. A CV and a cover letter
@@ -222,6 +364,386 @@ def _safe_plain_text(value: str, label: str) -> str:
     return clean
 
 
+def _generic_candidate_outward_text(
+    approved_source_text: str,
+    *,
+    document_kind: str,
+) -> str:
+    source = _safe_plain_text(approved_source_text, "approved candidate text")
+    if document_kind not in {"cv", "cover_letter"}:
+        raise ValueError("candidate outward document kind is unsupported")
+    if document_kind == "cv" and source.startswith("I "):
+        for prefix in ("I had ", "I have "):
+            if source.startswith(prefix) and len(source) > len(prefix):
+                candidate = source[len(prefix) :]
+                return candidate[0].upper() + candidate[1:]
+        candidate = source[2:]
+        first_word = candidate.split(maxsplit=1)[0].casefold().rstrip(".,:;")
+        if first_word in _CV_SUBJECT_ELISION_VERBS:
+            return candidate[0].upper() + candidate[1:]
+    return source
+
+
+def approved_candidate_outward_text(
+    candidate_evidence_id: str,
+    approved_source_text: str,
+    *,
+    document_kind: str,
+    current_runtime: bool = False,
+) -> str:
+    """Return only wording produced by a canonical closed rewrite policy."""
+    _required(candidate_evidence_id, "candidate evidence ID")
+    if type(current_runtime) is not bool:
+        raise ValueError("current_temporal_text_invalid")
+    source = _safe_plain_text(approved_source_text, "approved candidate text")
+    if document_kind not in {"cv", "cover_letter"}:
+        raise ValueError("candidate outward document kind is unsupported")
+    exact = (
+        EXACT_OUTWARD_LETTER_REWRITES.get(candidate_evidence_id)
+        if document_kind == "cover_letter"
+        else None
+    )
+    if exact is None:
+        exact = EXACT_OUTWARD_PROFILE_REWRITES.get(candidate_evidence_id)
+    if exact is not None:
+        return exact
+    outward = _generic_candidate_outward_text(source, document_kind=document_kind)
+    return neutral_current_temporal_text(
+        outward,
+        current_runtime=current_runtime,
+    )
+
+
+def _rewrite_policy_sha256(
+    candidate_evidence_id: str,
+    *,
+    document_kind: str,
+    current_runtime: bool = False,
+) -> str:
+    exact = (
+        candidate_evidence_id in EXACT_OUTWARD_LETTER_REWRITES
+        if document_kind == "cover_letter"
+        else False
+    ) or candidate_evidence_id in EXACT_OUTWARD_PROFILE_REWRITES
+    return (
+        EXACT_OUTWARD_REWRITE_POLICY_SHA256
+        if exact
+        else (
+            CURRENT_RUNTIME_OUTWARD_REWRITE_POLICY_SHA256
+            if current_runtime
+            else GENERIC_OUTWARD_REWRITE_POLICY_SHA256
+        )
+    )
+
+
+@dataclass(frozen=True)
+class ApprovedEvidenceSourceContext:
+    source_bytes: bytes = field(repr=False)
+    source_sha256: str
+    candidate_profile_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        _digest(self.source_sha256, "approved evidence source hash")
+        if self.candidate_profile_hash is not None:
+            _digest(self.candidate_profile_hash, "candidate profile hash")
+        if not isinstance(self.source_bytes, bytes) or hashlib.sha256(
+            self.source_bytes
+        ).hexdigest() != self.source_sha256:
+            raise ValueError("approved evidence source context hash differs")
+
+    def for_profile(self, candidate_profile_hash: str) -> ApprovedEvidenceSourceContext:
+        self.__post_init__()
+        _digest(candidate_profile_hash, "candidate profile hash")
+        if (
+            self.candidate_profile_hash is not None
+            and self.candidate_profile_hash != candidate_profile_hash
+        ):
+            raise ValueError("approved evidence source context profile differs")
+        return replace(self, candidate_profile_hash=candidate_profile_hash)
+
+    def statement(self, evidence_id: str) -> tuple[str, str]:
+        self.__post_init__()
+        return (
+            _approved_statement_from_bytes(self.source_bytes, evidence_id),
+            self.source_sha256,
+        )
+
+
+@dataclass(frozen=True)
+class AuthenticatedOutwardRewrite:
+    """Replay-stable receipt for one exact protected-evidence outward span."""
+
+    approved_evidence_source_sha256: str
+    candidate_evidence_id: str
+    candidate_evidence_version: int
+    document_kind: str
+    approved_source_text_sha256: str
+    outward_text_sha256: str
+    rewrite_policy_sha256: str
+    issuer_identity: str
+    resolution_receipt_sha256: str
+    schema_version: str = OUTWARD_REWRITE_SCHEMA_VERSION
+    source_context: ApprovedEvidenceSourceContext | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.schema_version != OUTWARD_REWRITE_SCHEMA_VERSION:
+            raise ValueError("outward rewrite resolution schema is unsupported")
+        for value, label in (
+            (self.approved_evidence_source_sha256, "approved evidence source hash"),
+            (self.approved_source_text_sha256, "approved source text hash"),
+            (self.outward_text_sha256, "outward text hash"),
+            (self.rewrite_policy_sha256, "rewrite policy hash"),
+            (self.resolution_receipt_sha256, "rewrite resolution receipt"),
+        ):
+            _digest(value, label)
+        _required(self.candidate_evidence_id, "candidate evidence ID")
+        _required(self.issuer_identity, "rewrite issuer identity")
+        if self.candidate_evidence_version < 1:
+            raise ValueError("candidate evidence version must be positive")
+        if self.document_kind not in {"cv", "cover_letter"}:
+            raise ValueError("outward rewrite document kind is unsupported")
+        source_context = getattr(self, "source_context", None)
+        if source_context is not None:
+            source_context.__post_init__()
+            if (
+                source_context.source_sha256
+                != self.approved_evidence_source_sha256
+            ):
+                raise ValueError("outward rewrite source context differs")
+            if (
+                self.rewrite_policy_sha256 == GENERIC_OUTWARD_REWRITE_POLICY_SHA256
+                and source_context.candidate_profile_hash is None
+            ):
+                raise ValueError("generic outward rewrite context lacks profile binding")
+
+    def document(self, *, include_receipt: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "approved_evidence_source_sha256": self.approved_evidence_source_sha256,
+            "approved_source_text_sha256": self.approved_source_text_sha256,
+            "candidate_evidence_id": self.candidate_evidence_id,
+            "candidate_evidence_version": self.candidate_evidence_version,
+            "document_kind": self.document_kind,
+            "issuer_identity": self.issuer_identity,
+            "outward_text_sha256": self.outward_text_sha256,
+            "rewrite_policy_sha256": self.rewrite_policy_sha256,
+            "schema_version": self.schema_version,
+        }
+        if include_receipt:
+            value["resolution_receipt_sha256"] = self.resolution_receipt_sha256
+        return value
+
+
+def _protected_approved_statement(evidence_id: str) -> tuple[str, str]:
+    """Resolve one statement from the policy-pinned external authority."""
+    from .candidate_authority import (
+        APPROVED_EVIDENCE_PATH,
+    )
+
+    expected_sha256 = _pinned_approved_evidence_sha256()
+    value = APPROVED_EVIDENCE_PATH.read_bytes()
+    if hashlib.sha256(value).hexdigest() != expected_sha256:
+        raise ValueError("protected candidate evidence differs from pinned authority")
+    return _approved_statement_from_bytes(value, evidence_id), expected_sha256
+
+
+def _pinned_approved_evidence_sha256() -> str:
+    from .candidate_authority import APPROVED_CANDIDATE_SOURCE_HASHES
+
+    return APPROVED_CANDIDATE_SOURCE_HASHES["approved_evidence"]
+
+
+def _approved_statement_from_bytes(value: bytes, evidence_id: str) -> str:
+    try:
+        document = json.loads(value)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("protected candidate evidence is malformed") from exc
+    rows = document.get("statements") if isinstance(document, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("protected candidate evidence is malformed")
+    matches = [
+        row for row in rows if isinstance(row, dict) and row.get("id") == evidence_id
+    ]
+    if len(matches) != 1 or not isinstance(matches[0].get("statement"), str):
+        raise ValueError("rewrite evidence is absent or ambiguous")
+    return str(matches[0]["statement"])
+
+
+def resolve_authenticated_outward_rewrite(
+    *,
+    candidate_evidence_id: str,
+    approved_source_text: str,
+    outward_text: str,
+    document_kind: str,
+    candidate_evidence_version: int = 1,
+    approved_evidence_source: ApprovedEvidenceSourceContext | None = None,
+    candidate_profile_hash: str | None = None,
+    current_runtime: bool = False,
+) -> AuthenticatedOutwardRewrite:
+    """Mint a receipt only for a current, policy-derived exact source span."""
+    exact_policy = _rewrite_policy_sha256(
+        candidate_evidence_id,
+        document_kind=document_kind,
+        current_runtime=current_runtime,
+    ) == EXACT_OUTWARD_REWRITE_POLICY_SHA256
+    source_context: ApprovedEvidenceSourceContext | None = None
+    if approved_evidence_source is None:
+        resolved_source, source_sha256 = _protected_approved_statement(
+            candidate_evidence_id
+        )
+    elif exact_policy:
+        approved_evidence_source.__post_init__()
+        if (
+            approved_evidence_source.source_sha256
+            != _pinned_approved_evidence_sha256()
+        ):
+            raise ValueError("exact outward rewrite requires pinned evidence source")
+        context_source, context_sha256 = approved_evidence_source.statement(
+            candidate_evidence_id
+        )
+        resolved_source, source_sha256 = _protected_approved_statement(
+            candidate_evidence_id
+        )
+        if context_sha256 != source_sha256 or context_source != resolved_source:
+            raise ValueError("exact outward rewrite context differs from pinned source")
+    else:
+        if candidate_profile_hash is None:
+            raise ValueError("generic outward rewrite requires a candidate profile binding")
+        source_context = approved_evidence_source.for_profile(candidate_profile_hash)
+        resolved_source, source_sha256 = source_context.statement(candidate_evidence_id)
+    expected = approved_candidate_outward_text(
+        candidate_evidence_id,
+        approved_source_text,
+        document_kind=document_kind,
+        current_runtime=current_runtime,
+    )
+    if resolved_source != approved_source_text or expected != outward_text:
+        raise ValueError("outward rewrite is not approved by current authority")
+    if outward_text == approved_source_text:
+        raise ValueError("verbatim candidate text does not require rewrite authority")
+    provisional = AuthenticatedOutwardRewrite(
+        approved_evidence_source_sha256=source_sha256,
+        candidate_evidence_id=candidate_evidence_id,
+        candidate_evidence_version=candidate_evidence_version,
+        document_kind=document_kind,
+        approved_source_text_sha256=hashlib.sha256(
+            approved_source_text.encode()
+        ).hexdigest(),
+        outward_text_sha256=hashlib.sha256(outward_text.encode()).hexdigest(),
+        rewrite_policy_sha256=_rewrite_policy_sha256(
+            candidate_evidence_id,
+            document_kind=document_kind,
+            current_runtime=current_runtime,
+        ),
+        issuer_identity=OUTWARD_REWRITE_ISSUER_ID,
+        resolution_receipt_sha256="0" * 64,
+        source_context=source_context,
+    )
+    return replace(
+        provisional,
+        resolution_receipt_sha256=content_hash(
+            provisional.document(include_receipt=False)
+        ),
+    )
+
+
+def verify_authenticated_outward_rewrite(
+    authority: AuthenticatedOutwardRewrite,
+    *,
+    candidate_evidence_id: str,
+    candidate_evidence_version: int,
+    approved_source_text: str,
+    outward_text: str,
+    document_kind: str,
+    approved_evidence_source: ApprovedEvidenceSourceContext | None = None,
+    candidate_profile_hash: str | None = None,
+) -> None:
+    authority.__post_init__()
+    current_runtime = (
+        authority.rewrite_policy_sha256
+        == CURRENT_RUNTIME_OUTWARD_REWRITE_POLICY_SHA256
+    )
+    expected_policy = _rewrite_policy_sha256(
+        candidate_evidence_id,
+        document_kind=document_kind,
+        current_runtime=current_runtime,
+    )
+    if (
+        authority.issuer_identity != OUTWARD_REWRITE_ISSUER_ID
+        or authority.rewrite_policy_sha256 != expected_policy
+        or authority.candidate_evidence_id != candidate_evidence_id
+        or authority.candidate_evidence_version != candidate_evidence_version
+        or authority.document_kind != document_kind
+        or authority.approved_source_text_sha256
+        != hashlib.sha256(approved_source_text.encode()).hexdigest()
+        or authority.outward_text_sha256
+        != hashlib.sha256(outward_text.encode()).hexdigest()
+        or authority.resolution_receipt_sha256
+        != content_hash(authority.document(include_receipt=False))
+    ):
+        raise ValueError("outward rewrite resolution is not authentic")
+    attached_context = getattr(authority, "source_context", None)
+    if (
+        approved_evidence_source is not None
+        and attached_context is not None
+        and approved_evidence_source != attached_context
+    ):
+        raise ValueError("outward rewrite evidence context differs")
+    source_context = approved_evidence_source or attached_context
+    exact_policy = expected_policy == EXACT_OUTWARD_REWRITE_POLICY_SHA256
+    if source_context is not None:
+        source_context.__post_init__()
+        if source_context.source_sha256 != authority.approved_evidence_source_sha256:
+            raise ValueError("outward rewrite source context differs")
+    if exact_policy:
+        if source_context is not None and (
+            source_context.source_sha256 != _pinned_approved_evidence_sha256()
+        ):
+            raise ValueError("exact outward rewrite context differs from pinned source")
+        if source_context is not None:
+            context_source, _ = source_context.statement(candidate_evidence_id)
+        else:
+            context_source = None
+        current_source, current_source_sha256 = _protected_approved_statement(
+            candidate_evidence_id
+        )
+        if context_source is not None and context_source != current_source:
+            raise ValueError("exact outward rewrite context differs from pinned source")
+    elif source_context is not None:
+        if (
+            candidate_profile_hash is None
+            or source_context.candidate_profile_hash != candidate_profile_hash
+        ):
+            raise ValueError("generic outward rewrite profile binding differs")
+        current_source, current_source_sha256 = source_context.statement(
+            candidate_evidence_id
+        )
+    else:
+        if (
+            authority.approved_evidence_source_sha256
+            != _pinned_approved_evidence_sha256()
+        ):
+            raise ValueError("generic outward rewrite evidence context is missing")
+        current_source, current_source_sha256 = _protected_approved_statement(
+            candidate_evidence_id
+        )
+    if (
+        authority.approved_evidence_source_sha256 != current_source_sha256
+        or current_source != approved_source_text
+        or approved_candidate_outward_text(
+            candidate_evidence_id,
+            approved_source_text,
+            document_kind=document_kind,
+            current_runtime=current_runtime,
+        )
+        != outward_text
+    ):
+        raise ValueError("outward rewrite differs from current approved authority")
+
+
 @dataclass(frozen=True)
 class FactAuthority:
     """Exact authority coordinates copied from one JAA-06 element."""
@@ -234,6 +756,7 @@ class FactAuthority:
     candidate_evidence_version: int
     employer_research_claim_id: str
     employer_fact_sha256: str
+    rewrite_authority: AuthenticatedOutwardRewrite | None = None
 
     def __post_init__(self) -> None:
         _digest(self.strategy_element_id, "strategy element ID")
@@ -247,6 +770,41 @@ class FactAuthority:
             _required(value, label)
         if self.candidate_claim_version < 1 or self.candidate_evidence_version < 1:
             raise ValueError("candidate authority versions must be positive")
+        if self.rewrite_authority is not None:
+            self.rewrite_authority.__post_init__()
+
+    @property
+    def outward_text_sha256(self) -> str | None:
+        return (
+            None
+            if self.rewrite_authority is None
+            else self.rewrite_authority.outward_text_sha256
+        )
+
+    @property
+    def rewrite_policy_sha256(self) -> str | None:
+        return (
+            None
+            if self.rewrite_authority is None
+            else self.rewrite_authority.rewrite_policy_sha256
+        )
+
+    def document(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "candidate_claim_id": self.candidate_claim_id,
+            "candidate_claim_version": self.candidate_claim_version,
+            "candidate_evidence_id": self.candidate_evidence_id,
+            "candidate_evidence_version": self.candidate_evidence_version,
+            "employer_fact_sha256": self.employer_fact_sha256,
+            "employer_research_claim_id": self.employer_research_claim_id,
+            "requirement_id": self.requirement_id,
+            "strategy_element_id": self.strategy_element_id,
+        }
+        if self.rewrite_authority is not None:
+            value["outward_text_sha256"] = self.outward_text_sha256
+            value["rewrite_policy_sha256"] = self.rewrite_policy_sha256
+            value["rewrite_authority"] = self.rewrite_authority.document()
+        return value
 
     @classmethod
     def from_element(cls, element: StrategyElement) -> FactAuthority:
@@ -278,8 +836,7 @@ class ProfileFactAuthority:
     candidate_evidence_version: int
     candidate_evidence_sha256: str
     proof_class: str
-    outward_text_sha256: str | None = None
-    rewrite_policy_sha256: str | None = None
+    rewrite_authority: AuthenticatedOutwardRewrite | None = None
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -295,13 +852,40 @@ class ProfileFactAuthority:
             _required(value, label)
         if self.candidate_claim_version < 1 or self.candidate_evidence_version < 1:
             raise ValueError("candidate authority versions must be positive")
-        if (self.outward_text_sha256 is None) != (
-            self.rewrite_policy_sha256 is None
-        ):
-            raise ValueError("candidate outward rewrite authority is incomplete")
-        if self.outward_text_sha256 is not None:
-            _digest(self.outward_text_sha256, "candidate outward text hash")
-            _digest(self.rewrite_policy_sha256, "candidate rewrite policy hash")
+        if self.rewrite_authority is not None:
+            self.rewrite_authority.__post_init__()
+
+    @property
+    def outward_text_sha256(self) -> str | None:
+        return (
+            None
+            if self.rewrite_authority is None
+            else self.rewrite_authority.outward_text_sha256
+        )
+
+    @property
+    def rewrite_policy_sha256(self) -> str | None:
+        return (
+            None
+            if self.rewrite_authority is None
+            else self.rewrite_authority.rewrite_policy_sha256
+        )
+
+    def document(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "candidate_claim_id": self.candidate_claim_id,
+            "candidate_claim_version": self.candidate_claim_version,
+            "candidate_evidence_id": self.candidate_evidence_id,
+            "candidate_evidence_sha256": self.candidate_evidence_sha256,
+            "candidate_evidence_version": self.candidate_evidence_version,
+            "candidate_profile_hash": self.candidate_profile_hash,
+            "outward_text_sha256": self.outward_text_sha256,
+            "proof_class": self.proof_class,
+            "rewrite_policy_sha256": self.rewrite_policy_sha256,
+        }
+        if self.rewrite_authority is not None:
+            value["rewrite_authority"] = self.rewrite_authority.document()
+        return value
 
 
 @dataclass(frozen=True)
@@ -319,6 +903,61 @@ class VacancyFactAuthority:
         _required(self.employer_research_claim_id, "employer research claim ID")
         _digest(self.employer_fact_sha256, "employer fact hash")
 
+    def document(self) -> dict[str, object]:
+        return {
+            "employer_fact_sha256": self.employer_fact_sha256,
+            "employer_research_claim_id": self.employer_research_claim_id,
+            "vacancy_sha256": self.vacancy_sha256,
+            "vacancy_source_identity": self.vacancy_source_identity,
+        }
+
+
+@dataclass(frozen=True)
+class PendingCurrentOutwardDraft:
+    """Non-authorizing link from one current draft span to its exact source."""
+
+    sentence_id: str
+    document_kind: str
+    materialization_receipt_sha256: str
+    editorial_request_sha256: str
+    original_text_sha256: str
+    outward_text_sha256: str
+    schema_version: str = "jaa.current-pending-outward-draft.v1"
+    status: str = "pending_semantic_review"
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.schema_version) is not str
+            or self.schema_version != "jaa.current-pending-outward-draft.v1"
+            or type(self.status) is not str
+            or self.status != "pending_semantic_review"
+            or type(self.sentence_id) is not str
+            or not self.sentence_id.strip()
+            or self.document_kind not in {"cv", "cover_letter"}
+        ):
+            raise ValueError("current outward draft binding is malformed")
+        for value in (
+            self.materialization_receipt_sha256,
+            self.editorial_request_sha256,
+            self.original_text_sha256,
+            self.outward_text_sha256,
+        ):
+            _digest(value, "current outward draft binding hash")
+        if self.original_text_sha256 == self.outward_text_sha256:
+            raise ValueError("verbatim current text cannot be a pending rewrite")
+
+    def document(self) -> dict[str, str]:
+        return {
+            "document_kind": self.document_kind,
+            "editorial_request_sha256": self.editorial_request_sha256,
+            "materialization_receipt_sha256": self.materialization_receipt_sha256,
+            "original_text_sha256": self.original_text_sha256,
+            "outward_text_sha256": self.outward_text_sha256,
+            "schema_version": self.schema_version,
+            "sentence_id": self.sentence_id,
+            "status": self.status,
+        }
+
 
 @dataclass(frozen=True)
 class FactualSentence:
@@ -331,25 +970,66 @@ class FactualSentence:
     document_kind: str
     authority: FactAuthority | ProfileFactAuthority | VacancyFactAuthority
     employer_fact_json: str | None = None
+    pending_current_outward_draft: PendingCurrentOutwardDraft | None = None
 
     def __post_init__(self) -> None:
         _digest(self.sentence_id, "sentence ID")
         text = _safe_plain_text(self.text, "factual sentence")
         source = _safe_plain_text(self.approved_source_text, "approved source text")
+        outward_text_sha256 = getattr(self.authority, "outward_text_sha256", None)
+        rewrite_policy_sha256 = getattr(
+            self.authority, "rewrite_policy_sha256", None
+        )
+        pending = self.pending_current_outward_draft
         if text != source:
-            if (
-                not isinstance(self.authority, ProfileFactAuthority)
-                or self.authority.outward_text_sha256
-                != hashlib.sha256(text.encode()).hexdigest()
-                or self.authority.rewrite_policy_sha256 is None
+            if pending is not None:
+                if (
+                    type(pending) is not PendingCurrentOutwardDraft
+                    or self.fact_kind != "candidate"
+                    or self.document_kind not in {"cv", "cover_letter"}
+                    or pending.sentence_id != self.sentence_id
+                    or pending.document_kind != self.document_kind
+                    or pending.original_text_sha256
+                    != hashlib.sha256(source.encode("utf-8")).hexdigest()
+                    or pending.outward_text_sha256
+                    != hashlib.sha256(text.encode("utf-8")).hexdigest()
+                    or getattr(self.authority, "rewrite_authority", None) is not None
+                ):
+                    raise ValueError("pending current rewrite differs from its exact source")
+            elif (
+                not isinstance(self.authority, (FactAuthority, ProfileFactAuthority))
+                or outward_text_sha256 != hashlib.sha256(text.encode()).hexdigest()
+                or rewrite_policy_sha256 is None
             ):
                 raise ValueError(
                     "factual sentence must equal its approved source text unless "
                     "it has exact outward authority"
                 )
-        elif isinstance(self.authority, ProfileFactAuthority) and (
-            self.authority.outward_text_sha256 is not None
-            or self.authority.rewrite_policy_sha256 is not None
+            elif self.authority.rewrite_authority is None:
+                raise ValueError("outward rewrite resolution is missing")
+            else:
+                verify_authenticated_outward_rewrite(
+                    self.authority.rewrite_authority,
+                    candidate_evidence_id=self.authority.candidate_evidence_id,
+                    candidate_evidence_version=self.authority.candidate_evidence_version,
+                    approved_source_text=source,
+                    outward_text=text,
+                    document_kind=self.document_kind,
+                    approved_evidence_source=getattr(
+                        self.authority.rewrite_authority,
+                        "source_context",
+                        None,
+                    ),
+                    candidate_profile_hash=(
+                        self.authority.candidate_profile_hash
+                        if isinstance(self.authority, ProfileFactAuthority)
+                        else None
+                    ),
+                )
+        elif pending is not None:
+            raise ValueError("verbatim current text cannot carry a pending rewrite")
+        elif isinstance(self.authority, (FactAuthority, ProfileFactAuthority)) and (
+            outward_text_sha256 is not None or rewrite_policy_sha256 is not None
         ):
             raise ValueError("verbatim candidate fact cannot claim rewrite authority")
         if self.fact_kind not in ALLOWED_FACT_KINDS:
@@ -392,15 +1072,27 @@ class FactualSentence:
                 )
 
     def document(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "sentence_id": self.sentence_id,
             "text": self.text,
             "approved_source_text": self.approved_source_text,
             "fact_kind": self.fact_kind,
             "document_kind": self.document_kind,
-            "authority": vars(self.authority),
+            "authority": self.authority.document(),
             "employer_fact_json": self.employer_fact_json,
         }
+        if self.pending_current_outward_draft is not None:
+            value["pending_current_outward_draft"] = (
+                self.pending_current_outward_draft.document()
+            )
+        return value
+
+
+def _employer_fact_is_new(fact_sha256: str, seen_hashes: set[str]) -> bool:
+    if fact_sha256 in seen_hashes:
+        return False
+    seen_hashes.add(fact_sha256)
+    return True
 
 
 @dataclass(frozen=True)
@@ -492,6 +1184,7 @@ class DocumentSection:
     heading: str
     sentence_ids: tuple[str, ...]
     style_slot_ids: tuple[str, ...] = ()
+    related_sentence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _safe_plain_text(self.heading, "section heading")
@@ -499,6 +1192,23 @@ class DocumentSection:
             raise ValueError("document sections require content")
         if len(set(self.sentence_ids)) != len(self.sentence_ids):
             raise ValueError("section sentence identities must be unique")
+        if (
+            len(set(self.related_sentence_ids)) != len(self.related_sentence_ids)
+            or set(self.related_sentence_ids).intersection(self.sentence_ids)
+        ):
+            raise ValueError("related sentence identities must be unique metadata")
+        if self.related_sentence_ids and not self.style_slot_ids:
+            raise ValueError("related facts require a bound connective slot")
+
+    def document(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "heading": self.heading,
+            "sentence_ids": self.sentence_ids,
+            "style_slot_ids": self.style_slot_ids,
+        }
+        if self.related_sentence_ids:
+            result["related_sentence_ids"] = self.related_sentence_ids
+        return result
 
 
 @dataclass(frozen=True)
@@ -557,8 +1267,8 @@ class ApplicationSource:
             "contact": self.contact.document(),
             "facts": [row.document() for row in self.facts],
             "style_slots": [row.document() for row in self.style_slots],
-            "cv_sections": [vars(row) for row in self.cv_sections],
-            "letter_sections": [vars(row) for row in self.letter_sections],
+            "cv_sections": [row.document() for row in self.cv_sections],
+            "letter_sections": [row.document() for row in self.letter_sections],
             "answers": [vars(row) for row in self.answers],
             "certifies_slice": False,
             "dependency_gate": "JAA-06",
@@ -646,6 +1356,12 @@ def _validate_sections(
             or len(headings) < 2
         ):
             raise ValueError("cv sections are not canonical")
+    elif document_kind == "cover_letter":
+        without_company_fit = tuple(
+            heading for heading in expected_headings if heading != "Company Fit"
+        )
+        if headings not in (expected_headings, without_company_fit):
+            raise ValueError(f"{document_kind} sections are not canonical")
     elif headings != expected_headings:
         raise ValueError(f"{document_kind} sections are not canonical")
     covered: set[str] = set()
@@ -662,7 +1378,114 @@ def _validate_sections(
             slot = slots.get(slot_id)
             if slot is None or slot.document_kind != document_kind:
                 raise ValueError(f"{document_kind} section cites an invalid style slot")
+    if document_kind == "cover_letter":
+        _validate_related_section_bindings(sections, facts, slots)
     return covered
+
+
+def _strategy_sibling_key(fact: FactualSentence) -> tuple[object, ...] | None:
+    authority = fact.authority
+    if not isinstance(authority, FactAuthority):
+        return None
+    return (
+        authority.requirement_id,
+        authority.candidate_claim_id,
+        authority.candidate_claim_version,
+        authority.candidate_evidence_id,
+        authority.candidate_evidence_version,
+        authority.employer_research_claim_id,
+        authority.employer_fact_sha256,
+    )
+
+
+def _validate_related_section_bindings(
+    sections: tuple[DocumentSection, ...],
+    facts: Mapping[str, FactualSentence],
+    slots: Mapping[str, StyleSlot],
+) -> None:
+    bound_candidate_ids: set[str] = set()
+    for section in sections:
+        if not section.related_sentence_ids:
+            continue
+        if (
+            section.heading != "Company Fit"
+            or not section.style_slot_ids
+            or not section.sentence_ids
+        ):
+            raise ValueError("related facts are only valid in a connected company-fit section")
+        related_facts = [facts.get(sentence_id) for sentence_id in section.related_sentence_ids]
+        employer_facts = [facts.get(sentence_id) for sentence_id in section.sentence_ids]
+        section_slots = [slots.get(slot_id) for slot_id in section.style_slot_ids]
+        if (
+            any(
+                fact is None
+                or fact.fact_kind != "candidate"
+                or fact.document_kind != "cover_letter"
+                or _strategy_sibling_key(fact) is None
+                for fact in related_facts
+            )
+            or any(
+                fact is None
+                or fact.fact_kind != "employer"
+                or fact.document_kind != "cover_letter"
+                or _strategy_sibling_key(fact) is None
+                for fact in employer_facts
+            )
+            or any(
+                slot is None or slot.document_kind != "cover_letter"
+                for slot in section_slots
+            )
+        ):
+            raise ValueError("company-fit relation must bind candidate and employer strategy facts")
+        candidate_keys = {_strategy_sibling_key(fact) for fact in related_facts if fact}
+        employer_keys = {_strategy_sibling_key(fact) for fact in employer_facts if fact}
+        if not candidate_keys or not employer_keys or not employer_keys.issubset(candidate_keys):
+            raise ValueError("company-fit facts lack an exact strategy sibling binding")
+        if not candidate_keys.issubset(employer_keys):
+            raise ValueError("company-fit metadata contains an unrelated candidate fact")
+        for fact in related_facts:
+            assert fact is not None
+            if fact.sentence_id in bound_candidate_ids:
+                raise ValueError("candidate fact is bound more than once")
+            bound_candidate_ids.add(fact.sentence_id)
+            locations = [
+                row
+                for row in sections
+                if fact.sentence_id in row.sentence_ids
+            ]
+            if len(locations) != 1 or locations[0].heading != "Evidence Match":
+                raise ValueError("related candidate facts must appear once in Evidence Match")
+        private_ids = {
+            value
+            for fact in (*related_facts, *employer_facts)
+            if fact is not None
+            for value in (
+                fact.sentence_id,
+                fact.authority.strategy_element_id
+                if isinstance(fact.authority, FactAuthority)
+                else "",
+                fact.authority.requirement_id
+                if isinstance(fact.authority, FactAuthority)
+                else "",
+                fact.authority.candidate_claim_id
+                if isinstance(fact.authority, FactAuthority)
+                else "",
+                fact.authority.candidate_evidence_id
+                if isinstance(fact.authority, FactAuthority)
+                else "",
+                fact.authority.employer_research_claim_id
+                if isinstance(fact.authority, FactAuthority)
+                else "",
+            )
+            if value
+        }
+        if any(
+            private_id in slot.text
+            for slot in section_slots
+            if slot is not None
+            for private_id in private_ids
+        ):
+            raise ValueError("company-fit connective cannot expose strategy identifiers")
 
 
 def compile_application_source(
@@ -804,6 +1627,22 @@ def compile_application_source(
 
 
 def verify_application_source(source: ApplicationSource) -> None:
+    for fact in source.facts:
+        rewrite = getattr(fact.authority, "rewrite_authority", None)
+        if rewrite is None:
+            continue
+        if getattr(rewrite, "source_context", None) is not None:
+            fact.__post_init__()
+        elif (
+            rewrite.approved_evidence_source_sha256
+            != _pinned_approved_evidence_sha256()
+        ):
+            fact.__post_init__()
+    _validate_related_section_bindings(
+        source.letter_sections,
+        {row.sentence_id: row for row in source.facts},
+        {row.slot_id: row for row in source.style_slots},
+    )
     body = source.document(include_identity=False)
     expected_hash = hashlib.sha256(canonical_json(body).encode()).hexdigest()
     expected_id = content_hash(
@@ -1103,6 +1942,7 @@ class ProductionApplicationCompiler:
             job_key = str(parent["job_key"])
             candidate_cache: dict[tuple[str, int, str, int], tuple[str, str]] = {}
             employer_cache: dict[str, tuple[str, str]] = {}
+            employer_fact_hashes: set[str] = set()
             facts: list[FactualSentence] = []
             claim_type_by_sentence: dict[str, str] = {}
             for element in strategy.elements:
@@ -1143,6 +1983,11 @@ class ProductionApplicationCompiler:
                     facts.append(sentence)
                     claim_type_by_sentence[sentence.sentence_id] = claim_type
                 elif element.kind == "employer_hook":
+                    if not _employer_fact_is_new(
+                        element.employer_fact_sha256,
+                        employer_fact_hashes,
+                    ):
+                        continue
                     if element.employer_research_claim_id not in employer_cache:
                         employer_cache[element.employer_research_claim_id] = (
                             self._employer_statement(
@@ -1183,7 +2028,28 @@ class ProductionApplicationCompiler:
         if not cv_facts or not letter_candidate or not letter_employer:
             raise ValueError("strategy does not contain complete document authority")
 
-        cv_slot = self._slot("cv", "summary-lead", "Relevant evidence")
+        employer_sibling_keys = {
+            _strategy_sibling_key(row) for row in letter_employer
+        }
+        related_candidate_ids = tuple(
+            row.sentence_id
+            for row in letter_candidate
+            if _strategy_sibling_key(row) in employer_sibling_keys
+        )
+        has_complete_sibling_binding = bool(related_candidate_ids) and all(
+            _strategy_sibling_key(employer) is not None
+            and _strategy_sibling_key(employer)
+            in {_strategy_sibling_key(candidate) for candidate in letter_candidate}
+            for employer in letter_employer
+        )
+        company_fit_slot = None
+        if has_complete_sibling_binding:
+            company_fit_slot = self._slot(
+                "cover_letter",
+                "strategy_sibling_company_fit_connective",
+                "I would welcome the opportunity to bring this experience to the work described here:",
+            )
+
         letter_open = self._slot(
             "cover_letter",
             "salutation",
@@ -1194,7 +2060,9 @@ class ProductionApplicationCompiler:
             "signoff",
             "Kind regards",
         )
-        slots: list[StyleSlot] = [cv_slot, letter_open, letter_close]
+        slots: list[StyleSlot] = [letter_open, letter_close]
+        if company_fit_slot is not None:
+            slots.append(company_fit_slot)
         education = tuple(
             row.sentence_id
             for row in cv_facts
@@ -1222,7 +2090,6 @@ class ProductionApplicationCompiler:
                 DocumentSection(
                     "Professional Summary",
                     (summary_id,),
-                    (cv_slot.slot_id,),
                 )
             ]
             if capabilities:
@@ -1237,7 +2104,6 @@ class ProductionApplicationCompiler:
                 DocumentSection(
                     "Professional Summary",
                     (cv_facts[0].sentence_id,),
-                    (cv_slot.slot_id,),
                 )
             ]
             if education:
@@ -1248,23 +2114,16 @@ class ProductionApplicationCompiler:
 
         answers: list[StructuredAnswer] = []
         for requirement_id, (question_id, question_text) in sorted(
-            question_rows.items()
+            question_rows.items(), key=lambda row: row[1][0]
         ):
             fact = answer_facts.get(requirement_id)
             if fact is None:
                 raise ValueError("portal question lacks structured-answer authority")
-            slot = self._slot(
-                "answer",
-                f"answer:{question_id}",
-                "A relevant example follows.",
-            )
-            slots.append(slot)
             answers.append(
                 StructuredAnswer(
                     question_id,
                     question_text,
                     (fact.sentence_id,),
-                    (slot.slot_id,),
                 )
             )
         return compile_application_source(
@@ -1291,6 +2150,8 @@ class ProductionApplicationCompiler:
                 DocumentSection(
                     "Company Fit",
                     tuple(row.sentence_id for row in letter_employer),
+                    (company_fit_slot.slot_id,) if company_fit_slot else (),
+                    related_candidate_ids if company_fit_slot else (),
                 ),
                 DocumentSection(
                     "Close",

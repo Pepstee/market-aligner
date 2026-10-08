@@ -7,13 +7,15 @@ from dataclasses import replace
 import pytest
 
 from career_automation.adversarial_recruiter import (
-    RESULT_SCHEMA_VERSION,
     RecruiterAssessmentPackage,
     assess_application_as_recruiter,
 )
 from career_automation.external_document_assurance import IntendedVacancy
 from career_automation.evidence_matching import content_hash
 from career_automation.rendering import _build_text_pdf
+from career_automation.testing_adversarial_recruiter import (
+    fixture_recruiter_result,
+)
 from cv_generation.adversarial_rebuild import (
     AdversarialRebuildError,
     bind_recruiter_improvement,
@@ -63,51 +65,54 @@ def _claim(claim_id: str, text: str, category: str) -> ApprovedCVClaim:
 
 
 def _recruiter_result() -> dict[str, object]:
-    reaction = {
-        "progression_probability_percent": 55,
-        "verdict": "borderline",
-        "reasons": ["Relevant automation work is present but not prominent."],
-    }
-    return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "calibration_status": "uncalibrated",
-        "fit_percent": 52,
-        "fit_range_percent": {"low": 40, "high": 65},
-        "overall_verdict": "plausible_fit",
-        "ats_reaction": reaction,
-        "human_reaction": reaction,
-        "strengths": [
-            {"location": "cv:projects", "assessment": "Relevant automation project."}
-        ],
-        "risks": [
-            {
-                "category": "skills",
-                "severity": "medium",
-                "location": "cv:projects",
-                "assessment": "The closest project is not prominent enough.",
-            }
-        ],
-        "application_improvements": [
-            {
-                "target": "cv",
-                "recommendation": "Lead with the strongest automation project.",
-                "expected_effect": "Makes the closest evidence visible sooner.",
-            },
-            {
-                "target": "cv",
-                "recommendation": "Claim five years of Kubernetes ownership.",
-                "expected_effect": "Would address a stated platform requirement.",
-            },
-        ],
-        "profile_improvements": [
-            {
-                "category": "experience",
-                "recommendation": "Build evidence of operating a larger deployed service.",
-                "time_horizon": "months",
-                "expected_effect": "Addresses the remaining production-depth gap.",
-            }
-        ],
-    }
+    value = fixture_recruiter_result()
+    value.update(
+        {
+            "strengths": [
+                {
+                    "location": "cv:projects",
+                    "assessment": "Relevant automation project.",
+                    "outward_evidence_refs": ["cv:char:0:1"],
+                }
+            ],
+            "risks": [
+                {
+                    "category": "skills",
+                    "severity": "medium",
+                    "location": "cv:projects",
+                    "assessment": "The closest project is not prominent enough.",
+                    "outward_evidence_refs": ["cv:char:0:1"],
+                }
+            ],
+            "application_improvements": [
+                {
+                    "rank": 1,
+                    "target": "cv",
+                    "recommendation": "Lead with the strongest automation project.",
+                    "expected_effect": "Makes the closest evidence visible sooner.",
+                    "support_required": False,
+                    "outward_evidence_refs": ["cv:char:0:1"],
+                },
+                {
+                    "rank": 2,
+                    "target": "cv",
+                    "recommendation": "Claim five years of Kubernetes ownership.",
+                    "expected_effect": "Would address a stated platform requirement.",
+                    "support_required": True,
+                    "outward_evidence_refs": ["job_listing:char:0:1"],
+                },
+            ],
+            "profile_improvements": [
+                {
+                    "category": "experience",
+                    "recommendation": "Build evidence of operating a larger deployed service.",
+                    "time_horizon": "months",
+                    "expected_effect": "Addresses the remaining production-depth gap.",
+                }
+            ],
+        }
+    )
+    return value
 
 
 def _pdf(text: str) -> bytes:
@@ -119,7 +124,7 @@ def _fixture(tmp_path):
     listing_sha256 = hashlib.sha256(listing.encode()).hexdigest()
     authority = CandidateEditorialAuthority(
         candidate_name="Artiom Gutu",
-        candidate_city="Birmingham, United Kingdom",
+        candidate_city="Birmingham",
         graduation_month_year="July 2026",
         dissertation_title=TITLE,
         source_sha256="a" * 64,
@@ -241,9 +246,21 @@ def _fixture(tmp_path):
     return request, draft, editorial_receipt, package, recruiter_receipt, binding
 
 
+def _rebuild(**arguments):
+    recruiter_receipt = arguments["recruiter_receipt"]
+    assessed_cv_text_sha256 = arguments.pop(
+        "assessed_cv_text_sha256",
+        recruiter_receipt.package_hashes["cv_text_sha256"],
+    )
+    return rebuild_from_recruiter_assessment(
+        **arguments,
+        assessed_cv_text_sha256=assessed_cv_text_sha256,
+    )
+
+
 def test_applies_only_evidence_bound_improvement_and_routes_gaps(tmp_path) -> None:
     request, draft, editorial, package, recruiter, binding = _fixture(tmp_path)
-    rebuilt = rebuild_from_recruiter_assessment(
+    rebuilt = _rebuild(
         request=request,
         admitted_draft=draft,
         editorial_receipt=editorial,
@@ -253,7 +270,9 @@ def test_applies_only_evidence_bound_improvement_and_routes_gaps(tmp_path) -> No
     )
 
     projects = next(
-        section for section in rebuilt.rebuilt_draft.sections if section.heading == "Projects"
+        section
+        for section in rebuilt.rebuilt_draft.sections
+        if section.heading == "Projects"
     )
     assert [atom.claim_id for atom in projects.atoms] == [
         "project-strongest",
@@ -270,7 +289,7 @@ def test_applies_only_evidence_bound_improvement_and_routes_gaps(tmp_path) -> No
 
 def test_final_rebuild_runs_through_existing_cv_constraint_gate(tmp_path) -> None:
     request, draft, editorial, package, recruiter, binding = _fixture(tmp_path)
-    rebuilt = rebuild_from_recruiter_assessment(
+    rebuilt = _rebuild(
         request=request,
         admitted_draft=draft,
         editorial_receipt=editorial,
@@ -304,7 +323,7 @@ def test_unknown_claim_and_wrong_authority_bindings_fail_closed(tmp_path) -> Non
         binding_source_sha256="d" * 64,
     )
     with pytest.raises(AdversarialRebuildError, match="unapproved"):
-        rebuild_from_recruiter_assessment(
+        _rebuild(
             request=request,
             admitted_draft=draft,
             editorial_receipt=editorial,
@@ -322,7 +341,7 @@ def test_unknown_claim_and_wrong_authority_bindings_fail_closed(tmp_path) -> Non
         binding_source_sha256="d" * 64,
     )
     with pytest.raises(AdversarialRebuildError, match="different authority"):
-        rebuild_from_recruiter_assessment(
+        _rebuild(
             request=request,
             admitted_draft=draft,
             editorial_receipt=editorial,
@@ -338,7 +357,9 @@ def test_diagnostic_receipt_cannot_mutate_an_unadmitted_draft(tmp_path) -> None:
         replace(editorial, final_draft_sha256="f" * 64)
 
     strongest = next(
-        claim for claim in request.approved_claims if claim.claim_id == "project-strongest"
+        claim
+        for claim in request.approved_claims
+        if claim.claim_id == "project-strongest"
     )
     projects = draft.sections[2]
     unadmitted = build_editorial_draft(
@@ -350,16 +371,14 @@ def test_diagnostic_receipt_cannot_mutate_an_unadmitted_draft(tmp_path) -> None:
                 projects,
                 atoms=(
                     *projects.atoms,
-                    EditorialAtom(
-                        "approved_claim", strongest.text, strongest.claim_id
-                    ),
+                    EditorialAtom("approved_claim", strongest.text, strongest.claim_id),
                 ),
             ),
             *draft.sections[3:],
         ),
     )
     with pytest.raises(AdversarialRebuildError, match="lacks its admission receipt"):
-        rebuild_from_recruiter_assessment(
+        _rebuild(
             request=request,
             admitted_draft=unadmitted,
             editorial_receipt=editorial,
@@ -373,7 +392,7 @@ def test_recruiter_assessment_must_match_exact_vacancy_and_package(tmp_path) -> 
     request, draft, editorial, package, recruiter, binding = _fixture(tmp_path)
     different_package = replace(package, cv_pdf_bytes=_pdf("Different CV"))
     with pytest.raises(ValueError, match="differs"):
-        rebuild_from_recruiter_assessment(
+        _rebuild(
             request=request,
             admitted_draft=draft,
             editorial_receipt=editorial,
@@ -394,13 +413,14 @@ def test_recruiter_assessment_must_match_exact_vacancy_and_package(tmp_path) -> 
     )
     other_receipt = assess_application_as_recruiter(other_package, client=other_client)
     with pytest.raises(AdversarialRebuildError, match="did not inspect"):
-        rebuild_from_recruiter_assessment(
+        _rebuild(
             request=request,
             admitted_draft=draft,
             editorial_receipt=editorial,
             recruiter_receipt=other_receipt,
             recruiter_package=other_package,
             bindings=(),
+            assessed_cv_text_sha256=recruiter.package_hashes["cv_text_sha256"],
         )
 
     different_request = build_editorial_request(
@@ -436,7 +456,7 @@ def test_recruiter_assessment_must_match_exact_vacancy_and_package(tmp_path) -> 
         humanizer_evidence=humanizer,
     )
     with pytest.raises(AdversarialRebuildError, match="another vacancy"):
-        rebuild_from_recruiter_assessment(
+        _rebuild(
             request=different_request,
             admitted_draft=draft,
             editorial_receipt=different_editorial,
@@ -471,7 +491,7 @@ def test_non_cv_improvement_cannot_receive_cv_claim_binding(tmp_path) -> None:
         binding_source_sha256="d" * 64,
     )
     with pytest.raises(AdversarialRebuildError, match="non-CV"):
-        rebuild_from_recruiter_assessment(
+        _rebuild(
             request=request,
             admitted_draft=draft,
             editorial_receipt=editorial,
@@ -483,7 +503,7 @@ def test_non_cv_improvement_cannot_receive_cv_claim_binding(tmp_path) -> None:
 
 def test_continuation_banner_is_still_rejected_after_rebuild(tmp_path) -> None:
     request, draft, editorial, package, recruiter, binding = _fixture(tmp_path)
-    rebuilt = rebuild_from_recruiter_assessment(
+    rebuilt = _rebuild(
         request=request,
         admitted_draft=draft,
         editorial_receipt=editorial,

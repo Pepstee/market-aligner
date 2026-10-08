@@ -24,6 +24,7 @@ from .application_archive import (
     ARCHIVE_ROOT_ENV,
     DEFAULT_ARCHIVE_ROOT,
     ApplicationArchive,
+    REVIEW_REPLAY_SEMANTIC_FENCE_ROLES,
     VacancyArchiveIdentity,
 )
 from .evidence_matching import canonical_json
@@ -36,6 +37,7 @@ ADMITTED_PROVIDERS = frozenset({"greenhouse"})
 MAX_LIVE_AGE = timedelta(hours=6)
 QUARANTINE_OUTCOMES = frozenset(
     {
+        "review_only",
         "submitted_success",
         "historical_submitted_success",
         "submitted_failure",
@@ -219,6 +221,9 @@ class PriorAttempt:
     terminal_manifest_sha256: str | None
     click_intent_present: bool = False
     repairable_preclick_human_verification: bool = False
+    review_only_intent_present: bool = False
+    semantic_fence_present: bool = False
+    terminal_recovery_pending: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.vacancy, VacancyArchiveIdentity):
@@ -229,6 +234,12 @@ class PriorAttempt:
             raise ProductionQueueError("click-intent state must be a boolean")
         if type(self.repairable_preclick_human_verification) is not bool:
             raise ProductionQueueError("repairable-block state must be a boolean")
+        if type(self.review_only_intent_present) is not bool:
+            raise ProductionQueueError("review-only intent state must be a boolean")
+        if type(self.semantic_fence_present) is not bool:
+            raise ProductionQueueError("semantic fence state must be a boolean")
+        if type(self.terminal_recovery_pending) is not bool:
+            raise ProductionQueueError("terminal recovery state must be a boolean")
         if self.outcome is None:
             if self.terminal_manifest_sha256 is not None:
                 raise ProductionQueueError("incomplete attempt has a terminal hash")
@@ -271,7 +282,9 @@ def prior_attempts_from_archive(
     rows: list[PriorAttempt] = []
     for summary in archive.query():
         attempt = archive.open_attempt(str(summary["attempt_id"]))
-        roles = {row.role for row in attempt._objects(attempt._events())}
+        events = attempt._events()
+        objects = attempt._objects(events)
+        roles = {row.role for row in objects}
         terminal_path = attempt.path / "terminal-manifest.json"
         outcome: str | None = None
         terminal_sha256: str | None = None
@@ -293,6 +306,10 @@ def prior_attempts_from_archive(
                 )
             terminal_sha256 = _sha256(value)
         click_intent_present = "submission.click_intent" in roles
+        terminal_recovery_pending = outcome is None and (
+            events[-1]["event_type"] == "evidence_recorded"
+            and events[-1]["payload"].get("event_kind") == "terminal"
+        )
         repairable_preclick_human_verification = False
         if outcome == "blocked" and not click_intent_present and terminal is not None:
             selected = terminal.get("selected")
@@ -332,6 +349,11 @@ def prior_attempts_from_archive(
                 repairable_preclick_human_verification=(
                     repairable_preclick_human_verification
                 ),
+                review_only_intent_present="review.intent" in roles,
+                semantic_fence_present=bool(
+                    roles.intersection(REVIEW_REPLAY_SEMANTIC_FENCE_ROLES)
+                ),
+                terminal_recovery_pending=terminal_recovery_pending,
             )
         )
     return tuple(rows)
@@ -343,9 +365,12 @@ def build_ascending_queue(
     prior_attempts: Iterable[PriorAttempt] = (),
     as_of: datetime | None = None,
     retry_repairable_preclick_blocks: bool = False,
+    review_only: bool = False,
 ) -> AscendingProductionQueue:
     if type(retry_repairable_preclick_blocks) is not bool:
         raise ProductionQueueError("repairable-block retry policy must be boolean")
+    if type(review_only) is not bool:
+        raise ProductionQueueError("review-only queue mode must be boolean")
     supplied_now = as_of or datetime.now(timezone.utc)
     if supplied_now.tzinfo is None or supplied_now.utcoffset() is None:
         raise ProductionQueueError("queue evaluation time must include a timezone")
@@ -420,6 +445,17 @@ def build_ascending_queue(
             reason = "unsupported_provider"
         elif len(incomplete) > 1:
             raise ProductionQueueError("vacancy has multiple incomplete attempts")
+        elif review_only and any(
+            row.review_only_intent_present
+            and row.semantic_fence_present
+            and not row.terminal_recovery_pending
+            for row in incomplete
+        ):
+            reason = "prior_incomplete_review_only_semantic_fence"
+        elif not review_only and any(
+            row.review_only_intent_present for row in incomplete
+        ):
+            reason = "prior_incomplete_review_only"
         if reason is not None:
             excluded.append(QueueExclusion(candidate, reason))
             continue

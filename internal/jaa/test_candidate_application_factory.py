@@ -2,44 +2,308 @@ from __future__ import annotations
 
 import json
 import hashlib
-from dataclasses import replace
+import pickle
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from career_automation.application_compiler import CandidateContact
+from career_automation import application_compiler as application_compiler_module
+from career_automation import candidate_application_factory as candidate_factory_module
+from career_automation.application_compiler import CandidateContact, FactAuthority
+from career_automation.application_compiler import verify_application_source
+from career_automation.rendering import (
+    RENDERER_POLICY,
+    RENDERER_POLICY_SHA256,
+    _letter_paragraphs,
+    _outward_cv_sections,
+    render_editable_text,
+    render_pdf_artifacts,
+)
 from career_automation.candidate_application_factory import (
+    _approved_statements,
+    _evidence_document_targets,
+    _fact_binding,
+    _build_candidate_application_source,
+    _load_approved_statements,
+    _projection_evidence_sha256,
+    _populate_fallback_profile_summary,
+    _profile_cv_section_for_evidence,
+    _select_profile_capability_fact,
+    _assert_package_quality,
+    _source_policy_receipt,
+    resolve_match_policy,
+    resolve_evidence_packet,
     build_market_application_decision_authority,
     build_candidate_application_deployment_binding,
     build_candidate_application_package,
+    match_selected_packet,
     materialize_candidate_application_source,
 )
-from career_automation.evidence_matching import canonical_json
-from career_automation.candidate_contact_authority import CandidateContactAuthority
+from career_automation.evidence_matching import canonical_json, content_hash
+from career_automation.candidate_contact_authority import (
+    CandidateContactAuthority,
+    CurrentContactProvenance,
+    bind_contact_sources,
+    load_current_contact_provenance,
+)
+from career_automation import candidate_contact_authority as contact_authority_module
 from career_automation.candidate_authority import APPROVED_EVIDENCE_PATH
+from career_automation.candidate_authority import APPROVED_CANDIDATE_SOURCE_HASHES
+from market_aligner.llm.contracts import canonical_hash
 from career_automation.production_attempt import _approved_fact_authorities
 from career_automation.release_gate import cv_constraint_release_binding
 from career_automation import market_aligner_preparation
 from career_automation.handoff_admission import HandoffAdmissionError
+from cv_generation.constraints import capability_line_eligible
 from cv_generation.editorial_composition import (
     ApprovedCVClaim,
     CandidateEditorialAuthority,
     build_editorial_request,
+    category_for_source_heading,
 )
 
 
-AUTHORITY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/candidate-authorities/"
+PRIVATE_AUTHORITY_ROOT = (
+    Path(__file__).resolve().parents[2]
+    / ".market-aligner-data"
+    / "authority-inputs"
+)
+AUTHORITY_PATH = PRIVATE_AUTHORITY_ROOT / "candidate-authorities" / (
     "85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json"
 )
-DISCOVERY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/objects/39/"
+DISCOVERY_PATH = PRIVATE_AUTHORITY_ROOT / "objects" / "39" / (
     "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
 )
 
+PRIVATE_FIXTURE_REASON = (
+    "requires the exact private Gigabyte candidate-authority and discovery "
+    "artifacts; synthetic substitution would not test the certified binding"
+)
+
+_SUMMARY_HEADING_ORDER = (
+    "Professional Summary",
+    "Core Capabilities",
+    "Projects",
+    "Education",
+    "Experience",
+    "Skills",
+    "Highlights",
+    "Results",
+    "Outcomes",
+)
+
+
+@dataclass(frozen=True)
+class _SummaryAuthority:
+    candidate_evidence_id: str
+
+
+@dataclass(frozen=True)
+class _SummaryFact:
+    sentence_id: str
+    text: str
+    evidence_id: str
+    authority: _SummaryAuthority
+    fact_kind: str = "candidate"
+
+
+def _summary_fact(sentence_id: str, evidence_id: str, text: str) -> _SummaryFact:
+    return _SummaryFact(
+        sentence_id=sentence_id,
+        text=text,
+        evidence_id=evidence_id,
+        authority=_SummaryAuthority(evidence_id),
+    )
+
+
+def test_fallback_summary_keeps_explicit_summary_arrangement_unchanged() -> None:
+    explicit = [_summary_fact("summary-1", "evidence-1", "Approved summary.")]
+    project = _summary_fact("project-1", "evidence-2", "Approved project fact.")
+    sections = {"Professional Summary": explicit, "Projects": [project]}
+
+    result = _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=False,
+    )
+
+    assert result is sections
+    assert result["Professional Summary"] is explicit
+    assert result["Projects"] == [project]
+
+
+def test_legacy_fallback_summary_keeps_first_fact_ordering() -> None:
+    capability = _summary_fact("capability-1", "evidence-1", "Approved capability.")
+    project = _summary_fact("project-1", "evidence-2", "Approved project fact.")
+    sections = {"Core Capabilities": [capability], "Projects": [project]}
+
+    _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=True,
+    )
+
+    assert sections["Professional Summary"] == [capability]
+    assert sections["Professional Summary"][0] is capability
+    assert "Core Capabilities" not in sections
+    assert sections["Projects"] == [project]
+
+
+def test_generic_fallback_moves_complementary_facts_without_rewriting_or_duplication() -> None:
+    first = _summary_fact("project-1", "evidence-1", "Built an approved project.")
+    second = _summary_fact("experience-1", "evidence-2", "Delivered approved work.")
+    remaining = _summary_fact("project-2", "evidence-3", "Recorded another result.")
+    sections = {"Projects": [first, remaining], "Experience": [second]}
+
+    _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=False,
+    )
+
+    summary = sections["Professional Summary"]
+    assert summary == [first, second]
+    assert summary[0] is first and summary[1] is second
+    assert summary[0].text == "Built an approved project."
+    assert summary[1].text == "Delivered approved work."
+    assert summary[0].authority is first.authority
+    assert summary[1].authority is second.authority
+    assert sections["Projects"] == [remaining]
+    assert "Experience" not in sections
+    all_rows = [fact for rows in sections.values() for fact in rows]
+    assert sorted(fact.sentence_id for fact in all_rows) == [
+        "experience-1",
+        "project-1",
+        "project-2",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("count", "summary_count"),
+    ((3, 2), (1, 1)),
+)
+def test_generic_fallback_uses_same_heading_facts_or_one_available_fact(
+    count: int, summary_count: int
+) -> None:
+    facts = [
+        _summary_fact(f"project-{index}", f"evidence-{index}", f"Fact {index}.")
+        for index in range(1, count + 1)
+    ]
+    sections = {"Projects": facts.copy()}
+
+    _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=False,
+    )
+
+    assert len(sections["Professional Summary"]) == summary_count
+    assert all(fact in sections["Professional Summary"] for fact in facts[:summary_count])
+    assert all(rows for rows in sections.values())
+    remaining_ids = [
+        fact.sentence_id
+        for heading, rows in sections.items()
+        if heading != "Professional Summary"
+        for fact in rows
+    ]
+    assert remaining_ids == [fact.sentence_id for fact in facts[summary_count:]]
+
+
+def test_generic_fallback_preserves_existing_capabilities() -> None:
+    capability = _summary_fact(
+        "existing-capability", "evidence-capability", "Existing approved capability."
+    )
+    project = _summary_fact(
+        "project-1",
+        "evidence-project",
+        "Implemented testing and automation for service reliability.",
+    )
+    sections = {
+        "Core Capabilities": [capability],
+        "Projects": [project],
+    }
+    evidence_kinds = {
+        "evidence-capability": "work_artifact",
+        "evidence-project": "work_artifact",
+    }
+
+    _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=False,
+        evidence_kinds=evidence_kinds,
+    )
+
+    assert sections["Professional Summary"] == [project]
+    assert sections["Core Capabilities"] == [capability]
+    assert sections["Core Capabilities"][0] is capability
+    assert "Projects" not in sections
+
+
+def test_generic_fallback_leaves_capability_candidate_and_body_row_for_existing_pass() -> None:
+    first = _summary_fact("project-1", "evidence-1", "Created a project record.")
+    second = _summary_fact("experience-1", "evidence-2", "Recorded a meeting note.")
+    eligible = _summary_fact(
+        "skill-1",
+        "evidence-eligible",
+        "Implemented testing and automation for service reliability.",
+    )
+    spare = _summary_fact("skill-2", "evidence-spare", "Documented another result.")
+    sections = {
+        "Projects": [first],
+        "Experience": [second],
+        "Skills": [eligible, spare],
+    }
+    evidence_kinds = {
+        fact.evidence_id: "work_artifact"
+        for rows in sections.values()
+        for fact in rows
+    }
+
+    _populate_fallback_profile_summary(
+        sections,
+        heading_order=_SUMMARY_HEADING_ORDER,
+        legacy_profile=False,
+        evidence_kinds=evidence_kinds,
+    )
+
+    capability_candidate = _select_profile_capability_fact(
+        sections, evidence_kinds
+    )
+    assert capability_candidate is eligible
+    substantive_after_capability_move = [
+        fact
+        for heading, rows in sections.items()
+        if heading not in {"Professional Summary", "Core Capabilities"}
+        for fact in rows
+        if fact.sentence_id != capability_candidate.sentence_id
+    ]
+    assert substantive_after_capability_move == [spare]
+    assert sections["Skills"] == [eligible, spare]
+
+
+def test_generic_fallback_refuses_duplicate_selected_sentence_identity() -> None:
+    first = _summary_fact("same-sentence", "evidence-1", "First spelling.")
+    duplicate = _summary_fact("same-sentence", "evidence-2", "Different spelling.")
+    sections = {"Projects": [first], "Experience": [duplicate]}
+
+    with pytest.raises(ValueError, match="summary fact identity is ambiguous"):
+        _populate_fallback_profile_summary(
+            sections,
+            heading_order=_SUMMARY_HEADING_ORDER,
+            legacy_profile=False,
+        )
+
+
+def require_private_candidate_fixture() -> None:
+    if not AUTHORITY_PATH.is_file() or not DISCOVERY_PATH.is_file():
+        pytest.skip(PRIVATE_FIXTURE_REASON)
+
 
 def _inputs() -> dict[str, object]:
+    require_private_candidate_fixture()
     authority = json.loads(AUTHORITY_PATH.read_bytes())
     discovery = json.loads(DISCOVERY_PATH.read_bytes())
     decision = next(
@@ -278,6 +542,226 @@ def test_integrated_market_decision_rejects_receipt_and_snapshot_substitution(
         replace(authority, candidate_authority_file_sha256="c" * 64)
 
 
+def test_current_market_authority_loads_evidence_from_pinned_projection(
+    tmp_path: Path,
+) -> None:
+    source_job_key = "greenhouse:synthetic:current"
+    evidence_bytes = b'{"statements":[]}\n'
+    evidence_path = tmp_path / "current-approved-evidence.json"
+    evidence_path.write_bytes(b'{"statements":[{"id":"legacy"}]}\n')
+    evidence_sha256 = hashlib.sha256(evidence_bytes).hexdigest()
+    projection_body = {
+        "approved_evidence": [],
+        "source_hashes": {"approved_evidence": evidence_sha256},
+    }
+    projection = {
+        **projection_body,
+        "projection_sha256": hashlib.sha256(
+            (canonical_json(projection_body) + "\n").encode()
+        ).hexdigest(),
+    }
+    empty_ledger_sha256 = hashlib.sha256(b"").hexdigest()
+    candidate_authority_bytes = (
+        canonical_json(
+            {
+                "candidate_projection": projection,
+                "profile_binding": {
+                    "evidence_ledger_sha256": canonical_hash([]),
+                },
+            }
+        )
+        + "\n"
+    ).encode()
+    candidate_authority_sha256 = hashlib.sha256(candidate_authority_bytes).hexdigest()
+    receipts = (
+        {
+            "decision": "pass",
+            "job_key": source_job_key,
+            "receipt_sha256": "5" * 64,
+            "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+        },
+        {
+            "checks": [],
+            "decision": "eligible",
+            "hard_gate_passed": True,
+            "promotion_receipt_sha256": "5" * 64,
+            "source_job_key": source_job_key,
+        },
+        {
+            "decision": "selected_for_application",
+            "hard_gate_passed": True,
+            "promotion_receipt_sha256": "5" * 64,
+            "source_job_key": source_job_key,
+        },
+    )
+    receipt_bytes = tuple(canonical_json(value).encode() for value in receipts)
+    listing_bytes = b"listing"
+    listing_sha256 = hashlib.sha256(listing_bytes).hexdigest()
+    binding = build_candidate_application_deployment_binding(
+        application_id="app_" + "1" * 64,
+        environment="current_runtime",
+        handoff_root_sha256="2" * 64,
+        admission_receipt_sha256="3" * 64,
+        current_boundary_receipt_sha256="4" * 64,
+        candidate_authority_file_sha256=candidate_authority_sha256,
+    )
+    assert binding.schema_version == (
+        "jaa.candidate-application-deployment-binding.current-runtime.v1"
+    )
+    with pytest.raises(ValueError, match="scope"):
+        replace(
+            binding,
+            schema_version="jaa.candidate-application-deployment-binding.v1",
+        )
+
+    with pytest.raises(ValueError, match="candidate evidence authority differs"):
+        build_market_application_decision_authority(
+            deployment_binding=binding,
+            source_job_key=source_job_key,
+            internal_job_key="job_" + "6" * 64,
+            vacancy_snapshot_sha256="7" * 64,
+            raw_listing_sha256=listing_sha256,
+            raw_listing_bytes=listing_bytes,
+            requirements_sha256=hashlib.sha256(b"{}").hexdigest(),
+            requirements_bytes=b"{}",
+            assessment_receipt_sha256=hashlib.sha256(receipt_bytes[0]).hexdigest(),
+            assessment_receipt_bytes=receipt_bytes[0],
+            eligibility_receipt_sha256=hashlib.sha256(receipt_bytes[1]).hexdigest(),
+            eligibility_receipt_bytes=receipt_bytes[1],
+            selection_receipt_sha256=hashlib.sha256(receipt_bytes[2]).hexdigest(),
+            selection_receipt_bytes=receipt_bytes[2],
+            candidate_projection=projection,
+            candidate_authority_bytes=candidate_authority_bytes,
+            evidence_ledger_sha256=empty_ledger_sha256,
+            evidence_ledger_bytes=b"",
+            source_url="https://example.invalid/job",
+            role_title="Synthetic role",
+            company_name="Synthetic company",
+            observed_at="2026-10-06T00:00:00+00:00",
+            approved_evidence_path=evidence_path,
+            approved_evidence_bytes=evidence_bytes,
+        )
+    with pytest.raises(ValueError, match="candidate evidence binding differs"):
+        _approved_statements(evidence_path)
+
+
+def _current_packet_fixture() -> tuple[list[str], list[dict[str, object]], list[dict[str, object]]]:
+    packet_rows = [
+        {
+            "id": "synthetic-evidence-a",
+            "kind": "work_artifact",
+            "proof_class": "work_artifact",
+            "statement": "Synthetic bounded implementation claim.",
+            "document_targets": ["cv"],
+        },
+        {
+            "id": "synthetic-evidence-b",
+            "kind": "verified_claim",
+            "proof_class": "verified_claim",
+            "statement": "Synthetic verified test claim.",
+            "document_targets": ["cover_letter", "cv"],
+        },
+    ]
+    projection_rows = [
+        {
+            "id": row["id"],
+            "kind": row["kind"],
+            "proof_class": row["proof_class"],
+            "statement_sha256": hashlib.sha256(
+                row["statement"].encode("utf-8")
+            ).hexdigest(),
+        }
+        for row in reversed(packet_rows)
+    ]
+    return (
+        ["synthetic-evidence-a", "synthetic-evidence-b", "unselected-ledger-row"],
+        projection_rows,
+        packet_rows,
+    )
+
+
+def test_current_packet_matcher_binds_selected_rows_and_preserves_projection_order() -> None:
+    ledger_ids, projection_rows, packet_rows = _current_packet_fixture()
+
+    selected = match_selected_packet(ledger_ids, projection_rows, packet_rows)
+
+    assert type(selected) is tuple
+    assert [row["id"] for row in selected] == [
+        "synthetic-evidence-b",
+        "synthetic-evidence-a",
+    ]
+    selected[0]["document_targets"].append("cv")
+    selected[0]["statement"] = "changed synthetic text"
+    assert packet_rows[1]["document_targets"] == ["cover_letter", "cv"]
+    assert packet_rows[1]["statement"] == "Synthetic verified test claim."
+
+
+def test_current_packet_matcher_rejects_unbound_or_malformed_rows() -> None:
+    class DerivedString(str):
+        pass
+
+    ledger_ids, projection_rows, packet_rows = _current_packet_fixture()
+    cases: list[tuple[list[str], list[dict[str, object]], list[dict[str, object]]]] = []
+
+    duplicate_ledger, duplicate_projection, duplicate_packet = _current_packet_fixture()
+    cases.append((duplicate_ledger + [duplicate_ledger[0]], duplicate_projection, duplicate_packet))
+
+    missing_provenance = _current_packet_fixture()
+    cases.append((missing_provenance[0][:1], missing_provenance[1], missing_provenance[2]))
+
+    invalid_digest = _current_packet_fixture()
+    invalid_digest[1][0]["statement_sha256"] = "A" * 64
+    cases.append(invalid_digest)
+
+    changed_statement = _current_packet_fixture()
+    changed_statement[2][0]["statement"] = "Different synthetic text."
+    cases.append(changed_statement)
+
+    mismatched_kind = _current_packet_fixture()
+    mismatched_kind[2][1]["kind"] = "different_kind"
+    cases.append(mismatched_kind)
+
+    duplicate_target = _current_packet_fixture()
+    duplicate_target[2][1]["document_targets"] = ["cv", "cv"]
+    cases.append(duplicate_target)
+
+    non_plain_target = _current_packet_fixture()
+    non_plain_target[2][0]["document_targets"] = [DerivedString("cv")]
+    cases.append(non_plain_target)
+
+    extra_packet_field = _current_packet_fixture()
+    extra_packet_field[2][0]["confidence"] = 1.0
+    cases.append(extra_packet_field)
+
+    for case in cases:
+        with pytest.raises(ValueError, match="current candidate evidence packet"):
+            match_selected_packet(*case)
+
+
+@pytest.mark.parametrize(
+    ("rank", "current_runtime_bound", "expected"),
+    (
+        pytest.param(None, True, True, id="current-runtime-unknown"),
+        pytest.param(None, False, False, id="legacy-unknown-refused"),
+        pytest.param(1, False, True, id="legacy-known"),
+        pytest.param(5, True, True, id="current-runtime-known"),
+        pytest.param(True, True, False, id="boolean-refused"),
+        pytest.param(1.0, True, False, id="float-refused"),
+        pytest.param(6, True, False, id="out-of-range-refused"),
+    ),
+)
+def test_materialization_geography_rank_requires_bound_current_mode(
+    rank: object, current_runtime_bound: bool, expected: bool
+) -> None:
+    assert (
+        market_aligner_preparation._valid_materialization_geography_rank(
+            rank,
+            current_runtime_bound=current_runtime_bound,
+        )
+        is expected
+    )
+
+
 def test_builds_plain_vacancy_bound_documents_from_approved_atoms() -> None:
     package = build_candidate_application_package(**_inputs())
     assert package.source.vacancy_sha256 == _inputs()["vacancy_sha256"]
@@ -336,14 +820,41 @@ def test_builds_plain_vacancy_bound_documents_from_approved_atoms() -> None:
         for section in package.source.letter_sections
         if section.heading == "Opening"
     )
-    assert len(opening.sentence_ids) == 1
-    opening_fact = next(
+    opening_facts = [
         fact
-        for fact in employer_facts
-        if fact.sentence_id == opening.sentence_ids[0]
+        for fact in package.source.facts
+        if fact.sentence_id in opening.sentence_ids
+    ]
+    opening_candidate = next(fact for fact in opening_facts if fact.fact_kind == "candidate")
+    opening_employer = next(fact for fact in opening_facts if fact.fact_kind == "employer")
+    assert isinstance(opening_candidate.authority, FactAuthority)
+    assert isinstance(opening_employer.authority, FactAuthority)
+    assert (
+        opening_candidate.authority.requirement_id,
+        opening_candidate.authority.candidate_claim_id,
+        opening_candidate.authority.candidate_claim_version,
+        opening_candidate.authority.candidate_evidence_id,
+        opening_candidate.authority.candidate_evidence_version,
+        opening_candidate.authority.employer_research_claim_id,
+        opening_candidate.authority.employer_fact_sha256,
+    ) == (
+        opening_employer.authority.requirement_id,
+        opening_employer.authority.candidate_claim_id,
+        opening_employer.authority.candidate_claim_version,
+        opening_employer.authority.candidate_evidence_id,
+        opening_employer.authority.candidate_evidence_version,
+        opening_employer.authority.employer_research_claim_id,
+        opening_employer.authority.employer_fact_sha256,
     )
-    assert package.source.role_title in opening_fact.text
-    assert package.source.company_name in opening_fact.text
+    assert len(" ".join(package.artifacts.editable.cover_letter_text.split()).split()) >= 90
+    assert "The " + package.source.role_title + " position is at " + package.source.company_name + "." not in package.artifacts.editable.cover_letter_text
+    assert "I am applying for this position" not in package.artifacts.editable.cover_letter_text
+    assert (
+        package.artifacts.editable.cover_letter_text.count(
+            "I would welcome the opportunity"
+        )
+        == 1
+    )
     assert any(
         phrase in package.artifacts.editable.cover_letter_text
         for phrase in (
@@ -418,10 +929,1590 @@ def test_stable_profile_facts_are_bound_to_exact_candidate_projection() -> None:
 
 
 def test_rejects_candidate_evidence_byte_substitution(tmp_path: Path) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path)
+    approved_evidence_path = Path(arguments["approved_evidence_path"])
     changed = tmp_path / "changed-evidence.json"
-    changed.write_bytes(APPROVED_EVIDENCE_PATH.read_bytes() + b" ")
-    with pytest.raises(ValueError, match="evidence hash differs"):
-        build_candidate_application_package(**_inputs(), approved_evidence_path=changed)
+    changed.write_bytes(approved_evidence_path.read_bytes() + b" ")
+    arguments["approved_evidence_path"] = changed
+    with pytest.raises(ValueError, match="candidate evidence binding differs"):
+        build_candidate_application_package(**arguments)
+
+
+def _synthetic_evidence_binding(tmp_path: Path) -> tuple[Path, dict[str, object]]:
+    statement = {
+        "id": "SYNTHETIC-EVIDENCE-1",
+        "kind": "verified_claim",
+        "proof_class": "verified_claim",
+        "statement": "Synthetic demonstration evidence.",
+    }
+    evidence = {"schema_version": "synthetic-evidence-test.v1", "statements": [statement]}
+    evidence_bytes = (canonical_json(evidence) + "\n").encode("utf-8")
+    path = tmp_path / "synthetic-approved-evidence.json"
+    path.write_bytes(evidence_bytes)
+    digest = hashlib.sha256(evidence_bytes).hexdigest()
+    projection: dict[str, object] = {
+        "schema_version": "jaa.candidate-authority-projection.v1",
+        "source_hashes": {"approved_evidence": digest},
+        "schema_sha256": hashlib.sha256(b"synthetic-schema").hexdigest(),
+        "policy_sha256": hashlib.sha256(b"synthetic-policy").hexdigest(),
+        "availability": {"status": "synthetic"},
+        "approved_evidence": [
+            {
+                "id": statement["id"],
+                "statement_sha256": hashlib.sha256(
+                    statement["statement"].encode("utf-8")
+                ).hexdigest(),
+                "kind": statement["kind"],
+                "proof_class": statement["proof_class"],
+            }
+        ],
+        "claim_suppressors": {
+            "source_sha256": hashlib.sha256(b"synthetic-suppressors").hexdigest(),
+            "mode": "suppress_only",
+            "items": [],
+        },
+    }
+    projection["projection_sha256"] = hashlib.sha256(
+        (canonical_json(projection) + "\n").encode("utf-8")
+    ).hexdigest()
+    return path, projection
+
+
+def _synthetic_composition_inputs(
+    tmp_path: Path,
+    *,
+    employment_index: int | None = None,
+    additional_kind: str | None = None,
+    matched_requirements: int = 2,
+    duplicate_last_statement: bool = False,
+    first_person_index: int | None = None,
+) -> dict[str, object]:
+    statements = [
+        "Built a service dashboard that organised support requests by priority and showed unresolved work to operators.",
+        "Implemented integration testing for incoming records, catching invalid dates early and reducing repeated manual corrections during review.",
+        "Designed a searchable project catalogue with consistent metadata, making related examples easier to find and compare.",
+        "Created a batch processing workflow that grouped large data sets and produced a concise, reproducible completion summary.",
+        "Added accessible status indicators to a reporting page so users could distinguish queued, active, and completed tasks.",
+        "Refined a deployment checklist with verified prerequisites, clear rollback steps, and a repeatable validation sequence.",
+        "Developed a lightweight API adapter that normalised responses and preserved useful error details for downstream callers.",
+        "Measured import performance before and after indexing, recording test conditions and explaining the observed improvement.",
+    ]
+    if duplicate_last_statement:
+        statements[-1] = statements[0]
+    if first_person_index is not None:
+        statement = statements[first_person_index]
+        statements[first_person_index] = f"I {statement[0].lower()}{statement[1:]}"
+    evidence_rows: list[dict[str, str]] = []
+    for index, text in enumerate(statements):
+        kind = "portfolio_artifact"
+        if index == employment_index:
+            kind = "employment_record"
+            text = (
+                "Worked as a software engineer maintaining an internal records service, "
+                "coordinating releases, and documenting dependable support practices."
+            )
+        elif index == 7 and additional_kind is not None:
+            kind = additional_kind
+            text = {
+                "verified_claim": (
+                    "Maintained a consistent release process with documented "
+                    "acceptance checks and clear rollback decisions."
+                ),
+                "work_artifact": (
+                    "Created a reusable project checklist with verified "
+                    "prerequisites and clear completion steps."
+                ),
+                "test_result": (
+                    "Recorded repeatable test results across representative "
+                    "data batches and summarised the failures for review."
+                ),
+                "external_outcome": (
+                    "Delivered a service update that reduced duplicate requests "
+                    "and improved turnaround for partner teams."
+                ),
+                "credential": (
+                    "Completed a course in software design, automated testing, "
+                    "and data handling, with a practical assessment."
+                ),
+            }[additional_kind]
+        evidence_rows.append(
+            {
+                "id": f"SYNTHETIC-PORTFOLIO-{index + 1:02d}",
+                "kind": kind,
+                "proof_class": kind,
+                "statement": text,
+            }
+        )
+    evidence_document = {
+        "schema_version": "synthetic-evidence-test.v1",
+        "statements": evidence_rows,
+    }
+    evidence_bytes = (canonical_json(evidence_document) + "\n").encode("utf-8")
+    evidence_path = tmp_path / "synthetic-composition-evidence.json"
+    evidence_path.write_bytes(evidence_bytes)
+    statement_projection = [
+        {
+            "id": row["id"],
+            "statement_sha256": hashlib.sha256(
+                row["statement"].encode("utf-8")
+            ).hexdigest(),
+            "kind": row["kind"],
+            "proof_class": row["proof_class"],
+        }
+        for row in evidence_rows
+    ]
+    candidate_projection: dict[str, object] = {
+        "schema_version": "jaa.candidate-authority-projection.v1",
+        "source_hashes": {
+            "approved_evidence": hashlib.sha256(evidence_bytes).hexdigest(),
+        },
+        "schema_sha256": hashlib.sha256(b"synthetic-schema").hexdigest(),
+        "policy_sha256": hashlib.sha256(b"synthetic-policy").hexdigest(),
+        "availability": {"status": "synthetic"},
+        "approved_evidence": statement_projection,
+        "claim_suppressors": {
+            "source_sha256": hashlib.sha256(b"synthetic-suppressors").hexdigest(),
+            "mode": "suppress_only",
+            "items": [],
+        },
+    }
+    candidate_projection["projection_sha256"] = hashlib.sha256(
+        (canonical_json(candidate_projection) + "\n").encode("utf-8")
+    ).hexdigest()
+    vacancy_description = b"Synthetic platform-engineering vacancy description."
+    vacancy_description_sha256 = hashlib.sha256(vacancy_description).hexdigest()
+    vacancy_sha256 = hashlib.sha256(b"synthetic vacancy payload").hexdigest()
+    source_url = "https://boards.greenhouse.io/example/jobs/synthetic-001"
+    job_key = "synthetic-job-001"
+    requirements = (
+        "Build reliable services for operational workflows.",
+        "Maintain clear validation and reporting processes.",
+    )
+    evidence_matrix = [
+        {
+            "requirement_id": f"SYNTHETIC-REQUIREMENT-{index + 1:02d}",
+            "requirement_text": text,
+            "requirement_text_sha256": hashlib.sha256(
+                text.encode("utf-8")
+            ).hexdigest(),
+            "status": "matched" if index < matched_requirements else "no_match",
+            "evidence_ids": [evidence_rows[index]["id"]]
+            if index < matched_requirements
+            else [],
+            "classification": "essential",
+        }
+        for index, text in enumerate(requirements)
+    ]
+    decision_receipt = {
+        "decision": "eligible",
+        "job_key": job_key,
+        "role_title": "Platform Engineer",
+        "company_name": "Example Systems",
+        "vacancy_sha256": vacancy_sha256,
+        "vacancy_description_sha256": vacancy_description_sha256,
+        "source_url": source_url,
+        "observed_at": "2026-10-01T07:45:00+00:00",
+        "candidate_projection_sha256": candidate_projection["projection_sha256"],
+        "evidence_matrix": evidence_matrix,
+    }
+    return {
+        "decision_receipt": decision_receipt,
+        "candidate_projection": candidate_projection,
+        "job_key": job_key,
+        "vacancy_sha256": vacancy_sha256,
+        "source_url": source_url,
+        "role_title": "Platform Engineer",
+        "company_name": "Example Systems",
+        "contact": CandidateContact(
+            full_name="Synthetic Candidate",
+            email="candidate@example.test",
+            phone="+44 7700 900123",
+            city="London",
+            record_id="synthetic-contact",
+            record_version=1,
+            provenance_sha256="a" * 64,
+        ),
+        "approved_evidence_path": evidence_path,
+    }
+
+
+def _update_synthetic_document_targets(
+    arguments: dict[str, object],
+    targets_by_id: dict[str, list[str]],
+    additional_rows: tuple[dict[str, object], ...] = (),
+) -> None:
+    evidence_path = arguments["approved_evidence_path"]
+    evidence_document = json.loads(evidence_path.read_bytes())
+    for row in evidence_document["statements"]:
+        if row["id"] in targets_by_id:
+            row["document_targets"] = targets_by_id[row["id"]]
+    projection_rows = []
+    for row in additional_rows:
+        evidence_row = {
+            "id": row["id"],
+            "kind": "portfolio_artifact",
+            "proof_class": "portfolio_artifact",
+            "statement": row["statement"],
+            "document_targets": row["document_targets"],
+        }
+        evidence_document["statements"].append(evidence_row)
+        projection_rows.append(
+            {
+                "id": evidence_row["id"],
+                "statement_sha256": hashlib.sha256(
+                    evidence_row["statement"].encode("utf-8")
+                ).hexdigest(),
+                "kind": evidence_row["kind"],
+                "proof_class": evidence_row["proof_class"],
+            }
+        )
+    evidence_bytes = (canonical_json(evidence_document) + "\n").encode("utf-8")
+    evidence_path.write_bytes(evidence_bytes)
+    projection = json.loads(json.dumps(arguments["candidate_projection"]))
+    projection["source_hashes"]["approved_evidence"] = hashlib.sha256(
+        evidence_bytes
+    ).hexdigest()
+    projection["approved_evidence"].extend(projection_rows)
+    projection.pop("projection_sha256")
+    projection["projection_sha256"] = hashlib.sha256(
+        (canonical_json(projection) + "\n").encode("utf-8")
+    ).hexdigest()
+    decision = dict(arguments["decision_receipt"])
+    decision["candidate_projection_sha256"] = projection["projection_sha256"]
+    arguments["candidate_projection"] = projection
+    arguments["decision_receipt"] = decision
+
+
+@pytest.mark.parametrize(
+    ("employment_index", "expected_headings"),
+    (
+        (None, ("Professional Summary", "Core Capabilities", "Projects")),
+        (7, ("Professional Summary", "Core Capabilities", "Projects")),
+    ),
+)
+def test_generation_composes_verified_nonlegacy_profile_by_evidence_kind(
+    tmp_path: Path,
+    employment_index: int | None,
+    expected_headings: tuple[str, ...],
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        employment_index=employment_index,
+    )
+
+    built = _build_candidate_application_source(**arguments)
+    source = built.source
+    cv_rows = [
+        row
+        for section in source.cv_sections
+        for sentence_id in section.sentence_ids
+        for row in source.facts
+        if row.sentence_id == sentence_id
+    ]
+
+    assert tuple(section.heading for section in source.cv_sections) == expected_headings
+    if employment_index is not None:
+        summary = next(
+            section
+            for section in source.cv_sections
+            if section.heading == "Professional Summary"
+        )
+        assert any(
+            row.authority.candidate_evidence_id == "SYNTHETIC-PORTFOLIO-08"
+            and row.sentence_id in summary.sentence_ids
+            for row in cv_rows
+        )
+    assert len(cv_rows) == 8
+    assert len(" ".join(row.text for row in cv_rows).split()) >= 110
+    assert len({row.authority.candidate_evidence_id for row in cv_rows}) == 8
+    assert all("SYNTHETIC-PORTFOLIO-" not in row.text for row in cv_rows)
+    profile_bound = [
+        row
+        for row in cv_rows
+        if hasattr(row.authority, "candidate_profile_hash")
+    ]
+    assert profile_bound
+    assert all(
+        row.authority.candidate_profile_hash
+        == arguments["candidate_projection"]["projection_sha256"]
+        for row in profile_bound
+    )
+
+
+def test_current_pre_editorial_source_receipt_is_distinct_from_legacy_policy(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path)
+    built = _build_candidate_application_source(**arguments)
+    editable = render_editable_text(built.source)
+
+    current_receipt = _source_policy_receipt(
+        built.source,
+        editable,
+        current_runtime=True,
+    )
+
+    assert current_receipt.document()["schema_version"] == (
+        "pre-editorial-source-envelope.v1"
+    )
+    assert current_receipt.document()["validation_scope"] == "source_integrity_only"
+    assert current_receipt.document()["release_authority"] is False
+    assert current_receipt.document()["final_style_validated"] is False
+    with pytest.raises(ValueError, match="pre-editorial source envelope"):
+        replace(current_receipt, release_authority=True)
+
+
+def test_current_match_policy_uses_authenticated_matrix_for_both_outcomes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, matched_requirements=1)
+    projection = dict(arguments["candidate_projection"])
+    projection.pop("policy_sha256")
+    projection.pop("projection_sha256")
+    projection["projection_sha256"] = hashlib.sha256(
+        (canonical_json(projection) + "\n").encode("utf-8")
+    ).hexdigest()
+    arguments["candidate_projection"] = projection
+    decision = dict(arguments["decision_receipt"])
+    decision["candidate_projection_sha256"] = projection["projection_sha256"]
+    arguments["decision_receipt"] = decision
+    observed = []
+    original_match_result = candidate_factory_module.MatchResult
+
+    def capture_match_result(*args: object, **kwargs: object):
+        result = original_match_result(*args, **kwargs)
+        observed.append((result.decision, result.policy_sha256))
+        return result
+
+    monkeypatch.setattr(candidate_factory_module, "MatchResult", capture_match_result)
+    matrix_policy_sha256 = "b" * 64
+    arguments["approved_evidence_bytes"] = Path(
+        arguments["approved_evidence_path"]
+    ).read_bytes()
+    built = _build_candidate_application_source(
+        **arguments,
+        current_runtime=True,
+        current_matrix_policy_sha256=matrix_policy_sha256,
+    )
+
+    assert {decision for decision, _policy in observed} == {"matched", "no_match"}
+    assert all(policy == matrix_policy_sha256 for _decision, policy in observed)
+    assert built.source
+
+
+def test_current_outward_prefilter_preserves_supported_evidence_terms() -> None:
+    text = "Evidence of practical project work supports this claim."
+
+    assert not candidate_factory_module._candidate_statement_is_outward_safe(text)
+    assert candidate_factory_module._candidate_statement_is_outward_safe(
+        text,
+        current_runtime=True,
+    )
+    assert not candidate_factory_module._candidate_statement_is_outward_safe(
+        " " + text,
+        current_runtime=True,
+    )
+    assert not candidate_factory_module._candidate_statement_is_outward_safe(
+        text,
+        current_runtime=1,
+    )
+
+
+def test_current_runtime_outward_rewrite_preserves_calibration_limit() -> None:
+    source = (
+        "The programme documents retrospectives, risk registers, prediction plans, "
+        "calibration plans, and discard-rate tracking. This is disciplined "
+        "evaluation, while hiring outcome calibration has not yet occurred."
+    )
+    expected = (
+        "The programme documents retrospectives, risk registers, prediction plans, "
+        "calibration plans, and discard-rate tracking. This is disciplined "
+        "evaluation, while hiring outcome calibration has yet to occur."
+    )
+    evidence_id = "SYNTHETIC-EVALUATION-PROGRAMME"
+    profile_hash = "a" * 64
+    source_bytes = canonical_json(
+        {"statements": [{"id": evidence_id, "statement": source}]}
+    ).encode()
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    source_context = application_compiler_module.ApprovedEvidenceSourceContext(
+        source_bytes=source_bytes,
+        source_sha256=source_hash,
+        candidate_profile_hash=profile_hash,
+    )
+    evidence = {
+        "id": evidence_id,
+        "kind": "work_artifact",
+        "proof_class": "work_artifact",
+        "statement": source,
+    }
+
+    fact = candidate_factory_module._profile_sentence(
+        evidence=evidence,
+        candidate_profile_hash=profile_hash,
+        statement_sha256=hashlib.sha256(source.encode()).hexdigest(),
+        document_kind="cv",
+        approved_evidence_source=source_context,
+        current_runtime=True,
+    )
+
+    assert fact.text == expected
+    assert fact.approved_source_text == source
+    rewrite = fact.authority.rewrite_authority
+    assert rewrite is not None
+    assert rewrite.rewrite_policy_sha256 == (
+        application_compiler_module.CURRENT_RUNTIME_OUTWARD_REWRITE_POLICY_SHA256
+    )
+    application_compiler_module.verify_authenticated_outward_rewrite(
+        rewrite,
+        candidate_evidence_id=evidence_id,
+        candidate_evidence_version=1,
+        approved_source_text=source,
+        outward_text=expected,
+        document_kind="cv",
+        approved_evidence_source=source_context,
+        candidate_profile_hash=profile_hash,
+    )
+    for document_kind in ("cv", "cover_letter"):
+        candidate_factory_module.assert_employer_facing_text(
+            expected,
+            document_kind=document_kind,
+        )
+        application_compiler_module.assert_employer_facing_framing(
+            expected,
+            "synthetic candidate sentence",
+        )
+
+    assert application_compiler_module.approved_candidate_outward_text(
+        evidence_id,
+        source,
+        document_kind="cv",
+    ) == source
+    with pytest.raises(ValueError, match="not yet proven"):
+        application_compiler_module.assert_employer_facing_framing(
+            source,
+            "legacy candidate sentence",
+        )
+
+    unmatched = source.replace(
+        "has not yet occurred",
+        "has not been completed",
+    )
+    assert application_compiler_module.approved_candidate_outward_text(
+        evidence_id,
+        unmatched,
+        document_kind="cv",
+        current_runtime=True,
+    ) == unmatched
+    with pytest.raises(ValueError, match="candidate's own work"):
+        application_compiler_module.assert_employer_facing_framing(
+            unmatched,
+            "unmatched current sentence",
+        )
+
+
+def test_current_temporal_phrase_rewrite_preserves_scope_and_case() -> None:
+    rewrite = application_compiler_module.neutral_current_temporal_text
+    phrases = (
+        ("has not yet occurred", "has yet to occur"),
+        ("have not yet occurred", "have yet to occur"),
+        ("had not yet occurred", "had yet to occur"),
+        ("HAS NOT YET OCCURRED", "HAS YET TO OCCUR"),
+        ("Has not yet occurred", "Has yet to occur"),
+        ("hAS NOT YET OCCURRED", "hAS yet to occur"),
+    )
+
+    for source, expected in phrases:
+        assert rewrite(source, current_runtime=True) == expected
+        assert rewrite(source) is source
+
+    surrounded = "Evidence (has not yet occurred), with context unchanged."
+    assert rewrite(surrounded, current_runtime=True) == (
+        "Evidence (has yet to occur), with context unchanged."
+    )
+    assert rewrite("has not occurred", current_runtime=True) == "has not occurred"
+    assert rewrite("has not yet completed", current_runtime=True) == (
+        "has not yet completed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("projection", "current_runtime", "matrix_digest"),
+    (
+        ({}, False, None),
+        ({"policy_sha256": "a" * 64}, False, "b" * 64),
+        ({}, True, None),
+        ({}, 1, "b" * 64),
+        ({1: "x"}, False, None),
+        ({"policy_sha256": "A" * 64}, False, None),
+    ),
+)
+def test_match_policy_selector_rejects_invalid_or_cross_mode_bindings(
+    projection: object,
+    current_runtime: object,
+    matrix_digest: object,
+) -> None:
+    with pytest.raises(ValueError, match="^match_policy_binding_invalid$"):
+        resolve_match_policy(
+            projection,
+            current_runtime=current_runtime,
+            current_matrix_policy_sha256=matrix_digest,
+        )
+
+
+def test_rendered_summary_uses_bound_profile_facts_without_filler(
+    tmp_path: Path,
+) -> None:
+    package = build_candidate_application_package(
+        **_synthetic_composition_inputs(tmp_path)
+    )
+    source = package.source
+    summary = next(
+        section
+        for section in source.cv_sections
+        if section.heading == "Professional Summary"
+    )
+    summary_facts = [
+        fact for fact in source.facts if fact.sentence_id in summary.sentence_ids
+    ]
+
+    assert len(summary.sentence_ids) == 2
+    assert summary.style_slot_ids == ()
+    assert len(summary_facts) == 2
+    assert all(fact.text == fact.approved_source_text for fact in summary_facts)
+    assert all(
+        fact.authority.candidate_evidence_id.startswith("SYNTHETIC-PORTFOLIO-")
+        for fact in summary_facts
+    )
+    for rendered in (
+        package.artifacts.editable.cv_text,
+        package.artifacts.cv_pdf.extracted_text,
+    ):
+        flattened = " ".join(rendered.split())
+        assert "As a candidate for this role" not in flattened
+        for summary_fact in summary_facts:
+            assert flattened.count(summary_fact.text) == 1
+        assert "Software Engineer" not in flattened
+
+    evidence_document = json.loads(
+        (tmp_path / "synthetic-composition-evidence.json").read_text()
+    )
+    evidence_kinds = {
+        row["id"]: row["proof_class"]
+        for row in evidence_document["statements"]
+    }
+    projects = next(section for section in source.cv_sections if section.heading == "Projects")
+    single_summary_sections = tuple(
+        replace(section, sentence_ids=(summary.sentence_ids[0],))
+        if section.heading == "Professional Summary"
+        else replace(
+            section,
+            sentence_ids=(summary.sentence_ids[1], *section.sentence_ids),
+        )
+        if section.heading == "Projects"
+        else section
+        for section in source.cv_sections
+    )
+    _assert_package_quality(
+        replace(source, cv_sections=single_summary_sections),
+        evidence_kinds=evidence_kinds,
+        legacy_profile=False,
+    )
+
+    three_summary_sections = tuple(
+        replace(
+            section,
+            sentence_ids=(*summary.sentence_ids, projects.sentence_ids[0]),
+        )
+        if section.heading == "Professional Summary"
+        else replace(section, sentence_ids=section.sentence_ids[1:])
+        if section.heading == "Projects"
+        else section
+        for section in source.cv_sections
+    )
+    with pytest.raises(ValueError, match="sections differ from bound evidence kinds"):
+        _assert_package_quality(
+            replace(source, cv_sections=three_summary_sections),
+            evidence_kinds=evidence_kinds,
+            legacy_profile=False,
+        )
+
+
+def test_generic_package_relocates_verified_capability_fact_verbatim(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path)
+    evidence_document = json.loads(
+        (tmp_path / "synthetic-composition-evidence.json").read_text()
+    )
+    package = build_candidate_application_package(**arguments)
+    source = package.source
+    capability_section = next(
+        section
+        for section in source.cv_sections
+        if section.heading == "Core Capabilities"
+    )
+    assert len(capability_section.sentence_ids) == 1
+    capability_fact = next(
+        row
+        for row in source.facts
+        if row.sentence_id == capability_section.sentence_ids[0]
+    )
+    evidence = next(
+        row
+        for row in evidence_document["statements"]
+        if row["id"] == capability_fact.authority.candidate_evidence_id
+    )
+    assert capability_line_eligible(evidence["statement"])
+    assert capability_fact.text == evidence["statement"]
+    assert capability_fact.approved_source_text == evidence["statement"]
+    cv_sentence_ids = [
+        sentence_id
+        for section in source.cv_sections
+        for sentence_id in section.sentence_ids
+    ]
+    assert len(cv_sentence_ids) == 8
+    assert len(set(cv_sentence_ids)) == len(cv_sentence_ids)
+    assert len({
+        row.authority.candidate_evidence_id
+        for row in source.facts
+        if row.document_kind == "cv" and row.fact_kind == "candidate"
+    }) == 8
+
+    editable_cv = package.artifacts.editable.cv_text
+    extracted_cv = package.artifacts.cv_pdf.extracted_text
+    editable_headings = [line.strip() for line in editable_cv.splitlines()]
+    extracted_headings = [line.strip() for line in extracted_cv.splitlines()]
+    assert any(section.heading == "Core Capabilities" for section in source.cv_sections)
+    assert editable_headings.count("Skills") == 1
+    assert extracted_headings.count("Skills") == 1
+    assert "Core Capabilities" not in editable_headings
+    assert "Core Capabilities" not in extracted_headings
+    for fact in (row for row in source.facts if row.document_kind == "cv"):
+        normalized_fact = " ".join(fact.text.split())
+        assert " ".join(editable_cv.split()).count(normalized_fact) == 1
+        assert " ".join(extracted_cv.split()).count(normalized_fact) == 1
+    assert RENDERER_POLICY["schema_version"] == "jaa.ats-pdf-renderer-policy.v6"
+    assert (
+        RENDERER_POLICY["cv_section_projection"]
+        == "core-capabilities-and-skills-merge-as-skills-v1"
+    )
+    assert RENDERER_POLICY_SHA256 == content_hash(RENDERER_POLICY)
+
+
+@pytest.mark.parametrize(
+    ("input_sections", "expected_sections"),
+    (
+        (
+            (
+                SimpleNamespace(
+                    heading="Core Capabilities",
+                    sentence_ids=("core-1",),
+                    style_slot_ids=("core-slot",),
+                ),
+            ),
+            (("Skills", ("core-1",), ("core-slot",)),),
+        ),
+        (
+            (
+                SimpleNamespace(
+                    heading="Skills",
+                    sentence_ids=("skills-1",),
+                    style_slot_ids=("skills-slot",),
+                ),
+            ),
+            (("Skills", ("skills-1",), ("skills-slot",)),),
+        ),
+        (
+            (
+                SimpleNamespace(
+                    heading="Core Capabilities",
+                    sentence_ids=("core-1",),
+                    style_slot_ids=("core-slot",),
+                ),
+                SimpleNamespace(
+                    heading="Projects",
+                    sentence_ids=("project-1",),
+                    style_slot_ids=(),
+                ),
+                SimpleNamespace(
+                    heading="Skills",
+                    sentence_ids=("skills-1",),
+                    style_slot_ids=("skills-slot",),
+                ),
+            ),
+            (
+                ("Skills", ("core-1", "skills-1"), ("core-slot", "skills-slot")),
+                ("Projects", ("project-1",), ()),
+            ),
+        ),
+        (
+            (
+                SimpleNamespace(
+                    heading="Projects",
+                    sentence_ids=("project-1",),
+                    style_slot_ids=(),
+                ),
+            ),
+            (("Projects", ("project-1",), ()),),
+        ),
+    ),
+)
+def test_outward_cv_section_view_merges_capability_labels_without_losing_atoms(
+    input_sections: tuple[SimpleNamespace, ...],
+    expected_sections: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...],
+) -> None:
+    rendered = _outward_cv_sections(SimpleNamespace(cv_sections=input_sections))
+    assert tuple(
+        (section.heading, section.sentence_ids, section.style_slot_ids)
+        for section in rendered
+    ) == expected_sections
+
+
+def test_generic_first_person_rewrite_uses_verified_evidence_source_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, first_person_index=2)
+
+    def reject_global_authority_lookup(_evidence_id: str) -> tuple[str, str]:
+        raise AssertionError("generic rewrite attempted protected global lookup")
+
+    monkeypatch.setattr(
+        application_compiler_module,
+        "_protected_approved_statement",
+        reject_global_authority_lookup,
+    )
+    package = build_candidate_application_package(**arguments)
+    fact = next(
+        row
+        for row in package.source.facts
+        if row.authority.candidate_evidence_id == "SYNTHETIC-PORTFOLIO-03"
+    )
+    rewrite = fact.authority.rewrite_authority
+    projected = next(
+        row
+        for row in arguments["candidate_projection"]["approved_evidence"]
+        if row["id"] == "SYNTHETIC-PORTFOLIO-03"
+    )
+
+    assert fact.approved_source_text.startswith("I designed ")
+    assert fact.text == (
+        fact.approved_source_text[2].upper() + fact.approved_source_text[3:]
+    )
+    assert rewrite is not None
+    assert rewrite.approved_evidence_source_sha256 == arguments[
+        "candidate_projection"
+    ]["source_hashes"]["approved_evidence"]
+    assert rewrite.approved_source_text_sha256 == projected["statement_sha256"]
+    assert rewrite.outward_text_sha256 == hashlib.sha256(
+        fact.text.encode()
+    ).hexdigest()
+    verify_application_source(package.source)
+    restored_package = pickle.loads(pickle.dumps(package))
+    verify_application_source(restored_package.source)
+
+    source_context = rewrite.source_context
+    assert source_context is not None
+    replay_receipt = replace(rewrite, source_context=None)
+    application_compiler_module.verify_authenticated_outward_rewrite(
+        replay_receipt,
+        candidate_evidence_id=fact.authority.candidate_evidence_id,
+        candidate_evidence_version=fact.authority.candidate_evidence_version,
+        approved_source_text=fact.approved_source_text,
+        outward_text=fact.text,
+        document_kind=fact.document_kind,
+        approved_evidence_source=source_context,
+        candidate_profile_hash=fact.authority.candidate_profile_hash,
+    )
+    with pytest.raises(ValueError, match="context is missing"):
+        application_compiler_module.verify_authenticated_outward_rewrite(
+            replay_receipt,
+            candidate_evidence_id=fact.authority.candidate_evidence_id,
+            candidate_evidence_version=fact.authority.candidate_evidence_version,
+            approved_source_text=fact.approved_source_text,
+            outward_text=fact.text,
+            document_kind=fact.document_kind,
+            candidate_profile_hash=fact.authority.candidate_profile_hash,
+        )
+
+    damaged_context = object.__new__(type(source_context))
+    object.__setattr__(damaged_context, "source_bytes", b"tampered")
+    object.__setattr__(damaged_context, "source_sha256", source_context.source_sha256)
+    object.__setattr__(
+        damaged_context,
+        "candidate_profile_hash",
+        source_context.candidate_profile_hash,
+    )
+    with pytest.raises(ValueError, match="context hash differs"):
+        damaged_context.statement(fact.authority.candidate_evidence_id)
+
+    approved_statements = _approved_statements(
+        Path(arguments["approved_evidence_path"]),
+        expected_evidence_sha256=str(
+            arguments["candidate_projection"]["source_hashes"]["approved_evidence"]
+        ),
+    )
+    materialized_binding = _fact_binding(
+        fact,
+        approved_statements=approved_statements,
+    )
+    binding_json = canonical_json(materialized_binding)
+    binding_document = json.loads(binding_json)
+    assert (
+        binding_document["authority"]["rewrite_authority"]
+        == rewrite.document()
+    )
+    assert "source_bytes" not in binding_json
+
+
+def test_document_targets_omission_defaults_to_both_documents(tmp_path: Path) -> None:
+    path, _projection = _synthetic_evidence_binding(tmp_path)
+    evidence = hashlib.sha256(path.read_bytes()).hexdigest()
+    statements, _source_context = _load_approved_statements(
+        path,
+        expected_evidence_sha256=evidence,
+    )
+    assert _evidence_document_targets(statements["SYNTHETIC-EVIDENCE-1"]) == {
+        "cv",
+        "cover_letter",
+    }
+
+
+@pytest.mark.parametrize(
+    "targets",
+    (None, [], ["cv", "cv"], ["resume"], [1], [["cv"]], "cv"),
+)
+def test_document_targets_reject_malformed_metadata_at_load(
+    tmp_path: Path,
+    targets: object,
+) -> None:
+    path, _projection = _synthetic_evidence_binding(tmp_path)
+    evidence_document = json.loads(path.read_bytes())
+    evidence_document["statements"][0]["document_targets"] = targets
+    evidence_bytes = (canonical_json(evidence_document) + "\n").encode("utf-8")
+    path.write_bytes(evidence_bytes)
+    with pytest.raises(ValueError, match="document targets are malformed"):
+        _load_approved_statements(
+            path,
+            expected_evidence_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("document_kind", "contradictory_target"),
+    (("cv", ["cover_letter"]), ("cover_letter", ["cv"])),
+)
+def test_strategy_evidence_scope_conflicts_fail_closed(
+    tmp_path: Path,
+    document_kind: str,
+    contradictory_target: list[str],
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, matched_requirements=1)
+    baseline = _build_candidate_application_source(**arguments).source
+    fact = next(
+        row
+        for row in baseline.facts
+        if row.document_kind == document_kind
+        and isinstance(row.authority, FactAuthority)
+    )
+    evidence_id = fact.authority.candidate_evidence_id
+    _update_synthetic_document_targets(
+        arguments,
+        {evidence_id: contradictory_target},
+    )
+    with pytest.raises(
+        ValueError,
+        match="matched requirement lacks .*scoped candidate evidence",
+    ):
+        _build_candidate_application_source(**arguments)
+
+
+def test_letter_only_evidence_stays_out_of_cv_and_keeps_strategy_pairs(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, matched_requirements=1)
+    context_rows = (
+        {
+            "id": "SYNTHETIC-LETTER-CONTEXT-01",
+            "statement": (
+                "Designed a searchable delivery guide that connects verified "
+                "prerequisites with clear handoff steps for project teams."
+            ),
+            "document_targets": ["cover_letter"],
+        },
+        {
+            "id": "SYNTHETIC-LETTER-CONTEXT-02",
+            "statement": (
+                "Built a release checklist that records repeatable validation "
+                "steps and explains recovery choices for maintainers."
+            ),
+            "document_targets": ["cover_letter"],
+        },
+        {
+            "id": "SYNTHETIC-CV-CONTEXT-01",
+            "statement": (
+                "Created a service monitoring panel that groups status "
+                "signals and highlights unresolved operational work."
+            ),
+            "document_targets": ["cv"],
+        },
+    )
+    _update_synthetic_document_targets(arguments, {}, context_rows)
+    package = build_candidate_application_package(**arguments)
+    source = package.source
+    facts = {row.sentence_id: row for row in source.facts}
+    cv_ids = {
+        sentence_id
+        for section in source.cv_sections
+        for sentence_id in section.sentence_ids
+    }
+    letter_ids = {
+        sentence_id
+        for section in source.letter_sections
+        for sentence_id in section.sentence_ids
+    }
+    evidence_by_id = {
+        row["id"]: row
+        for row in json.loads(
+            arguments["approved_evidence_path"].read_bytes()
+        )["statements"]
+    }
+    letter_context = facts[
+        next(
+            sentence_id
+            for sentence_id in letter_ids
+            if facts[sentence_id].authority.candidate_evidence_id
+            == "SYNTHETIC-LETTER-CONTEXT-01"
+        )
+    ]
+    cv_context = facts[
+        next(
+            sentence_id
+            for sentence_id in cv_ids
+            if facts[sentence_id].authority.candidate_evidence_id
+            == "SYNTHETIC-CV-CONTEXT-01"
+        )
+    ]
+    letter_context_ids = {
+        row.authority.candidate_evidence_id
+        for row in source.facts
+        if row.document_kind == "cover_letter"
+    }
+    assert letter_context.authority.candidate_evidence_id not in {
+        row.authority.candidate_evidence_id
+        for row in source.facts
+        if row.sentence_id in cv_ids
+    }
+    assert "SYNTHETIC-LETTER-CONTEXT-02" in letter_context_ids
+    assert "SYNTHETIC-CV-CONTEXT-01" not in letter_context_ids
+    assert letter_context.text == evidence_by_id[
+        "SYNTHETIC-LETTER-CONTEXT-01"
+    ]["statement"]
+    assert cv_context.text == evidence_by_id["SYNTHETIC-CV-CONTEXT-01"]["statement"]
+    assert source.letter_sections[0].sentence_ids == (letter_context.sentence_id,)
+    paragraphs = _letter_paragraphs(source)
+    assert paragraphs[0] == "Dear Hiring Manager,"
+    assert paragraphs[1] == letter_context.text
+    evidence_match = source.letter_sections[1]
+    evidence_match_ids = set(evidence_match.sentence_ids)
+    for employer_fact in (
+        row
+        for row in source.facts
+        if row.document_kind == "cover_letter" and row.fact_kind == "employer"
+    ):
+        assert isinstance(employer_fact.authority, FactAuthority)
+        sibling = next(
+            row
+            for row in source.facts
+            if row.document_kind == "cover_letter"
+            and row.fact_kind == "candidate"
+            and isinstance(row.authority, FactAuthority)
+            and row.authority.requirement_id == employer_fact.authority.requirement_id
+            and row.authority.candidate_claim_id
+            == employer_fact.authority.candidate_claim_id
+            and row.authority.candidate_claim_version
+            == employer_fact.authority.candidate_claim_version
+            and row.authority.candidate_evidence_id
+            == employer_fact.authority.candidate_evidence_id
+            and row.authority.candidate_evidence_version
+            == employer_fact.authority.candidate_evidence_version
+            and row.authority.employer_research_claim_id
+            == employer_fact.authority.employer_research_claim_id
+            and row.authority.employer_fact_sha256
+            == employer_fact.authority.employer_fact_sha256
+        )
+        assert sibling.sentence_id in evidence_match_ids
+        assert employer_fact.sentence_id in evidence_match_ids
+    normalized_cv = " ".join(package.artifacts.editable.cv_text.split())
+    context_statements = (
+        evidence_by_id["SYNTHETIC-LETTER-CONTEXT-01"]["statement"],
+        evidence_by_id["SYNTHETIC-LETTER-CONTEXT-02"]["statement"],
+    )
+    assert all(
+        " ".join(statement.split()) not in normalized_cv
+        for statement in context_statements
+    )
+    assert "\n\nDear Hiring Manager,\n\n" in package.artifacts.editable.cover_letter_text
+    pdf_lines = [
+        line.strip()
+        for line in package.artifacts.cover_letter_pdf.extracted_text.splitlines()
+    ]
+    assert "Dear Hiring Manager," in pdf_lines
+    for text in (
+        package.artifacts.editable.cover_letter_text,
+        package.artifacts.cover_letter_pdf.extracted_text,
+    ):
+        normalized_text = " ".join(text.split())
+        assert all(
+            normalized_text.count(" ".join(statement.split())) == 1
+            for statement in context_statements
+        )
+
+
+def test_explicit_both_document_targets_preserve_rendered_output_order(
+    tmp_path: Path,
+) -> None:
+    baseline_dir = tmp_path / "baseline"
+    explicit_dir = tmp_path / "explicit"
+    baseline_dir.mkdir()
+    explicit_dir.mkdir()
+    baseline_arguments = _synthetic_composition_inputs(baseline_dir)
+    explicit_arguments = _synthetic_composition_inputs(explicit_dir)
+    ids = {
+        row["id"]
+        for row in json.loads(
+            explicit_arguments["approved_evidence_path"].read_bytes()
+        )["statements"]
+    }
+    _update_synthetic_document_targets(
+        explicit_arguments,
+        {evidence_id: ["cv", "cover_letter"] for evidence_id in ids},
+    )
+    baseline = build_candidate_application_package(**baseline_arguments)
+    explicit = build_candidate_application_package(**explicit_arguments)
+    assert explicit.artifacts.editable.cv_text == baseline.artifacts.editable.cv_text
+    assert explicit.artifacts.editable.cover_letter_text == baseline.artifacts.editable.cover_letter_text
+    assert explicit.artifacts.cv_pdf.extracted_text == baseline.artifacts.cv_pdf.extracted_text
+    assert explicit.artifacts.cover_letter_pdf.extracted_text == baseline.artifacts.cover_letter_pdf.extracted_text
+
+
+def test_matched_document_scopes_select_exact_strategy_supports(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, matched_requirements=1)
+    matched_rows = (
+        {
+            "id": "SYNTHETIC-MATCHED-CV-01",
+            "statement": (
+                "Built a monitoring dashboard that organizes service signals "
+                "and highlights unresolved operational work."
+            ),
+            "document_targets": ["cv"],
+        },
+        {
+            "id": "SYNTHETIC-MATCHED-LETTER-01",
+            "statement": (
+                "Designed a release guide that connects verified prerequisites "
+                "with clear handoff steps for project teams."
+            ),
+            "document_targets": ["cover_letter"],
+        },
+    )
+    _update_synthetic_document_targets(arguments, {}, matched_rows)
+    decision = arguments["decision_receipt"]
+    evidence_matrix = decision["evidence_matrix"]
+    evidence_matrix[0]["evidence_ids"] = [
+        "SYNTHETIC-MATCHED-CV-01",
+        "SYNTHETIC-MATCHED-LETTER-01",
+    ]
+
+    package = build_candidate_application_package(**arguments)
+    strategy_facts = [
+        fact
+        for fact in package.source.facts
+        if isinstance(fact.authority, FactAuthority)
+        and fact.authority.requirement_id == "SYNTHETIC-REQUIREMENT-01"
+    ]
+    cv_strategy = [fact for fact in strategy_facts if fact.document_kind == "cv"]
+    letter_strategy = [
+        fact
+        for fact in strategy_facts
+        if fact.document_kind == "cover_letter" and fact.fact_kind == "candidate"
+    ]
+    assert len(cv_strategy) == 1
+    assert cv_strategy[0].authority.candidate_evidence_id == "SYNTHETIC-MATCHED-CV-01"
+    assert len(letter_strategy) == 1
+    letter_fact = letter_strategy[0]
+    assert letter_fact.authority.candidate_evidence_id == "SYNTHETIC-MATCHED-LETTER-01"
+    employer_siblings = [
+        fact
+        for fact in strategy_facts
+        if fact.document_kind == "cover_letter" and fact.fact_kind == "employer"
+    ]
+    assert len(employer_siblings) == 1
+    employer_fact = employer_siblings[0]
+    assert (
+        employer_fact.authority.requirement_id,
+        employer_fact.authority.candidate_claim_id,
+        employer_fact.authority.candidate_claim_version,
+        employer_fact.authority.candidate_evidence_id,
+        employer_fact.authority.candidate_evidence_version,
+        employer_fact.authority.employer_research_claim_id,
+        employer_fact.authority.employer_fact_sha256,
+    ) == (
+        letter_fact.authority.requirement_id,
+        letter_fact.authority.candidate_claim_id,
+        letter_fact.authority.candidate_claim_version,
+        letter_fact.authority.candidate_evidence_id,
+        letter_fact.authority.candidate_evidence_version,
+        letter_fact.authority.employer_research_claim_id,
+        letter_fact.authority.employer_fact_sha256,
+    )
+
+
+def test_all_letter_only_profile_facts_use_one_opening_anchor(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        matched_requirements=0,
+    )
+    context_rows = tuple(
+        {
+            "id": f"SYNTHETIC-LETTER-ONLY-{index:02d}",
+            "statement": statement,
+            "document_targets": ["cover_letter"],
+        }
+        for index, statement in enumerate(
+            (
+                "Designed a searchable delivery guide that connects verified prerequisites with clear handoff steps, helping project teams find implementation notes quickly.",
+                "Built a release checklist that records repeatable validation steps and explains recovery choices, so maintainers can complete handoffs consistently.",
+                "Created an onboarding map linking service ownership, operational checks, and escalation routes, giving contributors a concise reference during planned changes.",
+            ),
+            start=1,
+        )
+    )
+    _update_synthetic_document_targets(arguments, {}, context_rows)
+    package = build_candidate_application_package(**arguments)
+    source = package.source
+    facts = {row.sentence_id: row for row in source.facts}
+    candidate_ids = {
+        row.authority.candidate_evidence_id
+        for row in source.facts
+        if row.document_kind == "cover_letter" and row.fact_kind == "candidate"
+    }
+    expected_ids = {row["id"] for row in context_rows}
+    assert candidate_ids == expected_ids
+    assert source.letter_sections[0].sentence_ids == (
+        next(
+            row.sentence_id
+            for row in source.facts
+            if row.authority.candidate_evidence_id == "SYNTHETIC-LETTER-ONLY-01"
+        ),
+    )
+    evidence_match_ids = set(source.letter_sections[1].sentence_ids)
+    assert all(
+        next(
+            row.sentence_id
+            for row in source.facts
+            if row.authority.candidate_evidence_id == evidence_id
+        )
+        in evidence_match_ids
+        for evidence_id in expected_ids - {"SYNTHETIC-LETTER-ONLY-01"}
+    )
+    assert len(candidate_ids) == len(source.letter_sections[0].sentence_ids) + sum(
+        facts[sentence_id].fact_kind == "candidate"
+        for sentence_id in source.letter_sections[1].sentence_ids
+    )
+    for fact in (
+        row
+        for row in source.facts
+        if row.document_kind == "cover_letter" and row.fact_kind == "candidate"
+    ):
+        assert fact.authority.candidate_evidence_id not in {
+            row.authority.candidate_evidence_id
+            for row in source.facts
+            if row.document_kind == "cv"
+        }
+
+
+@pytest.mark.parametrize(
+    "evidence_kind",
+    ("credential", "verified_claim", "external_outcome", "unsupported"),
+)
+def test_capability_selector_excludes_unapproved_evidence_kinds(
+    tmp_path: Path,
+    evidence_kind: str,
+) -> None:
+    arguments = _synthetic_composition_inputs(tmp_path, additional_kind="credential")
+    source = _build_candidate_application_source(**arguments).source
+    credential_fact = next(
+        row
+        for row in source.facts
+        if row.authority.candidate_evidence_id == "SYNTHETIC-PORTFOLIO-08"
+    )
+    assert capability_line_eligible(credential_fact.text)
+    assert _select_profile_capability_fact(
+        {"Education": (credential_fact,)},
+        {"SYNTHETIC-PORTFOLIO-08": evidence_kind},
+    ) is None
+
+
+def test_generic_section_uses_verified_kind_not_legacy_id_spelling() -> None:
+    assert (
+        _profile_cv_section_for_evidence(
+            "E-001",
+            "portfolio_artifact",
+            legacy_profile=False,
+        )
+        == "Projects"
+    )
+    assert (
+        _profile_cv_section_for_evidence(
+            "E-001",
+            "credential",
+            legacy_profile=True,
+        )
+        == "Education"
+    )
+
+
+@pytest.mark.parametrize(
+    ("additional_kind", "expected_heading"),
+    (
+        ("verified_claim", "Highlights"),
+        ("work_artifact", "Projects"),
+        ("test_result", "Results"),
+        ("external_outcome", "Outcomes"),
+        ("credential", "Education"),
+    ),
+)
+def test_generic_factory_accepts_each_supported_evidence_kind(
+    tmp_path: Path,
+    additional_kind: str,
+    expected_heading: str,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        additional_kind=additional_kind,
+    )
+
+    source = _build_candidate_application_source(**arguments).source
+    sentence_id = next(
+        row.sentence_id
+        for row in source.facts
+        if row.authority.candidate_evidence_id == "SYNTHETIC-PORTFOLIO-08"
+    )
+    section_heading = next(
+        section.heading
+        for section in source.cv_sections
+        if sentence_id in section.sentence_ids
+    )
+
+    assert (
+        _profile_cv_section_for_evidence(
+            "SYNTHETIC-PORTFOLIO-08",
+            additional_kind,
+            legacy_profile=False,
+        )
+        == expected_heading
+    )
+    assert section_heading == (
+        "Projects" if expected_heading == "Projects" else "Professional Summary"
+    )
+
+
+def test_generic_cover_letter_fills_two_bound_facts_without_legacy_ids(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        matched_requirements=1,
+    )
+
+    source = _build_candidate_application_source(**arguments).source
+    letter_facts = [
+        row
+        for section in source.letter_sections
+        for sentence_id in section.sentence_ids
+        for row in source.facts
+        if row.sentence_id == sentence_id and row.fact_kind == "candidate"
+    ]
+    employer_facts = [row for row in source.facts if row.fact_kind == "employer"]
+
+    assert len(letter_facts) >= 2
+    assert len({row.authority.candidate_evidence_id for row in letter_facts}) == len(
+        letter_facts
+    )
+    assert employer_facts
+    assert all(source.company_name in row.text for row in employer_facts)
+    letter_slots = {
+        slot.slot_id: slot.text
+        for slot in source.style_slots
+        if slot.document_kind == "cover_letter"
+    }
+    factual_text = " ".join(
+        row.text
+        for row in source.facts
+        if row.document_kind == "cover_letter"
+    )
+    assert len(" ".join((*letter_slots.values(), factual_text)).split()) >= 90
+
+
+def test_generic_cover_letter_has_one_bound_opening_and_renderer_signoff(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        matched_requirements=1,
+    )
+
+    package = build_candidate_application_package(**arguments)
+    source = package.source
+    paragraphs = _letter_paragraphs(source)
+    assert tuple(section.heading for section in source.letter_sections) == (
+        "Opening",
+        "Evidence Match",
+        "Close",
+    )
+    assert paragraphs[0] == "Dear Hiring Manager,"
+    opening_section = source.letter_sections[0]
+    opening_facts = [
+        fact for fact in source.facts if fact.sentence_id in opening_section.sentence_ids
+    ]
+    assert [fact.fact_kind for fact in opening_facts] == ["candidate", "employer"]
+    candidate_fact, employer_fact = opening_facts
+    assert isinstance(candidate_fact.authority, FactAuthority)
+    assert isinstance(employer_fact.authority, FactAuthority)
+    sibling_fields = (
+        "requirement_id",
+        "candidate_claim_id",
+        "candidate_claim_version",
+        "candidate_evidence_id",
+        "candidate_evidence_version",
+        "employer_research_claim_id",
+        "employer_fact_sha256",
+    )
+    assert tuple(getattr(candidate_fact.authority, key) for key in sibling_fields) == tuple(
+        getattr(employer_fact.authority, key) for key in sibling_fields
+    )
+    assert paragraphs[1] == f"{candidate_fact.text} {employer_fact.text}"
+    letter_fact_text = " ".join(
+        fact.text for fact in source.facts if fact.document_kind == "cover_letter"
+    )
+    letter_slot_text = " ".join(
+        slot.text for slot in source.style_slots if slot.document_kind == "cover_letter"
+    )
+    assert len(f"{letter_fact_text} {letter_slot_text}".split()) >= 90
+    assert paragraphs[-1] == f"Kind regards,\n{source.contact.full_name}"
+    for text in (
+        package.artifacts.editable.cover_letter_text,
+        package.artifacts.cover_letter_pdf.extracted_text,
+    ):
+        flattened = " ".join(text.split())
+        candidate_text = " ".join(candidate_fact.text.split())
+        employer_text = " ".join(employer_fact.text.split())
+        assert flattened.index(candidate_text) < flattened.index(employer_text)
+        assert flattened.count(candidate_text) == 1
+        assert flattened.count(employer_text) == 1
+        assert text.casefold().count("kind regards") == 1
+        assert "requirement below" not in text.casefold()
+        assert "i am applying for this position" not in text.casefold()
+        assert text.casefold().count("i would welcome the opportunity") == 1
+
+
+def test_generic_zero_match_keeps_vacancy_fact_in_a_candidate_factual_section(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        matched_requirements=0,
+    )
+    package = build_candidate_application_package(**arguments)
+    source = package.source
+    opening = source.letter_sections[0]
+    evidence_match = source.letter_sections[1]
+    facts = {row.sentence_id: row for row in source.facts}
+    opening_facts = [facts[sentence_id] for sentence_id in opening.sentence_ids]
+    evidence_facts = [facts[sentence_id] for sentence_id in evidence_match.sentence_ids]
+    assert tuple(section.heading for section in source.letter_sections) == (
+        "Opening",
+        "Evidence Match",
+        "Close",
+    )
+    assert [row.fact_kind for row in opening_facts] == ["candidate"]
+    assert any(row.fact_kind == "candidate" for row in evidence_facts)
+    employer_facts = [row for row in evidence_facts if row.fact_kind == "employer"]
+    assert employer_facts
+    evidence_paragraph = " ".join(_letter_paragraphs(source)[2].split())
+    assert any(
+        evidence_paragraph.index(" ".join(row.text.split()))
+        < evidence_paragraph.index(" ".join(employer_facts[0].text.split()))
+        for row in evidence_facts
+        if row.fact_kind == "candidate"
+    )
+    for text in (
+        package.artifacts.editable.cover_letter_text,
+        package.artifacts.cover_letter_pdf.extracted_text,
+    ):
+        flattened = " ".join(text.split())
+        for fact in (*opening_facts, *evidence_facts):
+            assert flattened.count(" ".join(fact.text.split())) == 1
+
+
+def test_generic_profile_composition_still_rejects_duplicate_cv_facts(
+    tmp_path: Path,
+) -> None:
+    arguments = _synthetic_composition_inputs(
+        tmp_path,
+        duplicate_last_statement=True,
+    )
+
+    with pytest.raises(ValueError, match="candidate CV repeats factual content"):
+        _build_candidate_application_source(**arguments)
+
+
+def test_generation_evidence_digest_is_resolved_from_verified_projection(
+    tmp_path: Path,
+) -> None:
+    evidence_path, projection = _synthetic_evidence_binding(tmp_path)
+    claimed = projection["projection_sha256"]
+    decision = {"candidate_projection_sha256": claimed}
+
+    expected = _projection_evidence_sha256(projection, decision)
+
+    assert expected == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    assert _approved_statements(
+        evidence_path,
+        expected_evidence_sha256=expected,
+    )["SYNTHETIC-EVIDENCE-1"]["id"] == "SYNTHETIC-EVIDENCE-1"
+
+
+def test_generation_projection_rejects_stale_evidence_digest_swap(
+    tmp_path: Path,
+) -> None:
+    _evidence_path, projection = _synthetic_evidence_binding(tmp_path)
+    decision = {"candidate_projection_sha256": projection["projection_sha256"]}
+    source_hashes = dict(projection["source_hashes"])
+    source_hashes["approved_evidence"] = hashlib.sha256(b"substituted").hexdigest()
+    projection["source_hashes"] = source_hashes
+
+    with pytest.raises(ValueError, match="projection content differs"):
+        _projection_evidence_sha256(projection, decision)
+
+
+def test_generation_projection_requires_receipt_hash_and_valid_evidence_digest(
+    tmp_path: Path,
+) -> None:
+    _evidence_path, projection = _synthetic_evidence_binding(tmp_path)
+    with pytest.raises(ValueError, match="projection binding differs"):
+        _projection_evidence_sha256(projection, {"candidate_projection_sha256": "0" * 64})
+
+    source_hashes = dict(projection["source_hashes"])
+    source_hashes["approved_evidence"] = "A" * 64
+    projection["source_hashes"] = source_hashes
+    projection.pop("projection_sha256")
+    projection["projection_sha256"] = hashlib.sha256(
+        (canonical_json(projection) + "\n").encode("utf-8")
+    ).hexdigest()
+    with pytest.raises(ValueError, match="evidence digest is malformed"):
+        _projection_evidence_sha256(
+            projection,
+            {"candidate_projection_sha256": projection["projection_sha256"]},
+        )
+
+
+def test_approved_statements_legacy_call_keeps_pinned_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_path, _projection = _synthetic_evidence_binding(tmp_path)
+    evidence_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    monkeypatch.setitem(
+        APPROVED_CANDIDATE_SOURCE_HASHES,
+        "approved_evidence",
+        evidence_sha256,
+    )
+
+    assert "SYNTHETIC-EVIDENCE-1" in _approved_statements(evidence_path)
+    evidence_path.write_bytes(evidence_path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="candidate evidence binding differs"):
+        _approved_statements(evidence_path)
+
+
+def test_current_approved_statements_use_pinned_bytes_without_legacy_path(
+    tmp_path: Path,
+) -> None:
+    evidence_bytes = (
+        canonical_json(
+            {
+                "statements": [
+                    {"id": "CURRENT-EVIDENCE", "statement": "Synthetic claim."}
+                ]
+            }
+        )
+        + "\n"
+    ).encode()
+
+    statements, source = _load_approved_statements(
+        tmp_path / "absent-legacy-packet.json",
+        current_runtime=True,
+        expected_evidence_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+        approved_evidence_bytes=evidence_bytes,
+    )
+
+    assert statements["CURRENT-EVIDENCE"]["statement"] == "Synthetic claim."
+    assert source.source_bytes == evidence_bytes
+
+
+def test_current_packet_missing_or_mismatched_bytes_never_falls_back(
+    tmp_path: Path,
+) -> None:
+    legacy_bytes = b'{"statements":[]}\n'
+    legacy_path = tmp_path / "legacy-packet.json"
+    legacy_path.write_bytes(legacy_bytes)
+    expected_sha256 = hashlib.sha256(legacy_bytes).hexdigest()
+
+    for pinned_bytes in (None, b'{"statements":[]}'):
+        with pytest.raises(ValueError, match="candidate evidence binding differs"):
+            _load_approved_statements(
+                legacy_path,
+                current_runtime=True,
+                expected_evidence_sha256=expected_sha256,
+                approved_evidence_bytes=pinned_bytes,
+            )
+
+
+def test_legacy_packet_selector_rejects_supplied_bytes_without_reading(
+    tmp_path: Path,
+) -> None:
+    legacy_bytes = b'{"statements":[]}\n'
+    path = tmp_path / "legacy-packet.json"
+    path.write_bytes(legacy_bytes)
+    calls: list[int] = []
+
+    selected = resolve_evidence_packet(
+        current_runtime=False,
+        pinned_bytes=None,
+        expected_sha256=hashlib.sha256(legacy_bytes).hexdigest(),
+        legacy_read=lambda: calls.append(1) or path.read_bytes(),
+    )
+
+    assert selected == legacy_bytes
+    assert calls == [1]
+    calls.clear()
+
+    with pytest.raises(ValueError, match="candidate evidence binding differs"):
+        resolve_evidence_packet(
+            current_runtime=False,
+            pinned_bytes=b"caller bytes",
+            expected_sha256=hashlib.sha256(legacy_bytes).hexdigest(),
+            legacy_read=lambda: calls.append(1) or path.read_bytes(),
+        )
+
+    assert calls == []
 
 
 def test_materializes_exact_authority_bound_source_without_pdf(
@@ -522,9 +2613,217 @@ def test_materializes_exact_authority_bound_source_without_pdf(
         )
 
 
+def test_editorial_authorization_uses_exact_current_cv_partition() -> None:
+    def binding(sentence_id: str, text: str, heading: str = "Professional Summary"):
+        return {
+            "document_kind": "cv",
+            "sentence_id": sentence_id,
+            "section_heading": heading,
+            "text": text,
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "evidence_ids": (f"evidence-{sentence_id}",),
+        }
+
+    def shell(rows, environment: str):
+        receipt = object.__new__(
+            candidate_factory_module.CandidateApplicationMaterializationReceipt
+        )
+        object.__setattr__(receipt, "candidate_authority_file_sha256", "a" * 64)
+        object.__setattr__(
+            receipt, "deployment_binding", SimpleNamespace(environment=environment)
+        )
+        object.__setattr__(receipt, "vacancy_sha256", "b" * 64)
+        object.__setattr__(receipt, "role_title", "Synthetic role")
+        object.__setattr__(receipt, "company_name", "Synthetic company")
+        object.__setattr__(receipt, "fact_bindings", tuple(rows))
+        return receipt
+
+    def cv_claim(row, *, current_runtime: bool):
+        return SimpleNamespace(
+            claim_id=row["sentence_id"],
+            category=category_for_source_heading(
+                row["section_heading"], current_runtime=current_runtime
+            ),
+            evidence_ids=tuple(row["evidence_ids"]),
+            text=row["text"],
+            text_sha256=row["text_sha256"],
+        )
+
+    def cv_request(receipt, claims, *, current_runtime: bool):
+        return SimpleNamespace(
+            authority=SimpleNamespace(
+                source_sha256=receipt.candidate_authority_file_sha256,
+                current_runtime=current_runtime,
+            ),
+            vacancy_sha256=receipt.vacancy_sha256,
+            role_title=receipt.role_title,
+            company_name=receipt.company_name,
+            document_kind="cv",
+            approved_claims=tuple(claims),
+        )
+
+    safe_first = binding("safe-1", "Synthetic supported result one.")
+    safe_second = binding(
+        "safe-2", "Synthetic supported result two.", "Highlights"
+    )
+    excluded = binding(
+        "excluded-1", "Synthetic supported claim with an internal review caveat."
+    )
+    rows = (safe_first, safe_second, excluded)
+    receipt = shell(rows, "current_runtime")
+    original_bindings = tuple(dict(row) for row in receipt.fact_bindings)
+    safe_claims = tuple(
+        cv_claim(row, current_runtime=True) for row in (safe_first, safe_second)
+    )
+
+    receipt.authorize_editorial_request(
+        cv_request(receipt, safe_claims, current_runtime=True)
+    )
+    with pytest.raises(ValueError, match="claim set differs"):
+        receipt.authorize_editorial_request(
+            cv_request(receipt, safe_claims[:1], current_runtime=True)
+        )
+    with pytest.raises(ValueError, match="claim set differs"):
+        receipt.authorize_editorial_request(
+            cv_request(
+                receipt,
+                (*safe_claims, cv_claim(excluded, current_runtime=True)),
+                current_runtime=True,
+            )
+        )
+
+    altered_claims = (
+        SimpleNamespace(**{**vars(safe_claims[0]), "text": "Synthetic altered text."}),
+        SimpleNamespace(**{**vars(safe_claims[0]), "text_sha256": "f" * 64}),
+        SimpleNamespace(
+            **{**vars(safe_claims[0]), "evidence_ids": ("different-evidence",)}
+        ),
+        SimpleNamespace(**{**vars(safe_claims[0]), "category": "outcome"}),
+    )
+    for altered_claim in altered_claims:
+        with pytest.raises(ValueError, match="claim set differs"):
+            receipt.authorize_editorial_request(
+                cv_request(
+                    receipt,
+                    (altered_claim, safe_claims[1]),
+                    current_runtime=True,
+                )
+            )
+
+    with pytest.raises(ValueError, match="candidate authority differs"):
+        receipt.authorize_editorial_request(
+            SimpleNamespace(
+                **{
+                    **cv_request(
+                        receipt, safe_claims, current_runtime=True
+                    ).__dict__,
+                    "authority": SimpleNamespace(
+                        source_sha256="c" * 64, current_runtime=True
+                    ),
+                }
+            )
+        )
+    assert tuple(dict(row) for row in receipt.fact_bindings) == original_bindings
+
+    legacy_rows = (
+        binding("legacy-safe", "Synthetic legacy supported statement."),
+        binding(
+            "legacy-qualified",
+            "Synthetic legacy statement includes an internal review caveat.",
+        ),
+    )
+    legacy_receipt = shell(legacy_rows, "legacy")
+    all_legacy_claims = tuple(
+        cv_claim(row, current_runtime=False) for row in legacy_rows
+    )
+    legacy_receipt.authorize_editorial_request(
+        cv_request(legacy_receipt, all_legacy_claims, current_runtime=False)
+    )
+    with pytest.raises(ValueError, match="claim set differs"):
+        legacy_receipt.authorize_editorial_request(
+            cv_request(
+                legacy_receipt,
+                tuple(
+                    cv_claim(row, current_runtime=False)
+                    for row in legacy_rows[:1]
+                ),
+                current_runtime=False,
+            )
+        )
+
+
+def test_current_cover_letter_authorization_still_requires_exact_bindings() -> None:
+    def binding(sentence_id: str, text: str, section_heading: str):
+        return {
+            "document_kind": "cover_letter",
+            "sentence_id": sentence_id,
+            "section_heading": section_heading,
+            "fact_kind": "candidate",
+            "text": text,
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "evidence_ids": (f"evidence-{sentence_id}",),
+        }
+
+    rows = (
+        binding(
+            "cover-1",
+            "Synthetic cover statement includes an internal review caveat.",
+            "Opening",
+        ),
+        binding("cover-2", "Synthetic cover statement two.", "Body"),
+    )
+    receipt = object.__new__(
+        candidate_factory_module.CandidateApplicationMaterializationReceipt
+    )
+    object.__setattr__(receipt, "candidate_authority_file_sha256", "a" * 64)
+    object.__setattr__(
+        receipt,
+        "deployment_binding",
+        SimpleNamespace(environment="current_runtime"),
+    )
+    object.__setattr__(receipt, "vacancy_sha256", "b" * 64)
+    object.__setattr__(receipt, "role_title", "Synthetic role")
+    object.__setattr__(receipt, "company_name", "Synthetic company")
+    object.__setattr__(receipt, "fact_bindings", rows)
+
+    def claim(row):
+        return SimpleNamespace(
+            claim_id=row["sentence_id"],
+            evidence_ids=row["evidence_ids"],
+            fact_kind=row["fact_kind"],
+            section_heading=row["section_heading"],
+            text=row["text"],
+            text_sha256=row["text_sha256"],
+        )
+
+    request = SimpleNamespace(
+        authority=SimpleNamespace(
+            source_sha256=receipt.candidate_authority_file_sha256,
+            current_runtime=True,
+        ),
+        vacancy_sha256=receipt.vacancy_sha256,
+        role_title=receipt.role_title,
+        company_name=receipt.company_name,
+        document_kind="cover_letter",
+        approved_claims=tuple(claim(row) for row in rows),
+    )
+
+    receipt.authorize_editorial_request(request)
+    with pytest.raises(ValueError, match="claim set differs"):
+        receipt.authorize_editorial_request(
+            SimpleNamespace(
+                **{
+                    **request.__dict__,
+                    "approved_claims": request.approved_claims[:1],
+                }
+            )
+        )
+
+
 def test_materialization_rejects_authority_and_unsupported_packet_substitution(
     tmp_path: Path,
 ) -> None:
+    require_private_candidate_fixture()
     substituted_authority = tmp_path / "authority.json"
     substituted_authority.write_bytes(AUTHORITY_PATH.read_bytes() + b" ")
     with pytest.raises(ValueError, match="authority file hash differs"):
@@ -546,7 +2845,7 @@ def test_materialization_rejects_authority_and_unsupported_packet_substitution(
     )
     proposal_path = tmp_path / "proposal.json"
     proposal_path.write_text(json.dumps(proposal))
-    with pytest.raises(ValueError, match="evidence hash differs"):
+    with pytest.raises(ValueError, match="candidate evidence binding differs"):
         materialize_candidate_application_source(
             **_materialization_inputs(tmp_path),
             candidate_authority_path=AUTHORITY_PATH,
@@ -658,6 +2957,7 @@ def test_authority_runner_requires_fresh_graph_identity_and_exact_materializatio
     )
     assert captured["calls"] == 1
 
+
     for field in ("registry_sha256", "signer_public_key_sha256"):
         substituted = replace(inputs["contact_authority"], **{field: "0" * 64})
         with pytest.raises(ValueError, match="differs from admitted candidate"):
@@ -757,6 +3057,70 @@ def test_authority_runner_requires_fresh_graph_identity_and_exact_materializatio
         )
 
 
+def test_materialization_only_returns_admitted_market_context_without_writers(
+    tmp_path: Path,
+) -> None:
+    market, inputs, projection = _integrated_decision(tmp_path)
+    raw_listing = b'{"fixture":"exact Workable listing"}'
+    materialized = materialize_candidate_application_source(
+        candidate_authority_path=AUTHORITY_PATH,
+        deployment_binding=inputs["deployment_binding"],
+        contact_authority=inputs["contact_authority"],
+        decision_receipt=market.decision_receipt(),
+        candidate_projection=projection,
+        job_key=market.source_job_key,
+        vacancy_sha256=market.raw_listing_sha256,
+        source_url=market.source_url,
+        role_title=market.role_title,
+        company_name=market.company_name,
+        contact=inputs["contact"],
+        market_decision_authority=market,
+    )
+    binding = inputs["deployment_binding"]
+    verified = SimpleNamespace(
+        application_id=binding.application_id,
+        environment="synthetic",
+        handoff_root_sha256=binding.handoff_root_sha256,
+        admission_receipt_sha256=binding.admission_receipt_sha256,
+        current_boundary_receipt_sha256=binding.current_boundary_receipt_sha256,
+        candidate_authority_sha256=AUTHORITY_PATH.stem,
+        profile_id="profile-test",
+        profile_version="v1",
+        candidate_intent_sha256="6" * 64,
+        final_score=42.0,
+        opportunity_score=0.25,
+        geography_priority_rank=5,
+        raw_listing_bytes=raw_listing,
+        source_observed_at=market.observed_at,
+    )
+    store = SimpleNamespace(for_boundary=lambda _application_id, _boundary: verified)
+    result = market_aligner_preparation.prepare_admitted_market_application_from_authorities(
+        admission_store=store,
+        application_id=verified.application_id,
+        repository_root=Path(__file__).resolve().parents[1],
+        data_home=tmp_path / "data-home",
+        candidate_authority_path=AUTHORITY_PATH,
+        contact_authority_path=inputs["contact_authority"].source_path,
+        input_materializer=lambda *_args: {
+            "base_source": materialized.source,
+            "candidate_projection": projection,
+            "decision_receipt": market.decision_receipt(),
+            "market_decision_authority": market,
+            "materialization": materialized,
+        },
+        environment="synthetic",
+        contact_authority_loader=lambda *_args, **_kwargs: inputs[
+            "contact_authority"
+        ],
+        materialization_only=True,
+    )
+    assert type(result) is market_aligner_preparation.MarketApplicationMaterializationContext
+    assert result.application_id == binding.application_id
+    assert result.materialization == materialized
+    assert result.raw_listing_bytes == raw_listing
+    assert result.release_authority is False
+
+
 def test_rejects_noneligible_or_vacancy_swapped_decision() -> None:
     arguments = _inputs()
     decision = dict(arguments["decision_receipt"])
@@ -764,7 +3128,6 @@ def test_rejects_noneligible_or_vacancy_swapped_decision() -> None:
     arguments["decision_receipt"] = decision
     with pytest.raises(ValueError, match="decision authority differs"):
         build_candidate_application_package(**arguments)
-
     for field, value in (
         ("role_title", "Chief Executive Officer"),
         ("company_name", "Completely Different Employer"),
@@ -778,3 +3141,253 @@ def test_rejects_noneligible_or_vacancy_swapped_decision() -> None:
     arguments["vacancy_sha256"] = "f" * 64
     with pytest.raises(ValueError, match="decision authority differs"):
         build_candidate_application_package(**arguments)
+
+
+def test_current_contact_provenance_binds_all_live_fields_without_aliases() -> None:
+    contact = {
+        "full_name": "Ada Lovelace",
+        "email": "ada@example.test",
+        "phone": None,
+        "city": "Exampleville",
+    }
+    field_sources = {
+        "full_name": [{"sha256": "a" * 64, "locator": "cv-1/name"}],
+        "email": [{"sha256": "b" * 64, "locator": "cv-2/email"}],
+        "city": [{"sha256": "c" * 64, "locator": "profile/current-city"}],
+    }
+    allowed_hashes = ["a" * 64, "b" * 64, "c" * 64]
+    bindings = {
+        "manifest_sha256": "d" * 64,
+        "activation_sha256": "e" * 64,
+        "profile_sha256": "f" * 64,
+        "approval_id": "approved-inputs-01",
+    }
+    result = bind_contact_sources(contact, field_sources, allowed_hashes, bindings)
+    assert result["schema_version"] == "current-contact-provenance-v1"
+    assert result["field_sources"] == field_sources
+    assert "phone" not in result["field_sources"]
+    original_digest = result["provenance_sha256"]
+    contact["city"] = "Changed"
+    field_sources["city"][0]["locator"] = "changed"
+    allowed_hashes.append("9" * 64)
+    assert result["contact"]["city"] == "Exampleville"
+    assert result["field_sources"]["city"][0]["locator"] == "profile/current-city"
+    assert result["allowed_hashes"] == ["a" * 64, "b" * 64, "c" * 64]
+    assert len(original_digest) == 64
+
+
+@pytest.mark.parametrize("field", ("full_name", "email"))
+def test_current_contact_provenance_rejects_missing_required_contact(field: str) -> None:
+    contact = {
+        "full_name": "Ada Lovelace",
+        "email": "ada@example.test",
+        "phone": None,
+        "city": "Exampleville",
+    }
+    contact[field] = None
+    with pytest.raises(ValueError, match="^current_contact_provenance_invalid$"):
+        bind_contact_sources(
+            contact,
+            {name: [{"sha256": "a" * 64, "locator": name}] for name in ("full_name", "email")},
+            ["a" * 64],
+            {
+                "manifest_sha256": "b" * 64,
+                "activation_sha256": "c" * 64,
+                "profile_sha256": "d" * 64,
+                "approval_id": "approved-inputs-01",
+            },
+        )
+
+
+def test_current_contact_provenance_preserves_unknown_city_as_absent() -> None:
+    contact = {
+        "full_name": "Ada Lovelace",
+        "email": "ada@example.test",
+        "phone": None,
+        "city": None,
+    }
+    result = bind_contact_sources(
+        contact,
+        {
+            "full_name": [{"sha256": "a" * 64, "locator": "cv/name"}],
+            "email": [{"sha256": "b" * 64, "locator": "cv/email"}],
+        },
+        ["a" * 64, "b" * 64],
+        {
+            "manifest_sha256": "c" * 64,
+            "activation_sha256": "d" * 64,
+            "profile_sha256": "e" * 64,
+            "approval_id": "approved-inputs-01",
+        },
+    )
+    assert result["contact"]["city"] is None
+    assert "city" not in result["field_sources"]
+    contact_model = CandidateContact(
+        full_name="Ada Lovelace",
+        email="ada@example.test",
+        phone=None,
+        city=None,
+        record_id="current-contact-01",
+        record_version=1,
+        provenance_sha256=str(result["provenance_sha256"]),
+    )
+    assert contact_model.city is None
+
+
+def test_current_contact_provenance_rejects_unknown_source_hash() -> None:
+    with pytest.raises(ValueError, match="^current_contact_provenance_invalid$"):
+        bind_contact_sources(
+            {
+                "full_name": "Ada Lovelace",
+                "email": "ada@example.test",
+                "phone": None,
+                "city": "Exampleville",
+            },
+            {
+                "full_name": [{"sha256": "f" * 64, "locator": "cv/name"}],
+                "email": [{"sha256": "a" * 64, "locator": "cv/email"}],
+                "city": [{"sha256": "a" * 64, "locator": "profile/city"}],
+            },
+            ["a" * 64],
+            {
+                "manifest_sha256": "b" * 64,
+                "activation_sha256": "c" * 64,
+                "profile_sha256": "d" * 64,
+                "approval_id": "approved-inputs-01",
+            },
+        )
+
+
+def test_current_contact_loader_uses_agreed_pinned_cv_fields_and_no_city(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cv_text = (
+        "Ada Lovelace\nLondon\nada@example.test\n+44 20 7946 0958",
+        "Ada Lovelace\nReading\nada@example.test\n+44 20 7946 0958",
+        "Ada Lovelace\nYork\nada@example.test\n+44 20 7946 0958",
+        "Ada Lovelace\nBristol\nada@example.test\n+44 20 7946 0958",
+    )
+    saved_cv_bytes = {
+        f"approved/cv-{index}.pdf": f"synthetic-pdf-{index}".encode("ascii")
+        for index in range(1, 5)
+    }
+    sources = {
+        saved_cv_bytes[path]: text
+        for path, text in zip(saved_cv_bytes, cv_text, strict=True)
+    }
+
+    class _Page:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def extract_text(self) -> str:
+            return self._text
+
+    class _Reader:
+        def __init__(self, stream, *, strict: bool) -> None:
+            assert strict is True
+            self.is_encrypted = False
+            self.pages = [_Page(sources[stream.read()])]
+
+    monkeypatch.setattr(contact_authority_module, "PdfReader", _Reader)
+    descriptors = [
+        {
+            "relative_path": path,
+            "sha256": hashlib.sha256(value).hexdigest(),
+            "bytes": len(value),
+        }
+        for path, value in saved_cv_bytes.items()
+    ]
+    result = load_current_contact_provenance(
+        saved_cv_bytes=saved_cv_bytes,
+        saved_cv_descriptors=descriptors,
+        bindings={
+            "manifest_sha256": "a" * 64,
+            "activation_sha256": "b" * 64,
+            "profile_sha256": "c" * 64,
+            "approval_id": "approved-inputs-01",
+        },
+    )
+
+    assert type(result) is CurrentContactProvenance
+    assert result.contact.full_name == "Ada Lovelace"
+    assert result.contact.email == "ada@example.test"
+    assert result.contact.phone == "+44 20 7946 0958"
+    assert result.contact.city is None
+    document = result.document()
+    assert document["contact"]["city"] is None
+    assert set(document["allowed_hashes"]) == {
+        descriptor["sha256"] for descriptor in descriptors
+    }
+    assert all(len(document["field_sources"][field]) == 4 for field in (
+        "full_name",
+        "email",
+        "phone",
+    ))
+    assert "city" not in document["field_sources"]
+    assert all(
+        "line" in source["locator"]
+        for field in ("full_name", "email", "phone")
+        for source in document["field_sources"][field]
+    )
+    assert result.sha256 == hashlib.sha256(result.encoded_document).hexdigest()
+    assert result.contact.provenance_sha256 != result.sha256
+    assert market_aligner_preparation._contact_authority_provenance_sha256(
+        result, current_runtime=True
+    ) == result.contact.provenance_sha256
+    legacy_authority = SimpleNamespace(authority_sha256="d" * 64)
+    assert market_aligner_preparation._contact_authority_provenance_sha256(
+        legacy_authority, current_runtime=False
+    ) == legacy_authority.authority_sha256
+
+
+def test_current_contact_loader_refuses_disagreement_or_unpinned_cv_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = {
+        b"cv-1": "Ada Lovelace\nada@example.test\n+44 20 7946 0958",
+        b"cv-2": "Ada Lovelace\nada@example.test\n+44 20 7946 0958",
+    }
+
+    class _Page:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def extract_text(self) -> str:
+            return self._text
+
+    class _Reader:
+        def __init__(self, stream, *, strict: bool) -> None:
+            assert strict is True
+            self.is_encrypted = False
+            self.pages = [_Page(sources[stream.read()])]
+
+    monkeypatch.setattr(contact_authority_module, "PdfReader", _Reader)
+    descriptors = [
+        {
+            "relative_path": f"approved/cv-{index}.pdf",
+            "sha256": hashlib.sha256(value).hexdigest(),
+            "bytes": len(value),
+        }
+        for index, value in enumerate(sources, start=1)
+    ]
+    bindings = {
+        "manifest_sha256": "a" * 64,
+        "activation_sha256": "b" * 64,
+        "profile_sha256": "c" * 64,
+        "approval_id": "approved-inputs-01",
+    }
+    disagreeing = dict(sources)
+    disagreeing[b"cv-2"] = b"cv-2-different"
+    with pytest.raises(ValueError, match="^current_contact_provenance_invalid$"):
+        load_current_contact_provenance(
+            saved_cv_bytes=disagreeing,
+            saved_cv_descriptors=descriptors,
+            bindings=bindings,
+        )
+    with pytest.raises(ValueError, match="^current_contact_provenance_invalid$"):
+        load_current_contact_provenance(
+            saved_cv_bytes={**sources, "unexpected.pdf": b"extra"},
+            saved_cv_descriptors=descriptors,
+            bindings=bindings,
+        )

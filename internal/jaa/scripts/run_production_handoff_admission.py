@@ -21,10 +21,27 @@ from career_automation.production_handoff_admission_runner import (
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execution-receipt", required=True)
+    parser.add_argument("--current-runtime-config-path")
+    parser.add_argument("--current-runtime-config-sha256")
+    parser.add_argument("--current-runtime-private-root")
     args = parser.parse_args(argv)
-    receipt = run_production_handoff_admission(
-        execution_receipt_path=args.execution_receipt
-    )
+    inputs = {"execution_receipt_path": args.execution_receipt}
+    if any(
+        value is not None
+        for value in (
+            args.current_runtime_config_path,
+            args.current_runtime_config_sha256,
+            args.current_runtime_private_root,
+        )
+    ):
+        inputs.update(
+            {
+                "current_runtime_config_path": args.current_runtime_config_path,
+                "current_runtime_config_sha256": args.current_runtime_config_sha256,
+                "current_runtime_private_root": args.current_runtime_private_root,
+            }
+        )
+    receipt = run_production_handoff_admission(**inputs)
     sys.stdout.buffer.write(canonical_json_bytes(receipt.document()) + b"\n")
     return 0
 

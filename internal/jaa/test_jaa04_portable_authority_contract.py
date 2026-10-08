@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -120,11 +121,16 @@ def test_operational_health_requires_purpose_specific_substantive_evidence(
                     "excerpt_sha256": hashlib.sha256(excerpt.encode()).hexdigest()})
     claim = next(row for row in dossier["claims"] if row["kind"] == "operational_health")  # type: ignore[index]
     claim.update({"observed_at": STAMP, "temporal_semantics": "publisher_time"})
+    fixture_date = date.fromisoformat(STAMP[:10])
     if passes:
-        validate_dossier(dossier, cache)
+        validate_dossier(dossier, cache, as_of=fixture_date)
+        with pytest.raises(ValueError, match="not temporally applicable"):
+            validate_dossier(
+                dossier, cache, as_of=fixture_date + timedelta(days=91)
+            )
     else:
         with pytest.raises(ValueError, match="kind-irrelevant operational_health"):
-            validate_dossier(dossier, cache)
+            validate_dossier(dossier, cache, as_of=fixture_date)
 
 
 class _Routes:

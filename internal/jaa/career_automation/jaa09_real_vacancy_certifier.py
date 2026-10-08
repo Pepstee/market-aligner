@@ -27,7 +27,16 @@ from .jaa04_corpus_authority import (
 )
 
 
-RECEIPT_SCHEMA = "jaa09.real-vacancy-local-receipt.v1"
+from .runtime_compatibility import (
+    CERTIFIED_PYTHON_VERSION,
+    CHROMIUM_BROWSER_VERSION,
+    CHROMIUM_REVISION,
+    PLAYWRIGHT_VERSION,
+)
+
+
+LEGACY_RECEIPT_SCHEMA = "jaa09.real-vacancy-local-receipt.v1"
+RECEIPT_SCHEMA = "jaa09.real-vacancy-local-receipt.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _PII_KEYS = frozenset(
@@ -71,12 +80,12 @@ def _reject_pii_keys(value: object) -> None:
 
 
 def validate_real_vacancy_receipt(document: Mapping[str, Any]) -> None:
-    if (
-        document.get("schema_version") != RECEIPT_SCHEMA
-        or document.get("certifies_slice") is not False
+    schema_version = document.get("schema_version")
+    if schema_version not in {LEGACY_RECEIPT_SCHEMA, RECEIPT_SCHEMA} or (
+        document.get("certifies_slice") is not False
     ):
         raise RealVacancyReceiptError(
-            "real-vacancy run receipt must be non-certifying schema v1"
+            "real-vacancy run receipt must be a supported non-certifying schema"
         )
     try:
         created_at = datetime.fromisoformat(str(document["created_at"]))
@@ -163,7 +172,7 @@ def validate_real_vacancy_receipt(document: Mapping[str, Any]) -> None:
         raise RealVacancyReceiptError("browser evidence boundary is incomplete")
 
     source = _mapping(document.get("source_environment"), "source environment")
-    if (
+    common_source_invalid = (
         not isinstance(source.get("source_git_revision"), str)
         or not _SHA1.fullmatch(source["source_git_revision"])
         or not isinstance(source.get("source_tree"), str)
@@ -173,17 +182,29 @@ def validate_real_vacancy_receipt(document: Mapping[str, Any]) -> None:
             r"sha256:[0-9a-f]{64}",
             source["source_content_revision"],
         )
-        or not str(source.get("interpreter_path") or "").endswith(
-            "/.venv/bin/python"
-        )
         or source.get("implementation") != "CPython"
-        or source.get("python_version") != "3.12.13"
-        or source.get("playwright_version") != "1.61.0"
         or not isinstance(source.get("chromium_version"), str)
         or not source["chromium_version"]
         or not isinstance(source.get("platform"), str)
         or not source["platform"]
-    ):
+    )
+    if schema_version == LEGACY_RECEIPT_SCHEMA:
+        version_specific_invalid = (
+            not str(source.get("interpreter_path") or "").endswith("/.venv/bin/python")
+            or source.get("python_version") != "3.12.13"
+            or source.get("playwright_version") != "1.61.0"
+        )
+    else:
+        interpreter = Path(str(source.get("interpreter_path") or ""))
+        version_specific_invalid = (
+            not interpreter.is_absolute()
+            or not interpreter.name.startswith("python")
+            or source.get("python_version") != CERTIFIED_PYTHON_VERSION
+            or source.get("playwright_version") != PLAYWRIGHT_VERSION
+            or source.get("chromium_revision") != CHROMIUM_REVISION
+            or source.get("chromium_version") != CHROMIUM_BROWSER_VERSION
+        )
+    if common_source_invalid or version_specific_invalid:
         raise RealVacancyReceiptError("source or locked-environment binding is invalid")
 
     disclosures = _mapping(document.get("disclosures"), "disclosures")

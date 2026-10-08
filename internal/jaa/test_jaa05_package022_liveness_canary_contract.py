@@ -1,4 +1,5 @@
 """Package 022 offline, non-executable liveness-canary contract controls."""
+
 from __future__ import annotations
 
 import copy
@@ -11,24 +12,21 @@ import pytest
 
 from career_automation.holdout_firewall import load_quarantine_bundle
 from career_automation.official_cohort import build
+from testing_repository import (
+    operator_control_path,
+    rebind_historical_control_paths,
+)
 
 
 ROOT = Path(__file__).resolve().parent
-CONTROL = Path(
-    "/home/gutua/software-factory/.control/resumed-dual-lane-20260728/"
-    "jaa/jaa05-next-cycle"
-)
-SCRIPT = (
-    CONTROL
-    / "package-022-build-nonexecutable-liveness-canary-contract.py"
-)
+CONTROL = operator_control_path("resumed-dual-lane-20260728", "jaa", "jaa05-next-cycle")
+SCRIPT = CONTROL / "package-022-build-nonexecutable-liveness-canary-contract.py"
 CONTRACT = CONTROL / "package-022-liveness-canary-contract.json.canary-contract"
 PACKAGE020_SCRIPT = CONTROL / "package-020-audit-preserved-supply.py"
 PACKAGE020_REPORT = CONTROL / "package-020-preserved-supply-exhaustion-audit.json"
 PACKAGE021_SCRIPT = CONTROL / "package-021-build-nonexecutable-config-v4.py"
 PACKAGE021_PROPOSAL = (
-    CONTROL
-    / "package-021-authorized-production-config-v4-proposal.yaml.proposal"
+    CONTROL / "package-021-authorized-production-config-v4-proposal.yaml.proposal"
 )
 BUNDLE = CONTROL / "combined-quarantine-bundle.json"
 BUNDLE_SHA256 = "ad380445efd62019fe970ee1d775e48a5e5f58639bd385823e31780547f1a6c4"
@@ -103,7 +101,7 @@ def _load_module(name: str, path: Path) -> ModuleType:
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module
+    return rebind_historical_control_paths(module)
 
 
 def _sha256(path: Path) -> str:
@@ -173,9 +171,10 @@ def test_each_route_is_one_bounded_get(contract: dict) -> None:
         assert route["follow_redirects"] is False
         assert route["fallback_engines"] == []
         assert route["maximum_response_bytes"] == 8 * 1024 * 1024
-        assert route["canonical_url_sha256"] == hashlib.sha256(
-            route["url"].encode()
-        ).hexdigest()
+        assert (
+            route["canonical_url_sha256"]
+            == hashlib.sha256(route["url"].encode()).hexdigest()
+        )
     limits = contract["bounded_execution_specification"]
     assert limits["maximum_requests_per_run"] == 9
     assert limits["maximum_routes"] == 9
@@ -187,7 +186,8 @@ def test_expected_response_schemas_are_provider_specific(contract: dict) -> None
     greenhouse = contract["routes"][:7]
     lever = contract["routes"][7:]
     assert all(
-        row["expected_response_schema"] == {
+        row["expected_response_schema"]
+        == {
             "media_type": "application/json",
             "root_type": "object",
             "required_top_level": {"jobs": "array"},
@@ -195,7 +195,8 @@ def test_expected_response_schemas_are_provider_specific(contract: dict) -> None
         for row in greenhouse
     )
     assert all(
-        row["expected_response_schema"] == {
+        row["expected_response_schema"]
+        == {
             "media_type": "application/json",
             "root_type": "array",
             "array_item_type": "object",
@@ -245,12 +246,8 @@ def test_authority_inputs_are_exactly_hash_bound(contract: dict) -> None:
 
 
 def test_quarantine_overlap_is_zero_and_scope_is_honest(contract: dict) -> None:
-    assert contract["quarantine_crosscheck"][
-        "route_canonical_url_overlap_count"
-    ] == 0
-    assert contract["quarantine_crosscheck"][
-        "route_canonical_url_overlaps"
-    ] == []
+    assert contract["quarantine_crosscheck"]["route_canonical_url_overlap_count"] == 0
+    assert contract["quarantine_crosscheck"]["route_canonical_url_overlaps"] == []
     assert "no response" in contract["quarantine_crosscheck"]["scope_note"]
 
 

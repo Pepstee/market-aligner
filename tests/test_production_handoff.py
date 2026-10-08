@@ -12,7 +12,23 @@ import pytest
 import yaml
 
 from market_aligner.applications import production_handoff as production_module
-from market_aligner.applications.handoff import canonical_json_bytes
+from market_aligner.applications.canonical import ContractValidationError
+from market_aligner.applications.handoff import (
+    CURRENT_RUNTIME_HANDOFF_VERSION,
+    CURRENT_RUNTIME_NON_RELEASE_PROFILE,
+    INSTALLED_PRODUCTION_TRUST_CLASS,
+    JAA_HANDOFF_VERSION,
+    STRICT_PROFILE,
+    canonical_json_bytes,
+    encode_current_runtime_handoff_v1,
+    encode_handoff_for_runtime,
+    encode_handoff_v1,
+    handoff_release_blocked,
+    parse_current_runtime_handoff_v1,
+    preparation_geography_document,
+    resolve_preparation_geography,
+    validate_preparation_geography,
+)
 from market_aligner.applications.production_handoff import (
     PRODUCTION_CANDIDATE_AUTHORITY_PATH,
     PRODUCTION_CANDIDATE_AUTHORITY_SHA256,
@@ -20,10 +36,16 @@ from market_aligner.applications.production_handoff import (
     _build_production_handoff_from_authenticated_time,
     _deterministic_handoff_issuance,
     _git_commit,
+    _greenhouse_identity,
     _persist_execution_receipt,
     _protected_candidate_authority,
+    _require_explicit_unknown_mode,
     _research_evidence,
     _workable_identity,
+)
+from market_aligner.assessment.geography import (
+    GeographicPreferencePolicy,
+    classify_geographic_preference,
 )
 from market_aligner.assessment.opportunity import apply_gate
 from market_aligner.assessment.scoring import AssessmentAxes, score
@@ -52,8 +74,331 @@ SOURCE_SHA = "a" * 64
 PROMOTION_SHA = "b" * 64
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "unknown",
+        " UNSPECIFIED\t\n",
+        "not specified",
+        "not\nstated",
+        "   ",
+    ],
+)
+def test_unknown_work_mode_requires_explicit_unknown_remote_policy(value: str) -> None:
+    assert _require_explicit_unknown_mode(value) == "unknown"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "remote",
+        "hybrid",
+        "onsite",
+        "mostly remote",
+        "remote unknown",
+        "not specified hybrid",
+        "unknown_other",
+        "unknоwn",
+        None,
+        1,
+        True,
+    ],
+)
+def test_unknown_work_mode_does_not_overwrite_known_or_malformed_remote_policy(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="remote policy must explicitly state an unknown work mode"):
+        _require_explicit_unknown_mode(value)
+
+
+def test_unknown_other_with_explicit_remote_policy_is_not_unknown_mode() -> None:
+    preference = classify_geographic_preference(
+        location="Reading",
+        remote_policy="remote",
+        policy=GeographicPreferencePolicy(),
+    )
+    assert (preference.category, preference.rank) == ("unknown_other", 5)
+    with pytest.raises(ValueError, match="remote policy must explicitly state an unknown work mode"):
+        _require_explicit_unknown_mode("remote")
+
+
+@pytest.mark.parametrize(
+    ("country_code", "work_mode", "bucket", "rank"),
+    [
+        ("GB", "remote", "UK_REMOTE", 1),
+        ("GB", "hybrid", "UK_HYBRID", 2),
+        ("GB", "onsite", "UK_ONSITE", 3),
+        ("RO", "remote", "RO_REMOTE", 4),
+        ("AT", "remote", "EU_REMOTE", 5),
+    ],
+)
+def test_preparation_geography_preserves_all_known_rows(
+    country_code: str, work_mode: str, bucket: str, rank: int
+) -> None:
+    resolved = resolve_preparation_geography(
+        country_code=country_code,
+        work_mode=work_mode,
+        current_runtime=False,
+        unknown_uk_mode_allowed=False,
+    )
+    assert (resolved.geography_bucket, resolved.geography_priority_rank) == (bucket, rank)
+
+
+def test_preparation_geography_allows_only_non_authoritative_current_gb_unknown() -> None:
+    resolved = resolve_preparation_geography(
+        country_code="GB",
+        work_mode="unknown",
+        current_runtime=True,
+        unknown_uk_mode_allowed=True,
+    )
+    assert (resolved.geography_bucket, resolved.geography_priority_rank) == (None, None)
+    document = preparation_geography_document(
+        resolved, current_runtime=True, unknown_uk_mode_allowed=True
+    )
+    assert document["application_authority"] is False
+    assert document["release_authority"] is False
+    assert document["submission_authority"] is False
+    assert validate_preparation_geography(
+        document, current_runtime=True, unknown_uk_mode_allowed=True
+    ) == resolved
+
+
+@pytest.mark.parametrize(
+    ("current_runtime", "unknown_uk_mode_allowed"),
+    [(False, False), (False, True), (True, False)],
+)
+def test_preparation_geography_refuses_unknown_mode_without_both_current_gates(
+    current_runtime: bool, unknown_uk_mode_allowed: bool
+) -> None:
+    with pytest.raises(ValueError, match="unknown UK mode requires"):
+        resolve_preparation_geography(
+            country_code="GB",
+            work_mode="unknown",
+            current_runtime=current_runtime,
+            unknown_uk_mode_allowed=unknown_uk_mode_allowed,
+        )
+
+
 def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def test_handoff_release_gate_is_bound_to_schema_profile_and_trust() -> None:
+    schemas = (
+        JAA_HANDOFF_VERSION,
+        CURRENT_RUNTIME_HANDOFF_VERSION,
+        "market-aligner.jaa-handoff.future.v9",
+    )
+    profiles = (
+        STRICT_PROFILE,
+        "base_v1_compatibility",
+        CURRENT_RUNTIME_NON_RELEASE_PROFILE,
+    )
+    trusts = (
+        "unclassified",
+        "synthetic_fixture",
+        INSTALLED_PRODUCTION_TRUST_CLASS,
+    )
+    for schema in schemas:
+        for profile in profiles:
+            for trust in trusts:
+                expected_blocked = (
+                    schema,
+                    profile,
+                    trust,
+                ) != (
+                    JAA_HANDOFF_VERSION,
+                    STRICT_PROFILE,
+                    INSTALLED_PRODUCTION_TRUST_CLASS,
+                )
+                assert handoff_release_blocked(schema, profile, trust) is expected_blocked
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (field, value)
+        for field in ("schema_version", "emission_profile", "delivery_trust_class")
+        for value in (
+            None,
+            1,
+            True,
+            [],
+            {},
+            b"installed_production",
+            type("StringSubclass", (str,), {})("strict_v1"),
+        )
+    ],
+)
+def test_handoff_release_gate_blocks_malformed_metadata(field: str, value: object) -> None:
+    metadata = {
+        "schema_version": JAA_HANDOFF_VERSION,
+        "emission_profile": STRICT_PROFILE,
+        "delivery_trust_class": INSTALLED_PRODUCTION_TRUST_CLASS,
+    }
+    metadata[field] = value
+    assert handoff_release_blocked(**metadata) is True
+
+
+def _synthetic_current_runtime_handoff_payload(*, unknown_mode: bool = False) -> dict:
+    from test_jaa_events_v1 import _handoff
+
+    payload = json.loads(_handoff().exact_bytes)["payload"]
+    location = payload["vacancy"]["location"]
+    if unknown_mode:
+        location["country_code"] = "GB"
+        location["work_mode"] = "unknown"
+        payload["selection"]["geography_bucket"] = None
+        payload["selection"]["geography_priority_rank"] = None
+    preparation_geography = resolve_preparation_geography(
+        country_code=location["country_code"],
+        work_mode=location["work_mode"],
+        current_runtime=True,
+        unknown_uk_mode_allowed=unknown_mode,
+    )
+    if not unknown_mode:
+        assert (
+            payload["selection"]["geography_bucket"],
+            payload["selection"]["geography_priority_rank"],
+        ) == (
+            preparation_geography.geography_bucket,
+            preparation_geography.geography_priority_rank,
+        )
+    payload["selection"]["geographic_preference_policy_sha256"] = "a" * 64
+    payload["preparation_geography"] = preparation_geography_document(
+        preparation_geography,
+        current_runtime=True,
+        unknown_uk_mode_allowed=unknown_mode,
+    )
+    return payload
+
+
+def test_current_runtime_handoff_codec_stays_non_release_after_install_trust() -> None:
+    from test_jaa_events_v1 import _handoff
+
+    legacy = _handoff()
+    assert legacy.with_delivery_trust(INSTALLED_PRODUCTION_TRUST_CLASS).release_blocked is False
+
+    current = encode_current_runtime_handoff_v1(
+        _synthetic_current_runtime_handoff_payload()
+    )
+    assert current.schema_version == CURRENT_RUNTIME_HANDOFF_VERSION
+    assert current.emission_profile == CURRENT_RUNTIME_NON_RELEASE_PROFILE
+    assert current.release_blocked is True
+    assert current.with_delivery_trust(INSTALLED_PRODUCTION_TRUST_CLASS).release_blocked is True
+
+    parsed = parse_current_runtime_handoff_v1(current.exact_bytes)
+    assert parsed.emission_profile == CURRENT_RUNTIME_NON_RELEASE_PROFILE
+    assert parsed.release_blocked is True
+    assert parsed.with_delivery_trust(INSTALLED_PRODUCTION_TRUST_CLASS).release_blocked is True
+
+    unknown = encode_current_runtime_handoff_v1(
+        _synthetic_current_runtime_handoff_payload(unknown_mode=True)
+    )
+    unknown_payload = json.loads(unknown.exact_bytes)["payload"]
+    assert unknown_payload["selection"]["geography_bucket"] is None
+    assert unknown_payload["selection"]["geography_priority_rank"] is None
+    unknown_parsed = parse_current_runtime_handoff_v1(unknown.exact_bytes)
+    assert unknown_parsed.payload["selection"]["geography_bucket"] is None
+    assert unknown_parsed.payload["selection"]["geography_priority_rank"] is None
+
+
+def test_current_runtime_handoff_is_consumed_by_jaa_without_release_profile() -> None:
+    from career_automation.market_aligner_handoff import (
+        ParsedHandoff as JAAPparsedHandoff,
+        parse_handoff as parse_legacy_handoff,
+        parse_handoff_for_runtime,
+    )
+
+    from market_aligner.applications.handoff import parse_current_runtime_handoff_v1
+
+    current = encode_current_runtime_handoff_v1(
+        _synthetic_current_runtime_handoff_payload(unknown_mode=True)
+    )
+    consumed = parse_handoff_for_runtime(
+        current.exact_bytes,
+        current_runtime=True,
+        require_strict_profile=False,
+        legacy_parser=parse_legacy_handoff,
+        current_parser=parse_current_runtime_handoff_v1,
+        make_parsed=JAAPparsedHandoff,
+    )
+    assert consumed.original_bytes == current.exact_bytes
+    assert consumed.root_sha256 == current.root_sha256
+    assert consumed.application_id == current.application_id
+    assert consumed.emission_profile == CURRENT_RUNTIME_NON_RELEASE_PROFILE
+    assert consumed.strict_profile is False
+
+    from test_jaa_events_v1 import _handoff
+
+    legacy = _handoff()
+    legacy_consumed = parse_handoff_for_runtime(
+        legacy.exact_bytes,
+        current_runtime=False,
+        require_strict_profile=False,
+        legacy_parser=parse_legacy_handoff,
+        current_parser=parse_current_runtime_handoff_v1,
+        make_parsed=JAAPparsedHandoff,
+    )
+    assert legacy_consumed.original_bytes == legacy.exact_bytes
+    assert legacy_consumed.application_id == legacy.application_id
+    assert legacy_consumed.strict_profile is True
+
+
+def test_handoff_runtime_dispatch_preserves_legacy_and_selects_current_codec() -> None:
+    from test_jaa_events_v1 import _handoff
+
+    legacy_payload = json.loads(_handoff().exact_bytes)["payload"]
+    legacy = encode_handoff_for_runtime(legacy_payload)
+    assert legacy.exact_bytes == encode_handoff_v1(legacy_payload).exact_bytes
+    assert legacy.schema_version == JAA_HANDOFF_VERSION
+    assert legacy.emission_profile == STRICT_PROFILE
+
+    current_payload = _synthetic_current_runtime_handoff_payload(unknown_mode=True)
+    preparation_geography = current_payload.pop("preparation_geography")
+    current = encode_handoff_for_runtime(
+        current_payload,
+        current_runtime=True,
+        preparation_geography=preparation_geography,
+    )
+    assert current.schema_version == CURRENT_RUNTIME_HANDOFF_VERSION
+    assert current.emission_profile == CURRENT_RUNTIME_NON_RELEASE_PROFILE
+    assert current.release_blocked is True
+    assert parse_current_runtime_handoff_v1(current.exact_bytes).payload[
+        "selection"
+    ]["geography_priority_rank"] is None
+    assert "preparation_geography" not in current_payload
+
+    with pytest.raises(ContractValidationError, match="invalid handoff runtime dispatch"):
+        encode_handoff_for_runtime(legacy_payload, current_runtime=1)
+    with pytest.raises(ContractValidationError):
+        encode_handoff_for_runtime(current_payload)
+    with pytest.raises(
+        ContractValidationError, match="invalid handoff runtime dispatch"
+    ):
+        encode_handoff_for_runtime(
+            legacy_payload, preparation_geography=preparation_geography
+        )
+
+
+@pytest.mark.parametrize("rank", [True, 1.0])
+def test_current_runtime_handoff_codec_rejects_coercive_geography_rank(rank) -> None:
+    payload = _synthetic_current_runtime_handoff_payload()
+    payload["selection"]["geography_priority_rank"] = rank
+    with pytest.raises(ContractValidationError, match="selection geography"):
+        encode_current_runtime_handoff_v1(payload)
+
+    valid = encode_current_runtime_handoff_v1(
+        _synthetic_current_runtime_handoff_payload()
+    )
+    envelope = json.loads(valid.exact_bytes)
+    envelope["payload"]["selection"]["geography_priority_rank"] = rank
+    envelope["payload_sha256"] = _sha(
+        canonical_json_bytes(envelope["payload"])
+    )
+    with pytest.raises(ContractValidationError, match="selection geography"):
+        parse_current_runtime_handoff_v1(canonical_json_bytes(envelope))
 
 
 def test_handoff_issuance_uses_latest_durable_input_and_not_evaluation_clock() -> None:
@@ -121,6 +466,102 @@ def _private_tree(root: Path) -> None:
         os.chmod(path, 0o700 if path.is_dir() else 0o600)
 
 
+def _promote_fixture_assessment(store, *, profile_id, job_key, track, source_sha):
+    with store.connection() as connection:
+        current = connection.execute(
+            "SELECT * FROM assessments WHERE profile_id=? AND job_key=?",
+            (profile_id, job_key),
+        ).fetchone()
+    assert current is not None
+    authority_sha = "c" * 64
+    config_sha = "d" * 64
+    processing_receipt_sha = "e" * 64
+    processing_result_sha = "f" * 64
+    policy = {"name": "fixture-promotion", "version": 1}
+    policy_sha = _sha(canonical_json_bytes(policy))
+    binding = {
+        "evidence_authority_sha256": authority_sha,
+        "processing_config_sha256": config_sha,
+        "processing_receipt_sha256": processing_receipt_sha,
+        "processing_result_sha256": processing_result_sha,
+        "source_content_sha256": source_sha,
+        "track": track,
+    }
+    promotion_body = {
+        "binding": binding,
+        "binding_sha256": _sha(canonical_json_bytes(binding)),
+        "decision": "pass",
+        "job_key": job_key,
+        "policy": policy,
+        "policy_sha256": policy_sha,
+        "profile_id": profile_id,
+        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+        "score_payload_hash": current["score_payload_hash"],
+    }
+    promotion_sha = _sha(canonical_json_bytes(promotion_body))
+    promotion_bytes = canonical_json_bytes(
+        {**promotion_body, "receipt_sha256": promotion_sha}
+    )
+    store.promote_processing_gate(
+        profile_id=profile_id,
+        job_key=job_key,
+        score={
+            "fit": current["fit"],
+            "opportunity": current["opportunity"],
+            "final": current["final_score"],
+            "fit_status": current["fit_status"],
+        },
+        policy_hash=policy_sha,
+        processing_receipt_sha256=processing_receipt_sha,
+        processing_result_sha256=processing_result_sha,
+        source_content_sha256=source_sha,
+        authority_sha256=authority_sha,
+        processing_config_sha256=config_sha,
+        track=track,
+        receipt_bytes=promotion_bytes,
+        receipt_sha256=promotion_sha,
+    )
+    return promotion_sha
+
+
+def _canonical_research_plan(*, source, raw_text, profile_id, job_key, company, title, url, source_sha, snapshot_sha, promotion_sha):
+    start = source.body.index(raw_text.encode())
+    return PublicResearchPlan(
+        profile_id,
+        job_key,
+        company,
+        title,
+        (
+            PlannedCitation(
+                "official_job",
+                url,
+                "Canonical collector vacancy",
+                _sha(source.body),
+                url,
+                "canonical_vacancy",
+            ),
+        ),
+        (
+            PlannedClaim(
+                raw_text,
+                ("official_job",),
+                1.0,
+                (
+                    PlannedSupport(
+                        "official_job",
+                        f"bytes:{start}-{start + len(raw_text.encode())}",
+                        raw_text,
+                    ),
+                ),
+            ),
+        ),
+        source_sha,
+        snapshot_sha,
+        promotion_sha,
+        (),
+    )
+
+
 def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
     raw_text = "Build agentic software systems."
     database_relative = Path("scraper/data_overnight/jobs.sqlite3")
@@ -174,99 +615,18 @@ def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
     )
     apply_gate(store, PROFILE_ID, JOB_KEY)
     _job, source_sha, _ = database.fetched_posting(JOB_KEY)
-    with store.connection() as connection:
-        current = connection.execute(
-            "SELECT * FROM assessments WHERE profile_id=? AND job_key=?",
-            (PROFILE_ID, JOB_KEY),
-        ).fetchone()
-    assert current is not None
-    authority_sha = "c" * 64
-    config_sha = "d" * 64
-    processing_receipt_sha = "e" * 64
-    processing_result_sha = "f" * 64
-    policy = {"name": "fixture-promotion", "version": 1}
-    policy_sha = _sha(canonical_json_bytes(policy))
-    binding = {
-        "evidence_authority_sha256": authority_sha,
-        "processing_config_sha256": config_sha,
-        "processing_receipt_sha256": processing_receipt_sha,
-        "processing_result_sha256": processing_result_sha,
-        "source_content_sha256": source_sha,
-        "track": "track",
-    }
-    promotion_body = {
-        "binding": binding,
-        "binding_sha256": _sha(canonical_json_bytes(binding)),
-        "decision": "pass",
-        "job_key": JOB_KEY,
-        "policy": policy,
-        "policy_sha256": policy_sha,
-        "profile_id": PROFILE_ID,
-        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
-        "score_payload_hash": current["score_payload_hash"],
-    }
-    promotion_sha = _sha(canonical_json_bytes(promotion_body))
-    promotion_bytes = canonical_json_bytes(
-        {**promotion_body, "receipt_sha256": promotion_sha}
-    )
-    store.promote_processing_gate(
-        profile_id=PROFILE_ID,
-        job_key=JOB_KEY,
-        score={
-            "fit": current["fit"],
-            "opportunity": current["opportunity"],
-            "final": current["final_score"],
-            "fit_status": current["fit_status"],
-        },
-        policy_hash=policy_sha,
-        processing_receipt_sha256=processing_receipt_sha,
-        processing_result_sha256=processing_result_sha,
-        source_content_sha256=source_sha,
-        authority_sha256=authority_sha,
-        processing_config_sha256=config_sha,
-        track="track",
-        receipt_bytes=promotion_bytes,
-        receipt_sha256=promotion_sha,
-    )
+    promotion_sha = _promote_fixture_assessment(
+        store, profile_id=PROFILE_ID, job_key=JOB_KEY, track="track",
+        source_sha=source_sha)
     task = store.claim_research("initial-preview", _preview_without_lease=True)
     assert task is not None
     initial_loader = CanonicalCollectorVacancyLoader(database.path)
     initial_source = initial_loader(task)
-    start = initial_source.body.index(raw_text.encode())
-    plan = PublicResearchPlan(
-        PROFILE_ID,
-        JOB_KEY,
-        "Cogna",
-        "Software Engineer",
-        (
-            PlannedCitation(
-                "official_job",
-                url,
-                "Canonical collector vacancy",
-                _sha(initial_source.body),
-                url,
-                "canonical_vacancy",
-            ),
-        ),
-        (
-            PlannedClaim(
-                raw_text,
-                ("official_job",),
-                1.0,
-                (
-                    PlannedSupport(
-                        "official_job",
-                        f"bytes:{start}-{start + len(raw_text.encode())}",
-                        raw_text,
-                    ),
-                ),
-            ),
-        ),
-        source_sha,
-        task.vacancy_snapshot_sha256,
-        promotion_sha,
-        (),
-    )
+    plan = _canonical_research_plan(
+        source=initial_source, raw_text=raw_text, profile_id=PROFILE_ID,
+        job_key=JOB_KEY, company="Cogna", title="Software Engineer", url=url,
+        source_sha=source_sha, snapshot_sha=task.vacancy_snapshot_sha256,
+        promotion_sha=promotion_sha)
     repository = tmp_path / "repo"
     repository.mkdir()
     initial_provider = SourceBoundResearchProvider(
@@ -332,41 +692,11 @@ def _real_refresh_archive(tmp_path: Path, *, url: str, accessed_at: str):
         data_home=tmp_path, collection_config_path=config
     )
     refresh_source = refresh_loader(refresh_task)
-    start = refresh_source.body.index(raw_text.encode())
-    refresh_plan = PublicResearchPlan(
-        PROFILE_ID,
-        JOB_KEY,
-        "Cogna",
-        "Software Engineer",
-        (
-            PlannedCitation(
-                "official_job",
-                url,
-                "Canonical collector vacancy",
-                _sha(refresh_source.body),
-                url,
-                "canonical_vacancy",
-            ),
-        ),
-        (
-            PlannedClaim(
-                raw_text,
-                ("official_job",),
-                1.0,
-                (
-                    PlannedSupport(
-                        "official_job",
-                        f"bytes:{start}-{start + len(raw_text.encode())}",
-                        raw_text,
-                    ),
-                ),
-            ),
-        ),
-        source_sha,
-        refresh_task.vacancy_snapshot_sha256,
-        promotion_sha,
-        (),
-    )
+    refresh_plan = _canonical_research_plan(
+        source=refresh_source, raw_text=raw_text, profile_id=PROFILE_ID,
+        job_key=JOB_KEY, company="Cogna", title="Software Engineer", url=url,
+        source_sha=source_sha, snapshot_sha=refresh_task.vacancy_snapshot_sha256,
+        promotion_sha=promotion_sha)
     refresh_provider = SourceBoundResearchProvider(
         plan=refresh_plan,
         repository_root=repository,
@@ -645,6 +975,260 @@ def test_workable_flat_and_tenant_routes(
 def test_workable_rejects_ambiguous_identity(url: str) -> None:
     with pytest.raises(ProductionHandoffError):
         _workable_identity(url)
+
+
+@pytest.mark.parametrize(
+    ("url", "source_job_key", "expected"),
+    [
+        (
+            "https://job-boards.eu.greenhouse.io/winton/jobs/4986765101",
+            "greenhouse:winton:4986765101",
+            ("winton", "4986765101"),
+        ),
+        (
+            "https://job-boards.greenhouse.io/example/jobs/12345",
+            "greenhouse:example:12345",
+            ("example", "12345"),
+        ),
+        (
+            "HTTPS://JOB-BOARDS.GREENHOUSE.IO:443/b_1-X/jobs/42/",
+            "greenhouse:b_1-X:42",
+            ("b_1-X", "42"),
+        ),
+        (
+            "https://Job-Boards.Eu.Greenhouse.Io/winton/jobs/9",
+            "greenhouse:winton:9",
+            ("winton", "9"),
+        ),
+    ],
+)
+def test_greenhouse_identity_accepts_canonical_routes(
+    url: str, source_job_key: str, expected: tuple[str, str]
+) -> None:
+    assert _greenhouse_identity(url, source_job_key) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "source_job_key"),
+    [
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:other:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:8",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7:extra",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "workable:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "GREENHOUSE:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            " greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:Acme:7",
+        ),
+        (
+            "http://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "//job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io.evil.test/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://evil.job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://user@job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:8443/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:0443/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:+443/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:80/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io:443x/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7?x=1",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7#frag",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7//",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io//acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme//jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/./jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/../acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/JOBS/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7/confirmation",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/0",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/07",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/١٢٣",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/１２",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/-bad/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/_bad/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/a.b/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme%2Fx/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/a%63me/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/%37",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acmé/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7\n",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7\r",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7\x00",
+            "greenhouse:acme:7",
+        ),
+        (
+            "\thttps://job-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme\\jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-bоards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouſe.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://ｊob-boards.greenhouse.io/acme/jobs/7",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7?",
+            "greenhouse:acme:7",
+        ),
+        (
+            "https://job-boards.greenhouse.io/acme/jobs/7#",
+            "greenhouse:acme:7",
+        ),
+    ],
+)
+def test_greenhouse_identity_rejects_noncanonical_routes(
+    url: str, source_job_key: str
+) -> None:
+    with pytest.raises(ValueError, match="^official_greenhouse_route_invalid$"):
+        _greenhouse_identity(url, source_job_key)
+
+
+def test_greenhouse_identity_rejects_nonexact_string_types() -> None:
+    class StringSubclass(str):
+        pass
+
+    url = "https://job-boards.greenhouse.io/acme/jobs/7"
+    source_job_key = "greenhouse:acme:7"
+    for invalid_url in (None, 123, url.encode(), [url], (url,), True):
+        with pytest.raises(ValueError, match="^official_greenhouse_route_invalid$"):
+            _greenhouse_identity(invalid_url, source_job_key)
+    with pytest.raises(ValueError, match="^official_greenhouse_route_invalid$"):
+        _greenhouse_identity(StringSubclass(url), source_job_key)
+    with pytest.raises(ValueError, match="^official_greenhouse_route_invalid$"):
+        _greenhouse_identity(url, StringSubclass(source_job_key))
 
 
 def test_v2_revalidates_flat_route_and_exact_support(tmp_path: Path) -> None:
@@ -975,3 +1559,330 @@ def test_producer_identity_requires_exact_clean_executing_head(
     (repository / "untracked-authority.txt").write_text("not allowed")
     with pytest.raises(ProductionHandoffError, match="producer_dirty"):
         _git_commit(repository)
+
+
+def test_handoff_eligibility_retains_verified_promotion_and_rejects_drift(tmp_path):
+    import sqlite3
+    from test_process_one import EligibilityFixture, EligibilityEndToEndTests
+    from market_aligner.applications.production_handoff import _require_detailed_eligibility
+
+    fixture = EligibilityFixture(tmp_path)
+    harness = EligibilityEndToEndTests()
+    harness.fx = fixture
+    candidate = fixture.candidate_facts()
+    candidate["authorised_jurisdictions"]["value"][0]["value"] = "NL"
+    candidate["current_residence"]["value"] = "NL"
+    candidate["maximum_years_required"]["value"] = 5.0
+    candidate["requires_sponsorship"]["value"] = False
+    harness.run_one(fixture, candidate_overrides=candidate)
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        raw, inputs = harness._handoff_eligibility_inputs(connection)
+        assert _require_detailed_eligibility(connection, **inputs) == raw
+    _promote_fixture_assessment(
+        AssessmentStore(fixture.assessments_path), profile_id=inputs["profile_id"],
+        job_key=fixture.job.key, track="backend", source_sha=fixture.content_hash)
+    from market_aligner.processing import ProcessingRefused
+    with pytest.raises(ProcessingRefused):
+        harness.run_one(fixture, operation_id="op-eligible-after-promotion",
+                        candidate_overrides=candidate)
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        assert _require_detailed_eligibility(connection, **inputs) == raw
+        for mutation in (
+            "UPDATE assessment_events SET payload_json='{}' WHERE event_type='processing_assessment_promoted'",
+            "UPDATE assessments SET score_payload_hash='changed'",
+            "UPDATE assessment_promotions SET receipt_bytes=x'7b7d'",
+            "UPDATE assessments SET opportunity_decision='reject'",
+            "UPDATE assessment_promotions SET processing_result_sha256='changed'",
+            "UPDATE assessments SET state='employer_researched'",
+            "UPDATE vacancy.postings SET raw_text='changed'",
+        ):
+            connection.execute("SAVEPOINT mutation")
+            connection.execute(mutation)
+            with pytest.raises(ProductionHandoffError):
+                _require_detailed_eligibility(connection, **inputs)
+            connection.execute("ROLLBACK TO mutation")
+            connection.execute("RELEASE mutation")
+
+
+def _real_processing_enrichment(tmp_path, *, fetched_at="2026-08-26T00:00:00Z",
+                                location="London, United Kingdom", jurisdiction="GB"):
+    import sqlite3
+    from test_process_one import EligibilityFixture, EligibilityEndToEndTests
+    from market_aligner.llm.contracts import SemanticVacancyExtraction, EvidenceAlignment, LLMReceipt
+    from market_aligner.service.processing import ProcessingService
+    from market_aligner.service.api import MarketAlignerService
+    from market_aligner.profiler.store import ProfileStore
+    from market_aligner.applications.production_handoff import _require_detailed_eligibility
+
+    from market_aligner.domain.contracts import JobUrl
+    fixture = EligibilityFixture(tmp_path, job=JobUrl("workable", "cogna:847CFBC5F4", FLAT_URL),
+        fetched_at=fetched_at, raw_text=f"Build software in {location}. At least one year experience.", extraction_overrides={
+        "title": "Software Engineer", "seniority": "junior",
+        "location": location, "remote_policy": "remote",
+        "description": "Build software. At least one year experience.",
+        "required_qualifications": ["At least one year experience."],
+        "work_authorisation": [jurisdiction],
+    })
+    harness = EligibilityEndToEndTests()
+    harness.fx = fixture
+    candidate = fixture.candidate_facts()
+    candidate["authorised_jurisdictions"]["value"][0]["value"] = jurisdiction
+    candidate["current_residence"]["value"] = jurisdiction
+    candidate["maximum_years_required"]["value"] = 5.0
+    candidate["requires_sponsorship"]["value"] = False
+    vacancy_facts = fixture.vacancy_facts()
+    vacancy_facts["work_jurisdiction"]["value"] = jurisdiction
+    vacancy_facts["required_residence"]["value"] = jurisdiction
+    harness.run_one(fixture, candidate_overrides=candidate, vacancy_overrides=vacancy_facts)
+
+    class Worker:
+        def extract_vacancy(self, context):
+            value = SemanticVacancyExtraction(**{
+                key: tuple(item) if isinstance(item, list) else item
+                for key, item in fixture.extraction_output.items()
+            })
+            return value, LLMReceipt.bind(
+                receipt_id="rc-extr", task="semantic_vacancy_extraction",
+                model="fixture-model", prompt_version="pv-1", inputs=context,
+                output=value, created_at="2026-08-26T00:30:00Z")
+
+        def align_evidence(self, context):
+            value = EvidenceAlignment(
+                profile_id=fixture.fit_parsed["profile_id"], profile_version="gen-1",
+                job_key=fixture.job.key, matches=(), missing_requirements=(),
+                technical_alignment=0.8, evidence_match=0.7, confidence=0.75, unknowns=())
+            return value, LLMReceipt.bind(
+                receipt_id="rc-align", task="evidence_alignment", model="fixture-model",
+                prompt_version="pv-1", inputs=context, output=value,
+                created_at="2026-08-26T00:31:00Z")
+
+    config = tmp_path / "pipeline.yaml"
+    config.write_text("io:\n  database: state/vacancies.sqlite3\nprocessing:\n  shard_size: 10\n  lease_seconds: 60\n")
+    run = ProcessingService(fixture.root, Worker()).process(
+        config, profile_id=fixture.fit_parsed["profile_id"], track="backend",
+        worker_id="enrichment-worker", job_key=fixture.job.key)
+    assert run["included"] == 1
+    service = MarketAlignerService(fixture.root)
+    service.promote_processing(
+        profile_id=fixture.fit_parsed["profile_id"], track="backend",
+        job_key=fixture.job.key, processing_receipt_path=Path(run["receipt_path"]))
+    from market_aligner.applications.assessment_promotion import AssessmentPromotionError
+    with pytest.raises(AssessmentPromotionError, match="scope"):
+        service.promote_processing(
+            profile_id=fixture.fit_parsed["profile_id"], track="backend",
+            job_key="board:other", processing_receipt_path=Path(run["receipt_path"]))
+    profile, _ = ProfileStore(fixture.root).load(fixture.fit_parsed["profile_id"])
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        raw, inputs = harness._handoff_eligibility_inputs(connection)
+        assert _require_detailed_eligibility(connection, **inputs, current_profile=profile) == raw
+        for mutation in (
+            "UPDATE assessments SET score_payload_json='{}'",
+            "UPDATE vacancy.processing_jobs SET result_json='{}'",
+            "UPDATE assessment_promotions SET processing_result_sha256='changed'",
+        ):
+            connection.execute("SAVEPOINT mutation")
+            connection.execute(mutation)
+            with pytest.raises(ProductionHandoffError):
+                _require_detailed_eligibility(connection, **inputs, current_profile=profile)
+            connection.execute("ROLLBACK TO mutation")
+            connection.execute("RELEASE mutation")
+
+    task = service.assessments.claim_research("enrichment-preview", _preview_without_lease=True)
+    assert task is not None
+    loader = CanonicalCollectorVacancyLoader(fixture.vacancy_db)
+    source = loader(task)
+    promotion = service.assessments.processing_promotion(profile.profile_id, fixture.job.key)
+    plan = _canonical_research_plan(
+        source=source, raw_text=fixture.raw_text, profile_id=profile.profile_id,
+        job_key=fixture.job.key, company=fixture.extraction_output["company"],
+        title=fixture.extraction_output["title"], url=fixture.job.url,
+        source_sha=fixture.content_hash, snapshot_sha=task.vacancy_snapshot_sha256,
+        promotion_sha=promotion["receipt_sha256"])
+    provider = SourceBoundResearchProvider(
+        plan=plan, repository_root=Path(__file__).resolve().parents[1],
+        archive_root=fixture.root / "state/public-employer-research-v2",
+        canonical_vacancy_loader=loader)
+    research = ResearchWorker(service.assessments, provider, "enrichment-research").run_one()
+    assert research.status == "completed", research.error
+    with sqlite3.connect(fixture.assessments_path) as connection:
+        connection.execute("ATTACH DATABASE ? AS vacancy", (str(fixture.vacancy_db),))
+        assert connection.execute("SELECT state FROM assessments").fetchone()[0] == "employer_researched"
+        assert _require_detailed_eligibility(connection, **inputs, current_profile=profile) == raw
+    return fixture, service, config, profile
+
+
+@pytest.mark.parametrize("location,jurisdiction", [
+    ("London, United Kingdom", "GB"),
+    ("Berlin, Germany, Europe", "DE"),
+])
+def test_real_processing_opportunity_enrichment_retains_eligibility(
+    tmp_path, location, jurisdiction
+):
+    _real_processing_enrichment(tmp_path, location=location, jurisdiction=jurisdiction)
+
+
+def test_published_handoff_registry_is_exact_replayable_and_immutable(tmp_path):
+    import sqlite3
+    from test_jaa_events_v1 import _handoff
+    from market_aligner.research.store import AssessmentStore, _promotion_has_published_handoff
+    from market_aligner.applications.canonical import ContractValidationError
+
+    handoff = _handoff()
+    basis = {
+        "schema_version": "market-aligner.production-handoff-execution.v2",
+        "application_id": handoff.application_id,
+        "handoff_root_sha256": handoff.root_sha256,
+        "release_token_issued": False,
+        "submission_authority": False,
+    }
+    def exact(value):
+        return production_module._canonical({
+            **value, "semantic_receipt_sha256": _sha(production_module._canonical(value))})
+    receipt = exact(basis)
+    store = AssessmentStore(tmp_path / "state/assessments.sqlite3")
+    store._record_published_handoff(handoff.exact_bytes, receipt)
+    reopened = AssessmentStore(store.path)
+    reopened._record_published_handoff(handoff.exact_bytes, receipt)
+    current_handoff = encode_current_runtime_handoff_v1(
+        _synthetic_current_runtime_handoff_payload(unknown_mode=True)
+    )
+    current_basis = {
+        **basis,
+        "schema_version": "market-aligner.current-runtime-handoff-execution.v1",
+        "application_id": current_handoff.application_id,
+        "handoff_root_sha256": current_handoff.root_sha256,
+        "environment": "current_runtime",
+        "trust_root_id": "market-aligner-current-runtime-non-release-v1",
+        "freshness_provenance": "local_system_utc",
+        "release_authority": False,
+    }
+    current_receipt = exact(current_basis)
+    reopened._record_published_handoff(
+        current_handoff.exact_bytes,
+        current_receipt,
+        current_runtime=True,
+    )
+    reopened._record_published_handoff(
+        current_handoff.exact_bytes,
+        current_receipt,
+        current_runtime=True,
+    )
+    with reopened.connection() as connection:
+        rows = connection.execute("SELECT * FROM published_application_handoffs").fetchall()
+        assert len(rows) == 2
+        legacy_row = next(row for row in rows if bytes(row["execution_receipt_bytes"]) == receipt)
+        current_row = next(row for row in rows if bytes(row["execution_receipt_bytes"]) == current_receipt)
+        assert bytes(legacy_row["handoff_exact_bytes"]) == handoff.exact_bytes
+        assert bytes(current_row["handoff_exact_bytes"]) == current_handoff.exact_bytes
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute("DELETE FROM published_application_handoffs")
+    for changes in ({"application_id": "app_" + "a" * 64},
+                    {"handoff_root_sha256": "a" * 64},
+                    {"submission_authority": True}):
+        with pytest.raises(ContractValidationError, match="binding differs"):
+            reopened._record_published_handoff(handoff.exact_bytes, exact({**basis, **changes}))
+    with pytest.raises(ValueError, match="published handoff mode differs"):
+        reopened._record_published_handoff(current_handoff.exact_bytes, current_receipt)
+    with pytest.raises(ValueError, match="published handoff mode differs"):
+        reopened._record_published_handoff(
+            handoff.exact_bytes,
+            receipt,
+            current_runtime=True,
+        )
+    current_binding_invalid = (
+        {"application_id": "app_" + "a" * 64},
+        {"handoff_root_sha256": "a" * 64},
+    )
+    for changes in current_binding_invalid:
+        with pytest.raises(ContractValidationError, match="binding differs"):
+            reopened._record_published_handoff(
+                current_handoff.exact_bytes,
+                exact({**current_basis, **changes}),
+                current_runtime=True,
+            )
+    current_mode_invalid = (
+        {"environment": "production"},
+        {"trust_root_id": "market-aligner-production-v1"},
+        {"freshness_provenance": "authenticated_production"},
+        {"release_authority": True},
+        {"release_token_issued": True},
+        {"submission_authority": True},
+    )
+    for changes in current_mode_invalid:
+        with pytest.raises(ValueError, match="published handoff mode differs"):
+            reopened._record_published_handoff(
+                current_handoff.exact_bytes,
+                exact({**current_basis, **changes}),
+                current_runtime=True,
+            )
+    altered_digest = json.loads(current_receipt)
+    altered_digest["unrelated"] = True
+    with pytest.raises(ContractValidationError, match="binding differs"):
+        reopened._record_published_handoff(
+            current_handoff.exact_bytes,
+            canonical_json_bytes(altered_digest),
+            current_runtime=True,
+        )
+    with reopened.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM published_application_handoffs").fetchone()[0] == 2
+
+    legacy_only = AssessmentStore(tmp_path / "state/legacy-promotion.sqlite3")
+    legacy_only._record_published_handoff(handoff.exact_bytes, receipt)
+    with legacy_only.connection() as connection:
+        assert _promotion_has_published_handoff(
+            connection,
+            handoff.payload["profile_id"],
+            handoff.payload["job_key"],
+        )
+        assert not _promotion_has_published_handoff(
+            connection,
+            handoff.payload["profile_id"],
+            handoff.payload["job_key"] + ":unpublished",
+        )
+
+    current_only = AssessmentStore(tmp_path / "state/current-promotion.sqlite3")
+    current_only._record_published_handoff(
+        current_handoff.exact_bytes,
+        current_receipt,
+        current_runtime=True,
+    )
+    with current_only.connection() as connection:
+        assert _promotion_has_published_handoff(
+            connection,
+            current_handoff.payload["profile_id"],
+            current_handoff.payload["job_key"],
+        )
+        assert not _promotion_has_published_handoff(
+            connection,
+            current_handoff.payload["profile_id"],
+            current_handoff.payload["job_key"] + ":unpublished",
+        )
+
+
+@pytest.mark.parametrize("exact_capture", [False, True])
+def test_producer_reopens_collector_source_representation(tmp_path, exact_capture):
+    import base64
+    from market_aligner.domain.contracts import JobUrl, RawPosting
+    from market_aligner.state.vacancies import JobDatabase
+    from market_aligner.applications.production_handoff import _retained_raw_listing
+
+    jobs = JobDatabase(tmp_path / "state" / "vacancies.sqlite3")
+    job = JobUrl("greenhouse", "synthetic:representation", "https://example.test/job")
+    jobs.upsert_discovered(job)
+    exact = b"<html><body>Exact original vacancy</body></html>"
+    row = RawPosting(
+        board=job.board, job_id=job.job_id, url=job.url,
+        fetched_at="2026-09-13T15:00:00Z", raw_text="Extracted vacancy", raw_json={"title": "Engineer"},
+        public_content_base64=base64.b64encode(exact).decode() if exact_capture else None,
+    )
+    jobs.store_raw(row)
+    with jobs.connect() as connection:
+        connection.row_factory = __import__("sqlite3").Row
+        posting = connection.execute("SELECT * FROM postings WHERE key=?", (job.key,)).fetchone()
+    expected = exact if exact_capture else b'Extracted vacancy{"title": "Engineer"}'
+    assert _retained_raw_listing(jobs, job.key, posting) == expected
+    with pytest.raises(ProductionHandoffError, match="vacancy_hash"):
+        _retained_raw_listing(jobs, job.key, {**dict(posting), "content_hash": "0" * 64})

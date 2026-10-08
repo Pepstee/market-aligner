@@ -7,10 +7,11 @@ import hashlib
 import json
 import os
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from importlib.resources import files
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,12 +21,15 @@ sys.path.insert(0, str(SOURCE_ROOT))
 sys.path.insert(0, str(JAA_ROOT))
 
 from career_automation.current_time import configured_hmac_current_time_witness
+from career_automation import production_preparation_runner
 from career_automation.handoff_admission import (
     ADMISSION_KIND_V1,
     HandoffAdmissionError,
     HandoffAdmissionStore,
     ProtectedLocalOutbox,
     ResolvedReference,
+    _parse_current_runtime_handoff,
+    _verified_market_decision_references,
 )
 from career_automation.market_aligner_handoff import (
     COMPATIBILITY_PROFILE,
@@ -38,7 +42,12 @@ from career_automation.production_handoff_admission_runner import (
     _promotion_receipt_semantic_identity,
 )
 
-from market_aligner.applications.handoff import encode_handoff_v1
+from market_aligner.applications.handoff import (
+    encode_current_runtime_handoff_v1,
+    encode_handoff_v1,
+    preparation_geography_document,
+    resolve_preparation_geography,
+)
 from market_aligner.applications.producer import (
     HandoffProducerError,
     HandoffReference,
@@ -255,8 +264,251 @@ def test_recovered_market_vector_is_parsed_and_atomically_admitted(tmp_path) -> 
         store.reference_sha256(admission.application_id, "candidate.claims")
 
 
+def test_current_runtime_admission_is_persistent_nonrelease_and_revalidated(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
+    document = json.loads(fixture_bytes)
+    legacy_bytes = base64.b64decode(
+        document["handoff"]["canonical_base64"], validate=True
+    )
+    legacy = parse_handoff(legacy_bytes)
+    payload = json.loads(json.dumps(legacy.payload))
+    location = payload["vacancy"]["location"]
+    preparation_geography = resolve_preparation_geography(
+        country_code=location["country_code"],
+        work_mode=location["work_mode"],
+        current_runtime=True,
+        unknown_uk_mode_allowed=False,
+    )
+    payload["selection"]["geographic_preference_policy_sha256"] = "a" * 64
+    payload["preparation_geography"] = preparation_geography_document(
+        preparation_geography,
+        current_runtime=True,
+        unknown_uk_mode_allowed=False,
+    )
+    current = encode_current_runtime_handoff_v1(payload)
+    current_root = "market-aligner-current-runtime-non-release-v1"
+    source_record_sha256 = hashlib.sha256(fixture_bytes).hexdigest()
+    allowed_commits = [current.payload["producer"]["commit_sha"]]
+
+    class ContextAuthenticator:
+        authenticator_identity_sha256 = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "kind": "protected-local-outbox-context",
+                    "allowed_producer_commits": allowed_commits,
+                    "source_record_sha256": source_record_sha256,
+                    "trust_root_id": current_root,
+                }
+            )
+        ).hexdigest()
+
+        def authenticate(self, *, context_bytes, handoff_bytes, evaluated_at):
+            context = json.loads(context_bytes)
+            assert canonical_json_bytes(context) == context_bytes
+            assert context["environment"] == "current_runtime"
+            assert context["trust_root_id"] == current_root
+            assert context["handoff_root_sha256"] == hashlib.sha256(
+                handoff_bytes
+            ).hexdigest()
+
+    class CurrentResolver:
+        resolver_identity_sha256 = hashlib.sha256(
+            b"current-runtime-reference-resolver"
+        ).hexdigest()
+
+        def __init__(self):
+            self._entries = {}
+            for row in document["reference_bundle"]["value"]["entries"]:
+                metadata = dict(row["metadata"])
+                metadata["trust_root_id"] = current_root
+                if metadata["valid_until"] is not None:
+                    metadata["valid_until"] = "2099-01-01T00:00:00Z"
+                self._entries[metadata["reference_key"]] = (
+                    base64.b64decode(row["object_base64"], validate=True),
+                    canonical_json_bytes(metadata),
+                )
+
+        def resolve(self, request):
+            exact, metadata = self._entries[request.spec.reference_key]
+            assert hashlib.sha256(exact).hexdigest() == request.sha256
+            return ResolvedReference(exact, metadata)
+
+        def authenticate(
+            self, *, metadata_bytes, exact_bytes, admission_context_bytes, evaluated_at
+        ):
+            metadata = json.loads(metadata_bytes)
+            expected_exact, expected_metadata = self._entries[
+                metadata["reference_key"]
+            ]
+            assert exact_bytes == expected_exact
+            assert metadata_bytes == expected_metadata
+            assert metadata["trust_root_id"] == current_root
+            context = json.loads(admission_context_bytes)
+            assert context["trust_root_id"] == current_root
+
+    context_body = {
+        "environment": "current_runtime",
+        "handoff_root_sha256": current.root_sha256,
+        "issued_at": current.payload["created_at"],
+        "producer_commit_sha": current.payload["producer"]["commit_sha"],
+        "producer_product": "market-aligner",
+        "source_record_sha256": source_record_sha256,
+        "trust_mode": "current_runtime_non_release",
+        "trust_root_id": current_root,
+    }
+    context = canonical_json_bytes(
+        {
+            **context_body,
+            "trust_proof_sha256": hashlib.sha256(
+                canonical_json_bytes(context_body)
+            ).hexdigest(),
+        }
+    )
+    store = HandoffAdmissionStore(
+        tmp_path / "current-runtime-admission.sqlite3",
+        context_authenticator=ContextAuthenticator(),
+        resolver=CurrentResolver(),
+    )
+    admission = store.admit_current_runtime_nonrelease(current.exact_bytes, context)
+    assert admission.created is True
+    assert admission.environment == "current_runtime"
+    assert admission.authority_scope == "current_runtime_non_release"
+    assert admission.release_capable is False
+    replay = store.admit_current_runtime_nonrelease(current.exact_bytes, context)
+    assert replay.created is False
+    assert replay.verification_receipt_sha256 == admission.verification_receipt_sha256
+    assert store.verify_stored(admission.application_id).admission_kind == (
+        "current_runtime_non_release"
+    )
+    verified = store.for_boundary(admission.application_id, "strategy")
+    assert verified.environment == "current_runtime"
+    assert verified.authority_scope == "current_runtime_non_release"
+    assert verified.current_boundary == "strategy"
+    with pytest.raises(HandoffAdmissionError, match="cannot enter a release boundary"):
+        store.for_boundary(admission.application_id, "release_readiness")
+    with sqlite3.connect(store.database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM current_runtime_admissions"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM application_admissions"
+        ).fetchone()[0] == 0
+
+    admitted_source = production_preparation_runner._source_record_for_application(
+        store.database, admission.application_id
+    )
+    assert admitted_source.source_record_sha256 == hashlib.sha256(
+        fixture_bytes
+    ).hexdigest()
+    assert admitted_source.producer_commit_sha == current.payload["producer"][
+        "commit_sha"
+    ]
+
+    with sqlite3.connect(store.database) as connection:
+        receipt_bytes = connection.execute(
+            "SELECT verification_receipt_bytes FROM current_runtime_admissions "
+            "WHERE application_id=?",
+            (admission.application_id,),
+        ).fetchone()[0]
+        receipt = json.loads(receipt_bytes)
+        receipt["submission_authority"] = True
+        forged_receipt = canonical_json_bytes(receipt)
+        connection.execute(
+            "DROP TRIGGER current_runtime_admissions_immutable_update"
+        )
+        connection.execute(
+            "UPDATE current_runtime_admissions SET verification_receipt_bytes=?, "
+            "verification_receipt_sha256=? WHERE application_id=?",
+            (
+                sqlite3.Binary(forged_receipt),
+                hashlib.sha256(forged_receipt).hexdigest(),
+                admission.application_id,
+            ),
+        )
+    with pytest.raises(
+        production_preparation_runner.ProductionPreparationDeploymentError,
+        match="current runtime admission differs",
+    ):
+        production_preparation_runner._source_record_for_application(
+            store.database, admission.application_id
+        )
+
+
+def test_compact_promotion_uses_authenticated_handoff_assessment_scores() -> None:
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
+    document = json.loads(fixture_bytes)
+    legacy_bytes = base64.b64decode(
+        document["handoff"]["canonical_base64"], validate=True
+    )
+    legacy = parse_handoff(legacy_bytes)
+    payload = json.loads(json.dumps(legacy.payload))
+    location = payload["vacancy"]["location"]
+    geography = resolve_preparation_geography(
+        country_code=location["country_code"],
+        work_mode=location["work_mode"],
+        current_runtime=True,
+        unknown_uk_mode_allowed=False,
+    )
+    payload["selection"]["geographic_preference_policy_sha256"] = "a" * 64
+    payload["preparation_geography"] = preparation_geography_document(
+        geography, current_runtime=True, unknown_uk_mode_allowed=False
+    )
+    current = encode_current_runtime_handoff_v1(payload)
+    handoff = _parse_current_runtime_handoff(current.exact_bytes)
+    job_key = handoff.payload["job_key"]
+    compact_promotion = canonical_json_bytes(
+        {
+            "job_key": job_key,
+            "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+        }
+    )
+    graph = SimpleNamespace(
+        objects={
+            "assessment.receipt": compact_promotion,
+            "eligibility.receipt": canonical_json_bytes(
+                {"source_job_key": job_key}
+            ),
+            "selection.receipt": canonical_json_bytes(
+                {"geography_priority_rank": None, "source_job_key": job_key}
+            ),
+            "evidence_ledger": b"synthetic evidence ledger",
+            "candidate_intent.authority_source": b"synthetic candidate authority",
+        }
+    )
+
+    result = _verified_market_decision_references(graph, handoff)
+
+    assert "final" not in json.loads(compact_promotion)
+    assert result["final_score"] == handoff.payload["assessment"]["final"] * 100
+    assert result["opportunity_score"] == handoff.payload["assessment"][
+        "opportunity"
+    ]
+    assert result["geography_priority_rank"] is None
+
+    for field, invalid in (("final", True), ("opportunity", 1.1)):
+        assessment = dict(handoff.payload["assessment"])
+        assessment[field] = invalid
+        invalid_payload = dict(handoff.payload)
+        invalid_payload["assessment"] = assessment
+        invalid_handoff = replace(handoff, payload=invalid_payload)
+        with pytest.raises(HandoffAdmissionError, match="market_decision_ranking"):
+            _verified_market_decision_references(graph, invalid_handoff)
+
+
 def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
     fixture_bytes = (
         files("career_automation")
@@ -271,16 +523,49 @@ def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
     references = {}
     for row in document["reference_bundle"]["value"]["entries"]:
         metadata = row["metadata"]
+        original_bytes = base64.b64decode(row["object_base64"], validate=True)
+        supplied_bytes = bytearray(original_bytes)
+        supplied_subject = dict(metadata["subject"])
         references[metadata["reference_key"]] = HandoffReference(
-            exact_bytes=base64.b64decode(row["object_base64"], validate=True),
+            exact_bytes=supplied_bytes,
             type_id=metadata["type_id"],
             schema_version=metadata["schema_version"],
-            subject=metadata["subject"],
+            subject=supplied_subject,
             issued_at=metadata["issued_at"],
             valid_until=metadata["valid_until"],
             issuer_id=metadata["issuer_id"],
         )
+        supplied_bytes[:] = b"changed after reference construction"
+        supplied_subject["unexpected"] = "changed after reference construction"
+        reference = references[metadata["reference_key"]]
+        assert reference.exact_bytes == original_bytes
+        assert dict(reference.subject) == metadata["subject"]
+        with pytest.raises(TypeError):
+            reference.subject["unexpected"] = "mutation"
+
     output_root = tmp_path / "external-data-home"
+    # A failed batch must publish nothing, preserve no partial temporary bundle,
+    # and permit an exact retry through the real publication entrypoint.
+    import market_aligner.applications.producer as producer
+    original_write = producer._write_exact
+    for fail_after in (1, 5):
+        writes = 0
+        def interrupted_write(path, value):
+            nonlocal writes
+            original_write(path, value)
+            writes += 1
+            if writes == fail_after:
+                raise OSError("injected batch write interruption")
+        with monkeypatch.context() as patch:
+            patch.setattr(producer, "_write_exact", interrupted_write)
+            with pytest.raises(OSError, match="injected batch write interruption"):
+                write_protected_handoff_bundle(
+                    output_root, handoff, references=references,
+                    environment="synthetic", trust_root_id="synthetic-market-root",
+                    issued_at="2026-08-10T10:04:00Z", source_job_key="workable:synthetic:42",
+                )
+        assert list((output_root / "bundles").iterdir()) == []
+        assert list(output_root.glob(".handoff-*")) == []
     first = write_protected_handoff_bundle(
         output_root,
         handoff,
@@ -317,7 +602,19 @@ def test_protected_outbox_bundle_authenticates_and_replays_idempotently(
         *(first.path / "metadata").iterdir(),
     ):
         assert file_path.stat().st_mode & 0o777 == 0o600
-    adapter = ProtectedLocalOutbox(
+    class SubjectCheckingOutbox(ProtectedLocalOutbox):
+        def resolve(self, request):
+            from dataclasses import replace
+
+            supplied_subject = dict(request.expected_subject)
+            copied_request = replace(request, expected_subject=supplied_subject)
+            supplied_subject["unexpected"] = "caller mutation"
+            assert dict(copied_request.expected_subject) == dict(request.expected_subject)
+            with pytest.raises(TypeError):
+                request.expected_subject["unexpected"] = "resolver mutation"
+            return super().resolve(request)
+
+    adapter = SubjectCheckingOutbox(
         first.path,
         repository_root=Path(__file__).resolve().parents[1],
         expected_source_record_sha256=first.source_record_sha256,
@@ -817,7 +1114,7 @@ def test_persisted_gated_assessment_emits_exact_handoff_and_enters_jaa(
 def _synthetic_candidate_materialization_authority(
     expected: dict[str, object],
 ) -> tuple[tuple[tuple[str, str, str], ...], dict[str, object], bytes]:
-    from career_automation.evidence_matching import canonical_json, content_hash
+    from career_automation.evidence_matching import canonical_json
 
     statements = (
         (
@@ -866,6 +1163,23 @@ def _synthetic_candidate_materialization_authority(
             "Implemented a synthetic anomaly detection package with documented interfaces and reproducible local evaluation.",
         ),
     )
+    evidence_bytes = (
+        canonical_json(
+            {
+                "schema_version": "jaa.synthetic-approved-evidence.v1",
+                "statements": [
+                    {
+                        "id": evidence_id,
+                        "kind": kind,
+                        "proof_class": kind,
+                        "statement": statement,
+                    }
+                    for evidence_id, kind, statement in statements
+                ],
+            }
+        )
+        + "\n"
+    ).encode()
     projection_body = {
         "approved_evidence": [
             {
@@ -876,10 +1190,15 @@ def _synthetic_candidate_materialization_authority(
         ],
         "policy_sha256": hashlib.sha256(b"synthetic-projection-policy").hexdigest(),
         "schema_version": "jaa.synthetic-candidate-projection.v1",
+        "source_hashes": {
+            "approved_evidence": hashlib.sha256(evidence_bytes).hexdigest(),
+        },
     }
     candidate_projection = {
         **projection_body,
-        "projection_sha256": content_hash(projection_body),
+        "projection_sha256": hashlib.sha256(
+            (canonical_json(projection_body) + "\n").encode()
+        ).hexdigest(),
     }
     vacancy = expected["vacancy"]
     requirement_text = "Deliver reliable services through tested software."
@@ -1076,7 +1395,8 @@ def _canonical_market_jaa_materialization(
     job_key: str | None = None,
     source_job_id: str | None = None,
 ):
-    import career_automation.candidate_application_factory as candidate_factory_module
+    import career_automation.application_compiler as application_compiler_module
+    import career_automation.candidate_authority as candidate_authority_module
     from career_automation.application_compiler import CandidateContact
     from career_automation.candidate_application_factory import (
         CandidateApplicationPackage,
@@ -1358,20 +1678,22 @@ def _canonical_market_jaa_materialization(
         evidence_path.write_bytes(evidence_bytes)
         evidence_path.chmod(0o600)
         monkeypatch.setitem(
-            candidate_factory_module.APPROVED_CANDIDATE_SOURCE_HASHES,
+            candidate_authority_module.APPROVED_CANDIDATE_SOURCE_HASHES,
             "approved_evidence",
             hashlib.sha256(evidence_bytes).hexdigest(),
         )
         monkeypatch.setattr(
-            candidate_factory_module,
-            "OUTWARD_PROFILE_REWRITES",
+            candidate_authority_module,
+            "APPROVED_EVIDENCE_PATH",
+            evidence_path,
+        )
+        monkeypatch.setattr(
+            application_compiler_module,
+            "EXACT_OUTWARD_PROFILE_REWRITES",
             {
                 evidence_id: statement
                 for evidence_id, _kind, statement in statements
             },
-        )
-        monkeypatch.setattr(
-            candidate_factory_module, "OUTWARD_LETTER_REWRITES", {}
         )
         candidate_authority_path = tmp_path / "synthetic-candidate-authority.json"
         candidate_authority_path.write_bytes(candidate_authority_bytes)
@@ -1434,6 +1756,7 @@ def _canonical_market_jaa_materialization(
         "admission": admission,
         "admission_store": admission_store,
         "built": built,
+        "candidate_intent_sha256": candidate_intent_sha256,
         "job_key": expected["job_key"],
         "package_builder": package_builder,
     }
@@ -1599,7 +1922,7 @@ def test_admitted_market_package_real_chrome_readback_never_submits(
     )
     circuit = WorkableOneUseCircuit(tmp_path / "workable-chrome-no-submit.sqlite3")
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel="chrome", headless=True)
+        browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         fixture_html = """<!doctype html><html><body>
           <form>
@@ -1694,6 +2017,405 @@ def test_greenhouse_identity_retargets_one_market_handoff_and_materialization(
     assert set(uploads) == {"resume"}
 
 
+def test_production_materialization_uses_real_nonrelease_materializer_without_editorial_runtime(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    import importlib
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from importlib.resources import files
+    from types import SimpleNamespace
+
+    import career_automation.application_compiler as compiler_module
+    import career_automation.candidate_authority as candidate_authority_module
+    import career_automation.candidate_contact_authority as contact_module
+    import career_automation.market_aligner_preparation as market_preparation_module
+    import career_automation.production_preparation_runner as runner
+    import career_automation.rendering as rendering_module
+    from cryptography.hazmat.primitives import serialization
+    from career_automation.evidence_matching import canonical_json
+    from career_automation.market_aligner_preparation import (
+        MarketApplicationMaterializationContext,
+    )
+    from market_aligner.applications.handoff import job_key_for
+
+    runner_tests = importlib.import_module("test_production_preparation_runner")
+    contact_tests = importlib.import_module("test_candidate_contact_authority")
+    original_open_admission = runner._open_admission_database
+    original_source_record = runner._source_record_for_application
+    source_url = "https://job-boards.greenhouse.io/example/jobs/1234567"
+    job_key = job_key_for(
+        adapter="greenhouse",
+        canonical_url=source_url,
+        source_job_id="1234567",
+        strict_strings=True,
+    )
+    market_root = tmp_path / "market-fixture"
+    market_root.mkdir(mode=0o700)
+    fixture = _canonical_market_jaa_materialization(
+        market_root,
+        capsys,
+        monkeypatch,
+        source_url=source_url,
+        job_key=job_key,
+        source_job_id="1234567",
+    )
+    verified_synthetic = fixture["admission_store"].for_boundary(
+        fixture["admission"].application_id, "strategy"
+    )
+    market_vector = json.loads(
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
+    expected = _retarget_market_vector(
+        market_vector,
+        source_url=source_url,
+        job_key=job_key,
+        source_job_id="1234567",
+    )
+    statements, _legacy_decision_receipt, base_candidate_authority_bytes = (
+        _synthetic_candidate_materialization_authority(expected)
+    )
+    assert base_candidate_authority_bytes == verified_synthetic.candidate_authority_bytes
+    candidate_authority_document = json.loads(base_candidate_authority_bytes)
+    evidence_document = {
+        "schema_version": "jaa.synthetic-approved-evidence.v1",
+        "statements": [
+            {
+                "id": evidence_id,
+                "kind": kind,
+                "proof_class": kind,
+                "statement": statement,
+            }
+            for evidence_id, kind, statement in statements
+        ],
+    }
+    evidence_bytes = (canonical_json(evidence_document) + "\n").encode()
+    candidate_projection = {
+        "schema_version": "jaa.candidate-authority-projection.v1",
+        "source_hashes": {
+            "approved_evidence": hashlib.sha256(evidence_bytes).hexdigest(),
+        },
+        "schema_sha256": hashlib.sha256(b"synthetic-schema").hexdigest(),
+        "policy_sha256": hashlib.sha256(b"synthetic-policy").hexdigest(),
+        "availability": {"status": "synthetic"},
+        "approved_evidence": [
+            {
+                "id": evidence_id,
+                "statement_sha256": hashlib.sha256(statement.encode()).hexdigest(),
+                "kind": kind,
+                "proof_class": kind,
+            }
+            for evidence_id, kind, statement in statements
+        ],
+        "claim_suppressors": {
+            "source_sha256": hashlib.sha256(b"synthetic-suppressors").hexdigest(),
+            "mode": "suppress_only",
+            "items": [],
+        },
+    }
+    candidate_projection["projection_sha256"] = hashlib.sha256(
+        (canonical_json(candidate_projection) + "\n").encode()
+    ).hexdigest()
+    candidate_authority_document["candidate_projection"] = candidate_projection
+    for decision in candidate_authority_document["decisions"]:
+        receipt = decision["receipt"]
+        receipt["candidate_projection_sha256"] = candidate_projection[
+            "projection_sha256"
+        ]
+        decision["receipt_sha256"] = hashlib.sha256(
+            (canonical_json(receipt) + "\n").encode()
+        ).hexdigest()
+    candidate_authority_bytes = (
+        canonical_json(candidate_authority_document) + "\n"
+    ).encode()
+    candidate_authority_sha256 = hashlib.sha256(candidate_authority_bytes).hexdigest()
+
+    source_job_key = "greenhouse:synthetic:1234567"
+    promotion_body = {
+        "decision": "pass",
+        "job_key": source_job_key,
+        "schema_version": "market-aligner.assessment-promotion-receipt.v1",
+    }
+    promotion_sha256 = hashlib.sha256(
+        canonical_json(promotion_body).encode()
+    ).hexdigest()
+    assessment_bytes = canonical_json(
+        {**promotion_body, "receipt_sha256": promotion_sha256}
+    ).encode()
+    eligibility_bytes = canonical_json(
+        {
+            "checks": [],
+            "decision": "eligible",
+            "hard_gate_passed": True,
+            "promotion_receipt_sha256": promotion_sha256,
+            "source_job_key": source_job_key,
+        }
+    ).encode()
+    selection_bytes = canonical_json(
+        {
+            "decision": "selected_for_application",
+            "hard_gate_passed": True,
+            "promotion_receipt_sha256": promotion_sha256,
+            "source_job_key": source_job_key,
+        }
+    ).encode()
+    evidence_ledger_bytes = b"".join(
+        (
+            canonical_json(
+                {
+                    "claim": statement,
+                    "content_sha256": hashlib.sha256(statement.encode()).hexdigest(),
+                    "confidence": 1.0,
+                    "evidence_id": evidence_id,
+                    "kind": kind,
+                    "observed_at": None,
+                    "source_ref": f"authority://approved-evidence/{evidence_id}",
+                    "status": "explicit",
+                }
+            )
+            + "\n"
+        ).encode()
+        for evidence_id, kind, statement in statements
+    )
+    assert hashlib.sha256(verified_synthetic.raw_listing_bytes).hexdigest() == (
+        verified_synthetic.raw_listing_sha256
+    )
+    assert hashlib.sha256(verified_synthetic.requirements_bytes).hexdigest() == (
+        verified_synthetic.requirements_sha256
+    )
+    requirements_bytes = (
+        canonical_json(
+            {
+                "preferred_qualifications": [],
+                "preferred_skills": [],
+                "required_qualifications": [],
+                "required_skills": ["Python"],
+                "responsibilities": [
+                    next(
+                        statement
+                        for evidence_id, _kind, statement in statements
+                        if evidence_id == "E-011"
+                    )
+                ],
+            }
+        )
+        + "\n"
+    ).encode()
+    verified = replace(
+        verified_synthetic,
+        environment="production",
+        requirements_sha256=hashlib.sha256(requirements_bytes).hexdigest(),
+        requirements_bytes=requirements_bytes,
+        candidate_authority_sha256=candidate_authority_sha256,
+        candidate_authority_bytes=candidate_authority_bytes,
+        candidate_intent_sha256=fixture["candidate_intent_sha256"],
+        source_job_key=source_job_key,
+        source_observed_at="2026-08-10T10:05:00+00:00",
+        assessment_receipt_sha256=hashlib.sha256(assessment_bytes).hexdigest(),
+        assessment_receipt_bytes=assessment_bytes,
+        eligibility_receipt_sha256=hashlib.sha256(eligibility_bytes).hexdigest(),
+        eligibility_receipt_bytes=eligibility_bytes,
+        selection_receipt_sha256=hashlib.sha256(selection_bytes).hexdigest(),
+        selection_receipt_bytes=selection_bytes,
+        evidence_ledger_sha256=hashlib.sha256(evidence_ledger_bytes).hexdigest(),
+        evidence_ledger_bytes=evidence_ledger_bytes,
+    )
+
+    runner_root = tmp_path / "runner-fixture"
+    runner_root.mkdir(mode=0o700)
+    deployment, paths = runner_tests._real_preflight_deployment(
+        monkeypatch, runner_root
+    )
+    runner._open_admission_database = original_open_admission
+    runner._source_record_for_application = original_source_record
+    paths["candidate"].write_bytes(candidate_authority_bytes)
+    paths["candidate"].chmod(0o600)
+    monkeypatch.setattr(
+        runner,
+        "PRODUCTION_CANDIDATE_AUTHORITY_SHA256",
+        hashlib.sha256(candidate_authority_bytes).hexdigest(),
+    )
+
+    evidence_path = runner_root / "synthetic-approved-evidence.json"
+    evidence_path.write_bytes(evidence_bytes)
+    evidence_path.chmod(0o600)
+    monkeypatch.setattr(
+        candidate_authority_module, "APPROVED_EVIDENCE_PATH", evidence_path
+    )
+    original_build_market_authority = (
+        market_preparation_module.build_market_application_decision_authority
+    )
+
+    def build_market_authority_with_synthetic_evidence(**kwargs):
+        return original_build_market_authority(
+            **kwargs, approved_evidence_path=evidence_path
+        )
+
+    original_materialize_source = (
+        market_preparation_module.materialize_candidate_application_source
+    )
+
+    def materialize_source_with_synthetic_evidence(**kwargs):
+        return original_materialize_source(
+            **kwargs, approved_evidence_path=evidence_path
+        )
+
+    monkeypatch.setattr(
+        market_preparation_module,
+        "build_market_application_decision_authority",
+        build_market_authority_with_synthetic_evidence,
+    )
+    monkeypatch.setattr(
+        market_preparation_module,
+        "materialize_candidate_application_source",
+        materialize_source_with_synthetic_evidence,
+    )
+    monkeypatch.setitem(
+        candidate_authority_module.APPROVED_CANDIDATE_SOURCE_HASHES,
+        "approved_evidence",
+        hashlib.sha256(evidence_bytes).hexdigest(),
+    )
+    monkeypatch.setattr(
+        compiler_module,
+        "EXACT_OUTWARD_PROFILE_REWRITES",
+        {evidence_id: statement for evidence_id, _kind, statement in statements},
+    )
+
+    contact_directory = paths["contact"].parent
+    contact_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (contact_directory / "contact-registry").mkdir(mode=0o700)
+    contact_path = contact_tests._authority(
+        contact_directory,
+        issued_at=datetime.now(timezone.utc).isoformat(),
+    )
+    contact_path.chmod(0o600)
+    registry_path = next((contact_path.parent / "contact-registry").glob("*.json"))
+    registry_path.chmod(0o600)
+    public_key_path = paths["public_key"]
+    public_key_bytes = contact_tests.TEST_PRIVATE_KEY.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    public_key_path.write_bytes(public_key_bytes)
+    public_key_path.chmod(0o600)
+    monkeypatch.setattr(
+        contact_module,
+        "ENROLLED_OPERATOR_PUBLIC_KEY_SHA256",
+        contact_tests.TEST_PUBLIC_SHA256,
+    )
+
+    deployment = replace(
+        deployment,
+        candidate_authority_path=paths["candidate"],
+        contact_authority_path=contact_path,
+        contact_public_key_path=public_key_path,
+        contact_registry_path=registry_path,
+    )
+    monkeypatch.setattr(
+        runner,
+        "PRODUCTION_CONTACT_ENVELOPE_SHA256",
+        hashlib.sha256(contact_path.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "PRODUCTION_CONTACT_PUBLIC_KEY_FILE_SHA256",
+        hashlib.sha256(public_key_bytes).hexdigest(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "PRODUCTION_CONTACT_REGISTRY_FILE_SHA256",
+        hashlib.sha256(registry_path.read_bytes()).hexdigest(),
+    )
+    database = deployment.admission_database
+    database.unlink()
+    runner_tests._write_admission_fixture(
+        database,
+        verified.application_id,
+        context_producer="2" * 40,
+        handoff_root_sha256=verified.handoff_root_sha256,
+    )
+    database.chmod(0o600)
+    monkeypatch.setattr(
+        runner,
+        "HandoffAdmissionStore",
+        lambda *args, **kwargs: SimpleNamespace(
+            for_boundary=lambda application_id, boundary: verified
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "installed_production_preparation_deployment",
+        lambda: deployment,
+    )
+    for path in deployment.poppler_bin.iterdir():
+        path.unlink()
+    for path in deployment.poppler_library_directory.iterdir():
+        path.unlink()
+    deployment.codex_binary.unlink()
+
+    monkeypatch.setenv(runner.PUBLIC_KEY_ENV, "prior-public-key")
+    monkeypatch.setenv(runner.REGISTRY_ENV, "prior-registry")
+    monkeypatch.setenv("JAA_POPPLER_BIN", "prior-poppler")
+    runtime_calls: list[str] = []
+
+    def reject_runtime(*args, **kwargs):
+        runtime_calls.append("runtime")
+        raise AssertionError("materialization-only path acquired editorial runtime")
+
+    monkeypatch.setattr(runner, "pinned_poppler_runtime", reject_runtime)
+    monkeypatch.setattr(runner, "DetachedCodexEditorialAdapter", reject_runtime)
+    monkeypatch.setattr(runner, "ProductionDetachedRecruiterAssessor", reject_runtime)
+    monkeypatch.setattr(rendering_module, "render_pdf_artifacts", reject_runtime)
+    original_prepare = runner.prepare_admitted_market_application_from_authorities
+    downstream_calls: list[dict[str, object]] = []
+
+    def observe_real_materializer(**kwargs):
+        downstream_calls.append(kwargs)
+        assert os.environ[runner.PUBLIC_KEY_ENV] == str(
+            deployment.contact_public_key_path
+        )
+        assert os.environ[runner.REGISTRY_ENV] == str(deployment.contact_registry_path)
+        assert os.environ["JAA_POPPLER_BIN"] == "prior-poppler"
+        return original_prepare(**kwargs)
+
+    monkeypatch.setattr(
+        runner,
+        "prepare_admitted_market_application_from_authorities",
+        observe_real_materializer,
+    )
+    closed_descriptor_counts: list[int] = []
+    resources_type = runner._PinnedPreparationResources
+
+    class TrackingResources(resources_type):
+        def close(self) -> None:
+            super().close()
+            closed_descriptor_counts.append(len(self._descriptors))
+
+    monkeypatch.setattr(runner, "_PinnedPreparationResources", TrackingResources)
+
+    result = runner.run_production_market_materialization(
+        application_id=verified.application_id
+    )
+
+    assert type(result) is MarketApplicationMaterializationContext
+    assert result.application_id == verified.application_id
+    assert result.materialization.source.job_key == source_job_key
+    assert result.materialization.receipt.release_authority is False
+    assert result.release_authority is False
+    assert len(downstream_calls) == 1
+    assert downstream_calls[0]["materialization_only"] is True
+    assert downstream_calls[0]["editorial_runtime"] is None
+    assert downstream_calls[0]["cover_letter_editorial_runtime"] is None
+    assert downstream_calls[0]["orchestration_extras"] is None
+    assert runtime_calls == []
+    assert closed_descriptor_counts == [0]
+    assert os.environ[runner.PUBLIC_KEY_ENV] == "prior-public-key"
+    assert os.environ[runner.REGISTRY_ENV] == "prior-registry"
+    assert os.environ["JAA_POPPLER_BIN"] == "prior-poppler"
+
+
 def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
     tmp_path, capsys, monkeypatch
 ) -> None:
@@ -1751,21 +2473,64 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
       };</script></body></html>"""
     real_sync_playwright = playwright_api.sync_playwright
 
+    class RoutedBrowserContext:
+        def __init__(self, context):
+            self._context = context
+            self._guard = None
+
+        def new_page(self):
+            page = self._context.new_page()
+
+            class FixtureRoute:
+                def __init__(self, route):
+                    self._route = route
+                    self.request = route.request
+
+                def continue_(self):
+                    return self._route.fulfill(
+                        status=200,
+                        content_type="text/html",
+                        body=greenhouse_html,
+                    )
+
+                def abort(self, reason):
+                    return self._route.abort(reason)
+
+            def route_request(route):
+                if self._guard is None:
+                    return route.fulfill(
+                        status=200,
+                        content_type="text/html",
+                        body=greenhouse_html,
+                    )
+                return self._guard(FixtureRoute(route))
+
+            page.route(
+                "**/*",
+                route_request,
+            )
+            return page
+
+        def route(self, *arguments, **keywords):
+            self._guard = arguments[1]
+            return None
+
+        def on(self, *arguments, **keywords):
+            return self._context.on(*arguments, **keywords)
+
+        def unroute_all(self, **keywords):
+            self._guard = None
+            return None
+
+        def close(self):
+            return self._context.close()
+
     class RoutedBrowser:
         def __init__(self, browser):
             self._browser = browser
 
-        def new_page(self):
-            page = self._browser.new_page()
-            page.route(
-                "**/*",
-                lambda route: route.fulfill(
-                    status=200,
-                    content_type="text/html",
-                    body=greenhouse_html,
-                ),
-            )
-            return page
+        def new_context(self, **keywords):
+            return RoutedBrowserContext(self._browser.new_context(**keywords))
 
         def close(self):
             return self._browser.close()
@@ -1776,7 +2541,7 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
 
         def launch(self, **_kwargs):
             return RoutedBrowser(
-                self._chromium.launch(channel="chrome", headless=True)
+                self._chromium.launch(headless=True)
             )
 
     class RoutedPlaywright:
@@ -1913,7 +2678,7 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
         "event.preventDefault(); window.submitClicks += 1;});</script>",
     )
     with real_sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel="chrome", headless=True)
+        browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.route(
             "**/*",
@@ -1972,3 +2737,37 @@ def test_local_greenhouse_observation_composes_to_no_submit_chrome_readback(
         "submit_clicks": 0,
     }
     print("MARKET_JAA_LOCAL_GREENHOUSE " + json.dumps(evidence, sort_keys=True))
+
+
+def test_legacy_pipeline_cli_refuses_unlabelled_import_and_supported_cli_persists(tmp_path):
+    """The obsolete CLI must not create a DB; explicit legacy admission is durable."""
+    import subprocess
+
+    database = tmp_path / "legacy.sqlite3"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join((str(SOURCE_ROOT), str(JAA_ROOT)))}
+    refused = subprocess.run(
+        [sys.executable, str(JAA_ROOT / "scripts/advance_career_pipeline.py"),
+         "--database", str(database), "bootstrap"],
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert refused.returncode != 0
+    assert "jaa-handoff admit-legacy-scored-jsonl" in refused.stderr
+    assert not database.exists()
+
+    exact = canonical_json_bytes({
+        "board": "synthetic", "job_id": "legacy-cli", "opportunity": 0.8,
+        "extraction_confidence": 0.9,
+    }) + b"\n"
+    scored = tmp_path / "scores.jsonl"
+    scored.write_bytes(exact)
+    command = [sys.executable, "-m", "career_automation.handoff_cli",
+               "admit-legacy-scored-jsonl", "--database", str(database), str(scored)]
+    for _ in range(2):
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"admission_kind": "legacy_scored_jsonl", "admitted": 1}
+    application_id = "legacy_" + hashlib.sha256(exact).hexdigest()
+    stored = HandoffAdmissionStore(database).verify_stored(application_id)
+    assert stored.admission_kind == "legacy_scored_jsonl"
+    assert stored.authority_scope == "none"
+    assert not stored.release_capable

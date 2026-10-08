@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .provider_observation_capture import exact_committed_source_identity
+from tracked_source_revision import GIT_EXECUTABLE
 
 SCHEMA_VERSION_V1 = "jaa10.linux-network-namespace-witness.v1"
 RECEIPT_SCHEMA_VERSION_V1 = (
@@ -76,8 +77,9 @@ COOPERATIVE_WORKER_INVENTORY_DOMAIN_V1 = (
 COOPERATIVE_REQUEST_SCHEMA_VERSION = (
     "jaa10.network-witnessed-fixture-request.v2"
 )
+COOPERATIVE_SEALED_REQUEST_SCHEMA_VERSION = "jaa10.network-witnessed-fixture-request.v3"
 RUNTIME_TMP_HOME_ANCHOR = Path(
-    os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", str(Path.home()))
+    os.environ.get("JAA_RUNTIME_TMP_HOME_ANCHOR", "/tmp")
 )
 AF_UNIX_PATH_CAPACITY = 107
 # Pinned Chromium's `/org.chromium.Chromium.XXXXXX/SingletonSocket` suffix.
@@ -101,6 +103,11 @@ IP = Path("/usr/sbin/ip")
 SETPRIV = Path("/usr/bin/setpriv")
 
 PINNED_TOOLS = {
+    str(GIT_EXECUTABLE): {
+        "version": "git version 2.53.0",
+        "sha256": "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a",
+        "version_argv": ("--version",),
+    },
     str(UNSHARE): {
         "version": "unshare from util-linux 2.41.3",
         "sha256": (
@@ -123,6 +130,31 @@ PINNED_TOOLS = {
             "9e0d70d26a02c1cb4b984ab6f49a582"
             "b7a2c3508b1063ac23adc60073292ae7e"
         ),
+        "version_argv": ("--version",),
+    },
+}
+
+# ArtVault Ubuntu 24.04: util-linux 2.39.3-9ubuntu6.6 and iproute2 6.1.0-1ubuntu6.2.
+# Verified package integrity and exact executable bytes before admission.
+ARTVAULT_PINNED_TOOLS = {
+    str(GIT_EXECUTABLE): {
+        "version": "git version 2.43.0",
+        "sha256": "2a8c18fbf43da9f692d75474c72bea9dfd796c260b0f3dfe456376abc3bbd668",
+        "version_argv": ("--version",),
+    },
+    str(UNSHARE): {
+        "version": "unshare from util-linux 2.39.3",
+        "sha256": "a23c8863860669003dc4660039fe642f5795c8c2195898ebc5d01afa1ac3d11c",
+        "version_argv": ("--version",),
+    },
+    str(IP): {
+        "version": "ip utility, iproute2-6.1.0, libbpf 1.3.0",
+        "sha256": "81a95d97c70f3677d1883b9d8fe13b1771ab208d5bca56bc447aaaff0b0480e0",
+        "version_argv": ("-Version",),
+    },
+    str(SETPRIV): {
+        "version": "setpriv from util-linux 2.39.3",
+        "sha256": "62ec0120791f3afcfb689fed52384ec2b0accc6e118a6b9a1d6fcfa7450aaf37",
         "version_argv": ("--version",),
     },
 }
@@ -155,6 +187,12 @@ COMMAND_ENVIRONMENT = {
     "PYTHONHASHSEED": "0",
     "PYTHONDONTWRITEBYTECODE": "1",
 }
+
+# Carry only the explicitly configured protected-fixture root across child processes.
+if "JAA_CERTIFIED_CORPUS_ROOT" in os.environ:
+    COMMAND_ENVIRONMENT["JAA_CERTIFIED_CORPUS_ROOT"] = os.environ[
+        "JAA_CERTIFIED_CORPUS_ROOT"
+    ]
 
 
 class NetworkWitnessError(RuntimeError):
@@ -1090,7 +1128,7 @@ def _descendants(pid: int) -> list[int]:
 def _source_identity(repository_root: Path) -> SourceIdentity:
     try:
         identity = exact_committed_source_identity(repository_root)
-    except ValueError as error:
+    except (ValueError, OSError) as error:
         raise NetworkWitnessError(str(error)) from error
     return SourceIdentity(
         identity.head,
@@ -1100,8 +1138,22 @@ def _source_identity(repository_root: Path) -> SourceIdentity:
 
 
 def _tool_inventory() -> dict[str, dict[str, Any]]:
+    observed = {}
+    for raw_path in PINNED_TOOLS:
+        path = Path(raw_path)
+        try:
+            if not path.is_file():
+                raise OSError("not a regular file")
+            observed[raw_path] = _sha256_file(path)
+        except OSError as error:
+            raise NetworkWitnessError(f"required tool is missing: {path}") from error
+    profiles = (PINNED_TOOLS, ARTVAULT_PINNED_TOOLS)
+    selected = next((profile for profile in profiles if
+                     {path: pin["sha256"] for path, pin in profile.items()} == observed), None)
+    if selected is None:
+        raise NetworkWitnessError("required tool bytes differ: no complete pinned profile")
     inventory: dict[str, dict[str, Any]] = {}
-    for raw_path, expected in PINNED_TOOLS.items():
+    for raw_path, expected in selected.items():
         path = Path(raw_path)
         try:
             descriptor = path.stat()
@@ -1261,7 +1313,7 @@ def _cooperative_preflight(
     )
     if (
         request_mapping.get("schema_version")
-        != COOPERATIVE_REQUEST_SCHEMA_VERSION
+        not in (COOPERATIVE_REQUEST_SCHEMA_VERSION, COOPERATIVE_SEALED_REQUEST_SCHEMA_VERSION)
         or len(integration_nonce) != 32
         or request_mapping.get("integration_nonce_sha256")
         != expectation.integration_nonce_sha256
@@ -1926,8 +1978,8 @@ def run_isolated_network_witness(
     if not 1.0 <= timeout_seconds <= 300.0:
         raise NetworkWitnessError("timeout must be between 1 and 300 seconds")
     repository = Path(repository_root).resolve(strict=True)
-    source = _source_identity(repository)
     tools = _tool_inventory()
+    source = _source_identity(repository)
     evidence_root = Path(evidence_directory)
     cooperative_identities = (
         _cooperative_preflight(

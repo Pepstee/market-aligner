@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import hashlib
-from datetime import date
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -33,7 +33,7 @@ class CapturedRetriever:
             b"products, delivery work, customers, hiring plans, and operational constraints.</p>"
         )
         digest, reference = self.cache.store(body)
-        captured_at = date.today().isoformat() + "T00:00:00+00:00"
+        captured_at = datetime.now(timezone.utc).date().isoformat() + "T00:00:00+00:00"
         return Citation(source_id, "https://8.8.8.8/public", captured_at, captured_at,
                         digest, reference, 200)
 
@@ -44,7 +44,7 @@ class CapturedRetriever:
             b"and clients through reliable engineering technology.</p>"
         )
         digest, reference = self.cache.store(body)
-        captured_at = date.today().isoformat() + "T00:00:00+00:00"
+        captured_at = datetime.now(timezone.utc).date().isoformat() + "T00:00:00+00:00"
         source = Citation(
             f"source:{getattr(task, 'job_key')}:product", "https://8.8.8.8/product",
             captured_at, captured_at, digest, reference, 200, source_kind="official_product",

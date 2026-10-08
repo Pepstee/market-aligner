@@ -46,11 +46,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "skeleton"))
 from contracts import CAREERS, CandidatePreferenceProfile, FieldProfile  # noqa: E402
 
-from instrument.questions import (  # noqa: E402
-    FIELD_TO_CAREER,
-    FIELDS,
-    section,
-)
+if __package__:
+    from .instrument.questions import FIELD_TO_CAREER, FIELDS, section
+else:  # Preserve direct script execution.
+    from instrument.questions import FIELD_TO_CAREER, FIELDS, section
 
 # Default IO paths (all inside profiler/data/).
 DATA_DIR = _ROOT / "profiler" / "data"

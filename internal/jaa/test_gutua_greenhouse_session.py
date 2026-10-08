@@ -13,6 +13,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import career_automation.gutua_greenhouse_session as session_module
 import career_automation.candidate_contact_authority as contact_module
+import career_automation.production_runner as runner_module
+from jaa_core.contracts import CandidateContact
 from career_automation.gutua_greenhouse_session import GutuaGreenhouseSession
 from career_automation.gutua_greenhouse_session import (
     APPROVED_CANDIDATE_SOURCE_HASHES,
@@ -23,6 +25,9 @@ from career_automation.gutua_greenhouse_session import (
     _decision_receipt,
 )
 from career_automation.evidence_matching import canonical_json, content_hash
+from career_automation.market_aligner_preparation import (
+    MarketApplicationMaterializationContext,
+)
 from career_automation.candidate_authority import materialize_candidate_authority
 from career_automation.gmail_confirmation import GmailAPIConfirmationChecker
 from career_automation.application_archive import VacancyArchiveIdentity
@@ -40,17 +45,35 @@ from career_automation.production_ats_executor import ProductionATSBoundaryError
 from career_automation.testing_sanity_review import fixture_pass_receipt
 
 
-PRODUCTION_DISCOVERY_PATH = Path(
-    "/home/gutua/software-factory/application-artifacts/objects/39/"
-    "39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47"
+PRODUCTION_ARCHIVE_ROOT = (
+    Path(__file__).resolve().parents[2] / ".market-aligner-data" / "authority-inputs"
 )
-PRODUCTION_ARCHIVE_ROOT = Path("/home/gutua/software-factory/application-artifacts")
+PRODUCTION_DISCOVERY_PATH = (
+    PRODUCTION_ARCHIVE_ROOT
+    / "objects"
+    / "39"
+    / ("39e60f8d278d8a07427c8bc25eff85bd357e98451cce87983d70d3d85e935f47")
+)
 TEST_CONTACT_PRIVATE_KEY = Ed25519PrivateKey.generate()
 TEST_CONTACT_PUBLIC_RAW = TEST_CONTACT_PRIVATE_KEY.public_key().public_bytes(
     encoding=serialization.Encoding.Raw,
     format=serialization.PublicFormat.Raw,
 )
 TEST_CONTACT_PUBLIC_SHA256 = hashlib.sha256(TEST_CONTACT_PUBLIC_RAW).hexdigest()
+
+
+def _require_private_candidate_fixture() -> None:
+    authority = (
+        PRODUCTION_ARCHIVE_ROOT
+        / "candidate-authorities"
+        / "85234a4fa0fbfc96d6c6af85a4c169d149de42b4835c1f13d94cf418723470f9.json"
+    )
+    if not PRODUCTION_DISCOVERY_PATH.is_file() or not authority.is_file():
+        pytest.skip(
+            "requires the exact private Gigabyte candidate-authority and "
+            "discovery artifacts; synthetic substitution would not test the "
+            "certified binding"
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -73,16 +96,197 @@ def _enrol_test_contact_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv(contact_module.REGISTRY_ENV, str(registry))
 
 
+def _market_selection_context(
+    *,
+    application_id: str = "app-target",
+    rank: int | None = 2,
+    final_score: float = 50.0,
+    opportunity: float = 0.5,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        application_id=application_id,
+        candidate_intent_sha256="intent-target",
+        geography_priority_rank=rank,
+        final_score=final_score,
+        opportunity_score=opportunity,
+        market_decision_authority=SimpleNamespace(
+            handoff_root_sha256="root-target"
+        ),
+    )
+
+
+def _market_selection_row(
+    *,
+    application_id: str = "app-target",
+    rank: int | None = 2,
+    final_score: float = 50.0,
+    opportunity: float = 0.5,
+    job_key: str = "job-target",
+    **overrides: object,
+) -> dict[str, object]:
+    row = {
+        "application_id": application_id,
+        "handoff_root_sha256": "root-target",
+        "candidate_intent_sha256": "intent-target",
+        "geography_rank": rank,
+        "final_score": final_score,
+        "opportunity": opportunity,
+        "job_key": job_key,
+        "release_authority": False,
+        "submission_authority": False,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_current_market_selection_accepts_one_verified_known_rank() -> None:
+    row = _market_selection_row()
+    selected = session_module._require_lowest_ranked_market_handoff(
+        _market_selection_context(), [row], current_runtime=True
+    )
+    assert selected is row
+
+
+def test_current_market_selection_accepts_one_unknown_rank_without_rewriting() -> None:
+    row = _market_selection_row(rank=None)
+    context = _market_selection_context(rank=None)
+    original = dict(row)
+    selected = session_module._require_lowest_ranked_market_handoff(
+        context, [row], current_runtime=True
+    )
+    assert selected is row
+    assert selected["geography_rank"] is None
+    assert row == original
+
+
+def test_legacy_market_selection_still_requires_two_rows() -> None:
+    with pytest.raises(ValueError, match="at least two verified selected handoffs"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(), [_market_selection_row()]
+        )
+
+
+def test_current_market_selection_orders_unknown_geography_last() -> None:
+    known_row = _market_selection_row(
+        application_id="app-known",
+        rank=3,
+        final_score=80.0,
+        opportunity=0.8,
+        job_key="job-known",
+    )
+    unknown_row = _market_selection_row(
+        rank=None,
+        final_score=50.0,
+        opportunity=0.5,
+        job_key="job-unknown",
+    )
+    selected = session_module._require_lowest_ranked_market_handoff(
+        _market_selection_context(rank=None),
+        [known_row, unknown_row],
+        current_runtime=True,
+    )
+    assert selected is unknown_row
+
+
+def test_current_market_selection_rejects_noncanonical_unknown_order() -> None:
+    known_row = _market_selection_row(
+        application_id="app-known", rank=3, job_key="job-known"
+    )
+    unknown_row = _market_selection_row(rank=None, job_key="job-unknown")
+    with pytest.raises(ValueError, match="not in canonical rank order"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(rank=None),
+            [unknown_row, known_row],
+            current_runtime=True,
+        )
+
+
+def test_legacy_market_selection_rejects_unknown_geography_rank() -> None:
+    rows = [
+        _market_selection_row(application_id="app-known", rank=1),
+        _market_selection_row(rank=None),
+    ]
+    with pytest.raises(ValueError, match="ranking is malformed"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(rank=None), rows
+        )
+
+
+def test_market_selection_requires_target_to_be_lowest_ranked() -> None:
+    rows = [
+        _market_selection_row(rank=1, final_score=90.0, opportunity=0.9),
+        _market_selection_row(
+            application_id="app-other",
+            rank=2,
+            final_score=50.0,
+            opportunity=0.5,
+            job_key="job-other",
+        ),
+    ]
+    with pytest.raises(ValueError, match="must be the lowest-ranked selected handoff"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(
+                rank=1, final_score=90.0, opportunity=0.9
+            ),
+            rows,
+        )
+
+
+def test_market_selection_rejects_duplicate_application_ids() -> None:
+    rows = [
+        _market_selection_row(rank=1),
+        _market_selection_row(rank=2, job_key="job-other"),
+    ]
+    with pytest.raises(ValueError, match="ambiguous application IDs"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(), rows, current_runtime=True
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("handoff_root_sha256", "root-other"),
+        ("candidate_intent_sha256", "intent-other"),
+        ("geography_rank", 5),
+        ("final_score", 51.0),
+        ("opportunity", 0.6),
+        ("release_authority", True),
+        ("submission_authority", True),
+    ],
+)
+def test_current_market_selection_rejects_binding_changes(
+    field: str, value: object
+) -> None:
+    row = _market_selection_row(**{field: value})
+    with pytest.raises(ValueError, match="differs from verified selection"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(), [row], current_runtime=True
+        )
+
+
+@pytest.mark.parametrize("current_runtime", [1, 0, "true", None])
+def test_market_selection_requires_exact_runtime_mode(current_runtime: object) -> None:
+    with pytest.raises(TypeError, match="exact bool"):
+        session_module._require_lowest_ranked_market_handoff(
+            _market_selection_context(),
+            [_market_selection_row()],
+            current_runtime=current_runtime,
+        )
+
+
 def _json_bytes(value: object) -> bytes:
     return (canonical_json(value) + "\n").encode()
 
 
-def _contact_authority(directory: Path) -> Path:
+def _contact_authority(
+    directory: Path, *, issued_at: str = "2026-08-06T00:00:00+00:00"
+) -> Path:
     signed_payload = {
         "schema_version": SCHEMA_VERSION,
         "authority_kind": "ed25519_signed_explicit_operator_attestation",
         "operator_attestation": ATTESTATION,
-        "issued_at": "2026-08-06T00:00:00+00:00",
+        "issued_at": issued_at,
         "record_id": "operator-contact-primary",
         "record_version": 1,
         "contact": {
@@ -238,6 +442,304 @@ def _eligible_decision() -> tuple[dict[str, object], dict[str, object]]:
     }
 
 
+def test_market_candidate_authority_is_content_addressed_and_private(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "private-archive"
+    archive.mkdir(mode=0o700)
+    value = b'{"authority":"exact"}\n'
+    path = session_module._store_market_candidate_authority(archive, value)
+    assert path.name == f"{hashlib.sha256(value).hexdigest()}.json"
+    assert path.read_bytes() == value
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert session_module._store_market_candidate_authority(archive, value) == path
+    path.write_bytes(b"substituted")
+    with pytest.raises(ValueError, match="content-addressed market candidate authority"):
+        session_module._store_market_candidate_authority(archive, value)
+
+
+def test_market_canary_must_be_lowest_ranked_before_browser_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt_path = tmp_path / "execution-receipt.json"
+    receipt_path.write_text("{}")
+    repository = Path(__file__).resolve().parents[1]
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    admission = SimpleNamespace(
+        operation="created",
+        environment="production",
+        application_id="app_" + "a" * 64,
+        handoff_root_sha256="b" * 64,
+        verification_receipt_sha256="c" * 64,
+        document=lambda: {
+            "release_token_issued": False,
+            "submission_authority": False,
+        },
+    )
+    monkeypatch.setattr(
+        session_module,
+        "run_production_handoff_admission",
+        lambda **_kwargs: admission,
+    )
+    context = object.__new__(MarketApplicationMaterializationContext)
+    object.__setattr__(context, "application_id", admission.application_id)
+    object.__setattr__(
+        context,
+        "market_decision_authority",
+        SimpleNamespace(
+            handoff_root_sha256=admission.handoff_root_sha256,
+            admission_receipt_sha256=admission.verification_receipt_sha256,
+            source_url="https://job-boards.greenhouse.io/example/jobs/123",
+        ),
+    )
+    object.__setattr__(context, "candidate_intent_sha256", "d" * 64)
+    object.__setattr__(context, "profile_id", "profile-test")
+    object.__setattr__(context, "profile_version", "v1")
+    object.__setattr__(context, "geography_priority_rank", 1)
+    object.__setattr__(context, "final_score", 90.0)
+    object.__setattr__(context, "opportunity_score", 0.9)
+    monkeypatch.setattr(
+        session_module,
+        "run_production_market_materialization",
+        lambda **_kwargs: context,
+    )
+    monkeypatch.setattr(
+        session_module,
+        "selected_published_handoffs",
+        lambda *_args, **_kwargs: [
+            {
+                "application_id": admission.application_id,
+                "candidate_intent_sha256": "d" * 64,
+                "geography_rank": 1,
+                "final_score": 90.0,
+                "opportunity": 0.9,
+                "job_key": "best-fit",
+                "handoff_root_sha256": admission.handoff_root_sha256,
+                "release_authority": False,
+                "submission_authority": False,
+            },
+            {
+                "application_id": "app_" + "e" * 64,
+                "candidate_intent_sha256": "d" * 64,
+                "geography_rank": 5,
+                "final_score": 20.0,
+                "opportunity": 0.1,
+                "job_key": "low-fit",
+                "handoff_root_sha256": "f" * 64,
+                "release_authority": False,
+                "submission_authority": False,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_store_market_candidate_authority",
+        lambda *_args, **_kwargs: pytest.fail(
+            "candidate authority should not be stored for a best-fit canary"
+        ),
+    )
+    monkeypatch.setattr(
+        GutuaGreenhouseSession,
+        "_start_browser",
+        lambda *_args, **_kwargs: pytest.fail(
+            "browser must not start for a best-fit canary"
+        ),
+    )
+    arguments = SimpleNamespace(
+        archive_root=archive,
+        repository_root=repository,
+        market_execution_receipt=receipt_path,
+    )
+    with pytest.raises(ValueError, match="lowest-ranked selected handoff"):
+        GutuaGreenhouseSession(arguments)
+
+
+@pytest.mark.parametrize("current_runtime", [False, True])
+def test_market_canary_admits_lowest_ranked_handoff_before_browser_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    current_runtime: bool,
+) -> None:
+    receipt_path = tmp_path / "execution-receipt.json"
+    receipt_path.write_text("{}")
+    repository = Path(__file__).resolve().parents[2]
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    admission = SimpleNamespace(
+        operation="created",
+        environment="current_runtime" if current_runtime else "production",
+        application_id="app_" + "e" * 64,
+        handoff_root_sha256="f" * 64,
+        operation_receipt_sha256="1" * 64,
+        execution_receipt_file_sha256="2" * 64,
+        execution_receipt_semantic_sha256="3" * 64,
+        verification_receipt_sha256="c" * 64,
+        document=lambda: {
+            "release_token_issued": False,
+            "submission_authority": False,
+        },
+    )
+    admission_calls = []
+
+    def admit(**kwargs):
+        admission_calls.append(kwargs)
+        return admission
+
+    monkeypatch.setattr(session_module, "run_production_handoff_admission", admit)
+    context = object.__new__(MarketApplicationMaterializationContext)
+    object.__setattr__(context, "application_id", admission.application_id)
+    object.__setattr__(
+        context,
+        "market_decision_authority",
+        SimpleNamespace(
+            handoff_root_sha256=admission.handoff_root_sha256,
+            admission_receipt_sha256=admission.verification_receipt_sha256,
+            source_url="https://job-boards.greenhouse.io/example/jobs/456",
+            source_job_key="greenhouse:example:456",
+            raw_listing_sha256=hashlib.sha256(b"low-ranked vacancy").hexdigest(),
+            role_title="Junior Support Associate",
+            company_name="Example",
+            assessment_receipt_sha256="a" * 64,
+        ),
+    )
+    object.__setattr__(
+        context,
+        "materialization",
+        SimpleNamespace(
+            source=SimpleNamespace(job_key="greenhouse:example:456"),
+            receipt=SimpleNamespace(decision_receipt_sha256="b" * 64),
+        ),
+    )
+    object.__setattr__(context, "candidate_authority_bytes", b'{"authority":"fixture"}\n')
+    object.__setattr__(context, "candidate_projection", {"fixture": True})
+    object.__setattr__(context, "decision_receipt", {"decision": "eligible"})
+    object.__setattr__(context, "raw_listing_bytes", b"low-ranked vacancy")
+    object.__setattr__(context, "contact_authority_path", tmp_path / "contact.json")
+    object.__setattr__(context, "source_observed_at", "2026-09-28T00:00:00Z")
+    object.__setattr__(context, "profile_id", "profile-test")
+    object.__setattr__(context, "profile_version", "v1")
+    object.__setattr__(context, "candidate_intent_sha256", "d" * 64)
+    object.__setattr__(context, "geography_priority_rank", 5)
+    object.__setattr__(context, "final_score", 20.0)
+    object.__setattr__(context, "opportunity_score", 0.1)
+    materialization_calls = []
+
+    def materialize(**kwargs):
+        materialization_calls.append(kwargs)
+        return context
+
+    selection_calls = []
+
+    def select(*_args, **kwargs):
+        selection_calls.append(kwargs)
+        return [
+            {
+                "application_id": "app_" + "a" * 64,
+                "candidate_intent_sha256": "d" * 64,
+                "geography_rank": 1,
+                "final_score": 90.0,
+                "opportunity": 0.9,
+                "job_key": "greenhouse:example:123",
+                "handoff_root_sha256": "b" * 64,
+                "release_authority": False,
+                "submission_authority": False,
+            },
+            {
+                "application_id": admission.application_id,
+                "candidate_intent_sha256": "d" * 64,
+                "geography_rank": 5,
+                "final_score": 20.0,
+                "opportunity": 0.1,
+                "job_key": "greenhouse:example:456",
+                "handoff_root_sha256": admission.handoff_root_sha256,
+                "release_authority": False,
+                "submission_authority": False,
+            },
+        ]
+
+    monkeypatch.setattr(session_module, "run_production_market_materialization", materialize)
+    monkeypatch.setattr(session_module, "selected_published_handoffs", select)
+    browser_started = []
+
+    def start_browser(session, _arguments):
+        browser_started.append(True)
+        session.page = object()
+
+    monkeypatch.setattr(GutuaGreenhouseSession, "_start_browser", start_browser)
+    arguments = {
+        "archive_root": archive,
+        "repository_root": repository,
+        "market_execution_receipt": receipt_path,
+    }
+    shared_options = {
+        "current_runtime_config_path": str(tmp_path / "runtime.json"),
+        "current_runtime_config_sha256": "a" * 64,
+        "current_runtime_private_root": str(tmp_path / "private"),
+    }
+    recovery_manifest = "recovered/manifest.json"
+    if current_runtime:
+        arguments.update(shared_options)
+        arguments["current_recovery_manifest_relative_path"] = recovery_manifest
+    session = GutuaGreenhouseSession(SimpleNamespace(**arguments))
+
+    assert browser_started == [True]
+    expected_shared_options = shared_options if current_runtime else {}
+    assert admission_calls == [
+        {"execution_receipt_path": receipt_path, **expected_shared_options}
+    ]
+    assert selection_calls == [
+        {
+            "profile_version": context.profile_version,
+            "candidate_intent_sha256": context.candidate_intent_sha256,
+            **expected_shared_options,
+        }
+    ]
+    assert materialization_calls == [
+        {
+            **expected_shared_options,
+            **(
+                {"current_recovery_manifest_relative_path": recovery_manifest}
+                if current_runtime
+                else {}
+            ),
+            "application_id": admission.application_id,
+        }
+    ]
+    assert len(session.candidates) == 1
+    assert session.candidates[0].vacancy.vacancy.job_key == "greenhouse:example:456"
+    assert (
+        session.candidates[0].structured_vacancy["selected_handoff"]["application_id"]
+        == admission.application_id
+    )
+
+
+def test_direct_factory_rejects_current_options_before_legacy_file_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    def legacy_file_access(name):
+        calls.append(name)
+        raise AssertionError("legacy discovery file access must not occur")
+
+    monkeypatch.setattr(session_module, "_required_file", legacy_file_access)
+    partial = SimpleNamespace(current_runtime_config_path=str(tmp_path / "runtime.json"))
+    with pytest.raises(ValueError, match="all four current-runtime options"):
+        GutuaGreenhouseSession(partial)
+
+    complete_without_receipt = SimpleNamespace(
+        current_runtime_config_path=str(tmp_path / "runtime.json"),
+        current_runtime_config_sha256="a" * 64,
+        current_runtime_private_root=str(tmp_path / "private"),
+        current_recovery_manifest_relative_path="recovered/manifest.json",
+    )
+    with pytest.raises(ValueError, match="market_execution_receipt"):
+        GutuaGreenhouseSession(complete_without_receipt)
+    assert calls == []
+
+
 def test_session_requires_explicit_external_authority_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -364,6 +866,7 @@ def test_session_loads_materialized_receipts_and_ignores_legacy_fit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _require_private_candidate_fixture()
     discovery = json.loads(PRODUCTION_DISCOVERY_PATH.read_bytes())
     for observation in discovery["observations"]:
         for name in ("body_sha256", "network_evidence_sha256"):
@@ -421,6 +924,7 @@ def test_session_rejects_stale_duplicate_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _require_private_candidate_fixture()
     authority = materialize_candidate_authority(
         discovery_path=PRODUCTION_DISCOVERY_PATH,
         archive_root=tmp_path,
@@ -442,6 +946,7 @@ def test_repository_session_prepares_sink_bound_fixture_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _require_private_candidate_fixture()
     authority = json.loads(
         (
             PRODUCTION_ARCHIVE_ROOT
@@ -512,6 +1017,7 @@ def test_repository_session_prepares_sink_bound_fixture_release(
         assessment={"eligible": True, "fit_score": decision["fit"]},
     )
     session = object.__new__(GutuaGreenhouseSession)
+    session.approved_evidence_path = None
     session.archive_root = archive_root
     session.repository_root = Path.cwd().resolve()
     session.candidate_projection = authority["candidate_projection"]
@@ -591,6 +1097,7 @@ def test_repository_session_prepares_sink_bound_fixture_release(
             questions=None,
             state_root=tmp_path,
             vacancy_requirements=package.vacancy_requirements,
+            vacancy_review_material=package.vacancy_review_material,
         ),
     )
     from playwright.sync_api import sync_playwright
@@ -606,6 +1113,9 @@ def test_repository_session_prepares_sink_bound_fixture_release(
             ),
         )
         page.goto(application_url)
+        recorder.record_navigation(
+            {"method": "GET", "status": 200, "url": application_url}
+        )
         recorder.record_prefill(page)
         sink = GeneratedRevisionSink(recorder)
         prepared = session.prepare_release(item, recorder, page, sink)
@@ -623,11 +1133,674 @@ def test_repository_session_prepares_sink_bound_fixture_release(
         assert prepared.sanity_review_receipt.vacancy_requirements_sha256 == (
             content_hash(list(expected_requirements))
         )
+        assert prepared.vacancy_review_material.raw_listing_bytes == html.encode()
+        assert (
+            prepared.sanity_review_receipt.package_hashes["review_text_sha256"]
+            == prepared.vacancy_review_material.review_text_sha256
+        )
         assert page.locator('input[name="email"]').input_value() == (
             "jordan.smith@proton.me"
         )
         assert page.locator('input[name="consent"]').is_checked()
+        from career_automation.application_archive import load_complete_attempt_view
+
+        view = load_complete_attempt_view(
+            recorder.attempt.attempt_id,
+            root=recorder.attempt.archive.root,
+            repository_root=recorder.attempt.archive.repository_root,
+        )
+        event_kinds = {row["payload"]["event_kind"] for row in view["evidence_events"]}
+        assert {
+            "navigation",
+            "preflight",
+            "field_filled",
+            "field_selected",
+            "file_uploaded",
+            "screenshot",
+        } <= event_kinds
+        assert view["gaps"]["action_timeline"] is False
+        assert "jordan.smith@proton.me" not in json.dumps(view, sort_keys=True)
         browser.close()
+
+
+_SYNTHETIC_SEAM_HTML = """<html><head><title>Graduate Engineer at Example</title></head><body>
+    <p>Build reliable Python data pipelines and tested cloud services for customers.</p>
+    <form>
+      <label>Full name <input name="full_name" required></label>
+      <label>Email <input name="email" type="email" required></label>
+      <label>Phone <input name="phone" required></label>
+      <label>City <input name="city" required></label>
+      <label>CV <input name="resume" type="file" required></label>
+      <label>Cover letter <input name="cover_letter" type="file"></label>
+      <label><input name="consent" type="checkbox" required>Privacy consent</label>
+      <button type="submit">Submit Application</button>
+    </form></body></html>"""
+
+
+class _SyntheticFillBoundaryReached(Exception):
+    """Raised by the fill stub once ordering through the seam is proven."""
+
+
+def _synthetic_seam_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    html: str,
+    answer_question: str | None = None,
+):
+    """Self-contained synthetic prepare_release seam; no private artifacts.
+
+    Only upstream identity/composition dependencies are stubbed (sink
+    generation, artifact publication/assurance, sanity reviewer, provider
+    observation archive, release-gate issue, and the downstream fill). The
+    passive forensic capture, its recorder archive write, vacancy equivalence,
+    review-material construction, contact-authority verification and the
+    contact enrolment remain real.
+    """
+    application_url = "https://job-boards.greenhouse.io/example/jobs/1234567"
+    vacancy_body = html.encode()
+    vacancy_sha256 = hashlib.sha256(vacancy_body).hexdigest()
+    decision = {
+        "decision": "eligible",
+        "job_key": "greenhouse:example:1234567",
+        "role_title": "Graduate Engineer",
+        "company_name": "Example",
+        "source_url": application_url,
+        "vacancy_sha256": vacancy_sha256,
+        "discovery_body_sha256": vacancy_sha256,
+        "duplicate_snapshot_sha256": "0" * 64,
+    }
+    decision_row = {
+        "job_key": decision["job_key"],
+        "receipt": decision,
+        "receipt_sha256": hashlib.sha256(_json_bytes(decision)).hexdigest(),
+    }
+    vacancy = VacancyArchiveIdentity(
+        decision["job_key"],
+        vacancy_sha256,
+        "Graduate Engineer",
+        "Example",
+        application_url,
+    )
+    live = LiveVacancy.create(
+        vacancy=vacancy,
+        provider="greenhouse",
+        fit_score="0.8",
+        live=True,
+        eligible=True,
+        duplicate=False,
+        live_verified_at=datetime.now(timezone.utc).isoformat(),
+        scoring_inputs_sha256=decision_row["receipt_sha256"],
+    )
+    item = QueueItem(live, 1, "new_attempt")
+    archive_root = tmp_path / "application-archive"
+    archive_root.mkdir()
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=archive_root,
+        repository_root=Path.cwd(),
+        vacancy=vacancy,
+        complete_vacancy=vacancy_body,
+        structured_vacancy={"job_key": vacancy.job_key},
+        assessment={"eligible": True, "fit_score": 0.8},
+    )
+    session = object.__new__(GutuaGreenhouseSession)
+    session.approved_evidence_path = tmp_path / "synthetic-approved-evidence.json"
+    session.archive_root = archive_root
+    session.repository_root = Path.cwd().resolve()
+    session.candidate_projection = {"projection_sha256": "1" * 64}
+    session.decision_by_key = {vacancy.job_key: decision_row}
+    session.complete_vacancy_by_key = {vacancy.job_key: vacancy_body}
+    discovery_path = tmp_path / "synthetic-discovery.json"
+    discovery_path.write_text("{}")
+    session.discovery_path = discovery_path
+    eligibility_path = tmp_path / "synthetic-eligibility.json"
+    eligibility_path.write_text("{}")
+    session.eligibility_path = eligibility_path
+
+    contact_path = _contact_authority(tmp_path, issued_at=datetime.now(timezone.utc).isoformat())
+    contact_sha256 = contact_path.stem
+    monkeypatch.setenv("JAA_CANDIDATE_CONTACT_AUTHORITY", str(contact_path))
+    monkeypatch.setattr(
+        "career_automation.candidate_release_gate._verify_durable_candidate_authority",
+        lambda *_args, **_kwargs: {
+            "job_key": vacancy.job_key,
+            "role_title": vacancy.role_title,
+            "company_name": vacancy.company_name,
+            "vacancy_sha256": vacancy.vacancy_sha256,
+            "source_url": vacancy.source_url,
+            "candidate_authority_sha256": "2" * 64,
+            "candidate_decision_receipt_sha256": decision_row["receipt_sha256"],
+            "candidate_projection_sha256": session.candidate_projection[
+                "projection_sha256"
+            ],
+            "duplicate_snapshot_sha256": decision["duplicate_snapshot_sha256"],
+            "contact_authority_sha256": contact_sha256,
+        },
+    )
+    head = "a" * 40
+    monkeypatch.setattr(
+        "career_automation.candidate_release_gate.exact_clean_head", lambda _root: head
+    )
+    monkeypatch.setattr(
+        "career_automation.gutua_greenhouse_session.exact_clean_head",
+        lambda _root: head,
+    )
+    monkeypatch.setattr(
+        "career_automation.provider_observation_authority.exact_clean_head",
+        lambda _root: head,
+    )
+
+    from career_automation.candidate_application_factory import (
+        CandidateApplicationPackage,
+    )
+    from career_automation.application_artifacts import (
+        ARTIFACT_FILENAMES,
+        ArtifactFileReceipt,
+        PublishedArtifactReceipt,
+    )
+
+    source_facts = [
+        SimpleNamespace(
+            sentence_id="candidate-fact-1",
+            fact_kind="candidate",
+            text="built tested cloud services",
+            authority=SimpleNamespace(
+                candidate_claim_id="claim-1",
+                candidate_claim_version=1,
+                candidate_evidence_id="evidence-1",
+                candidate_evidence_version=1,
+            ),
+        )
+    ]
+    source_answers = ()
+    answers_text = ""
+    if answer_question is not None:
+        source_facts.append(
+            SimpleNamespace(
+                sentence_id="synthetic-answer-fact",
+                fact_kind="candidate",
+                text="Built a small synthetic internal demo.",
+                authority=SimpleNamespace(
+                    candidate_claim_id="claim-2",
+                    candidate_claim_version=1,
+                    candidate_evidence_id="evidence-2",
+                    candidate_evidence_version=1,
+                ),
+            )
+        )
+        source_answers = (
+            SimpleNamespace(
+                question_id="answer-1",
+                question=answer_question,
+                style_slot_ids=(),
+                sentence_ids=("synthetic-answer-fact",),
+            ),
+        )
+        answers_text = (
+            f"Question ID: answer-1\nQuestion: {answer_question}\n"
+            "Answer: Built a small synthetic internal demo.\n"
+        )
+    package = CandidateApplicationPackage(
+        source=SimpleNamespace(
+            source_id=hashlib.sha256(b"synthetic-source").hexdigest(),
+            job_key=vacancy.job_key,
+            vacancy_sha256=vacancy.vacancy_sha256,
+            role_title=vacancy.role_title,
+            company_name=vacancy.company_name,
+            facts=tuple(source_facts),
+            style_slots=(),
+            answers=source_answers,
+            contact=SimpleNamespace(
+                full_name="Alex Example",
+                email="alex@example.test",
+                phone="+44 7700 900123",
+                city="London",
+            ),
+            document=lambda: {"job_key": vacancy.job_key},
+        ),
+        artifacts=SimpleNamespace(
+            editable=SimpleNamespace(
+                cv_text="synthetic cv",
+                cover_letter_text="synthetic letter",
+                answers_text=answers_text,
+            ),
+            cv_pdf=SimpleNamespace(pdf_bytes=b"synthetic cv pdf"),
+            cover_letter_pdf=SimpleNamespace(pdf_bytes=b"synthetic letter pdf"),
+        ),
+        vacancy_requirements=("essential: tested cloud services",),
+    )
+    synthetic_artifact_set = hashlib.sha256(b"synthetic-artifact-set").hexdigest()
+    publication = PublishedArtifactReceipt(
+        artifact_set_sha256=synthetic_artifact_set,
+        source_id=hashlib.sha256(b"synthetic-source").hexdigest(),
+        relative_directory=synthetic_artifact_set,
+        files=tuple(
+            ArtifactFileReceipt(
+                filename=filename,
+                sha256=hashlib.sha256(filename.encode()).hexdigest(),
+                size_bytes=len(filename),
+            )
+            for filename in ARTIFACT_FILENAMES
+        ),
+        receipt_sha256=hashlib.sha256(b"synthetic-publication").hexdigest(),
+    )
+    success_observation = json.dumps(
+        {
+            "observed_at": "2026-08-27T12:00:00Z",
+            "provider_loader_paths": {
+                "confirmation_message": "<p>Thanks for applying</p>",
+                "confirmationPath": "/example/jobs/1234567/confirmation",
+            },
+        }
+    ).encode()
+
+    order: list[str] = []
+    observed: dict[str, object] = {}
+    inventory_fields = [
+        {"id": "full_name", "name": "full_name", "tag": "input", "type": "text", "labels": ["Full name"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "email", "name": "email", "tag": "input", "type": "email", "labels": ["Email"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "phone", "name": "phone", "tag": "input", "type": "tel", "labels": ["Phone"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "city", "name": "city", "tag": "input", "type": "text", "labels": ["City"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "resume", "name": "resume", "tag": "input", "type": "file", "labels": ["CV"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "cover_letter", "name": "cover_letter", "tag": "input", "type": "file", "labels": ["Cover letter"], "required": False, "visible": True, "disabled": False, "read_only": False, "value": ""},
+        {"id": "consent", "name": "consent", "tag": "input", "type": "checkbox", "labels": ["Privacy consent"], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""},
+    ]
+    if answer_question is not None:
+        inventory_fields.append(
+            {"id": "question_1", "name": "question_1", "tag": "textarea", "type": "textarea", "labels": [answer_question], "required": True, "visible": True, "disabled": False, "read_only": False, "value": ""}
+        )
+    inventory_document = {
+        "schema_version": "jaa.greenhouse-form-inventory.v1",
+        "url": application_url,
+        "title": "Graduate Engineer at Example",
+        "form_state": {
+            "schema_version": "jaa.greenhouse-form-state.v1",
+            "url": application_url,
+            "title": "Graduate Engineer at Example",
+            "provider": "greenhouse",
+            "fields": inventory_fields,
+        },
+        "select_inventories": [],
+    }
+
+    def inventory_capture(_page, *, passive=False):
+        order.append("inventory.passive" if passive else "inventory.active")
+        return (canonical_json(inventory_document) + "\n").encode()
+
+    monkeypatch.setattr(
+        session_module, "collect_greenhouse_form_inventory", inventory_capture
+    )
+    original_capture = session_module.capture_or_recover_greenhouse_forensic_observation
+
+    def tracked_publish(source, artifacts, **kwargs):
+        return publication
+
+    def tracked_assurance(**kwargs):
+        return None
+
+    def tracked_observation_authority(**kwargs):
+        return success_observation, SimpleNamespace(observation_sha256="3" * 64)
+
+    def tracked_review(package_under_review, client):
+        order.append("sanity")
+        observed["sanity_package"] = package_under_review
+        return SimpleNamespace(receipt_sha256="4" * 64, backend_identity="synthetic")
+
+    def tracked_combined_review(package_under_review, client, **kwargs):
+        observed["combined_review_kwargs"] = kwargs
+        return tracked_review(package_under_review, client)
+
+    def tracked_generate(**kwargs):
+        return package
+
+    def tracked_capture(active_page, **kwargs):
+        order.append("forensics")
+        observed["capture_kwargs"] = kwargs
+        return original_capture(active_page, **kwargs)
+
+    def tracked_issue(self, **kwargs):
+        order.append("gate.issue")
+        return SimpleNamespace(release_token="synthetic-token", issued_at="2026-08-27T12:00:00Z")
+
+    def tracked_fill(active_session, *args, **kwargs):
+        order.append("fill")
+        raise _SyntheticFillBoundaryReached
+
+    monkeypatch.setattr(session_module, "publish_application_artifacts", tracked_publish)
+    monkeypatch.setattr(session_module, "assert_application_artifacts", tracked_assurance)
+    monkeypatch.setattr(
+        session_module, "load_provider_observation_authority", tracked_observation_authority
+    )
+    monkeypatch.setattr(
+        "career_automation.gutua_greenhouse_session.review_application_package",
+        tracked_review,
+    )
+    monkeypatch.setattr(
+        session_module,
+        "review_application_package_with_pinned_skills",
+        tracked_combined_review,
+    )
+    monkeypatch.setattr(
+        session_module, "capture_or_recover_greenhouse_forensic_observation", tracked_capture
+    )
+    monkeypatch.setattr(CandidateAuthorityReleaseGate, "issue", tracked_issue)
+    monkeypatch.setattr(GutuaGreenhouseSession, "_fill_supported_form", tracked_fill)
+    sink = SimpleNamespace(
+        generate_candidate_application=tracked_generate,
+        seal=lambda: SimpleNamespace(generator_identity="synthetic-seam"),
+    )
+    return SimpleNamespace(
+        session=session,
+        recorder=recorder,
+        item=item,
+        vacancy=vacancy,
+        archive_root=archive_root,
+        application_url=application_url,
+        html=html,
+        artifact_set_sha256=synthetic_artifact_set,
+        inventory_document=inventory_document,
+        inventory_bytes=lambda: (canonical_json(inventory_document) + "\n").encode(),
+        order=order,
+        observed=observed,
+        sink=sink,
+    )
+
+
+def test_synthetic_review_seam_stops_before_gate_and_fill(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from career_automation.production_runner import PreparedGreenhouseReview
+    from form_filling.ats_forensics import ATSForensicRecorder
+
+    answer_question = "Describe your experience for this synthetic role"
+    fixture = _synthetic_seam_fixture(
+        tmp_path,
+        monkeypatch,
+        html=_SYNTHETIC_SEAM_HTML,
+        answer_question=answer_question,
+    )
+    fixture.recorder.begin_review_only()
+    receipts = []
+
+    def review_once(recorder, package, review):
+        fixture.observed["review_once_package"] = package
+        if not receipts:
+            receipts.append(review())
+        return receipts[0]
+
+    monkeypatch.setattr(GreenhouseAttemptRecorder, "review_once", review_once)
+    fixture.session._browser = SimpleNamespace(browser_type=SimpleNamespace(name="synthetic"), version="1")
+    page = SimpleNamespace(
+        content=lambda: fixture.html,
+        locator=lambda selector: SimpleNamespace(inner_text=lambda: "Graduate Engineer at Example"),
+        evaluate=lambda script: "synthetic",
+    )
+
+    from career_automation.production_ats_executor import capture_or_recover_greenhouse_forensic_observation as recover_forensics
+
+    def capture(active_page, **kwargs):
+        manifest = kwargs["forensic_root"] / "manifests" / f"{kwargs['attempt_id']}.json"
+        if manifest.exists():
+            return recover_forensics(None, **kwargs)
+        fixture.order.append("forensics")
+        assert kwargs.pop("passive_inventory") is True
+        recorder = ATSForensicRecorder(
+            kwargs.pop("forensic_root"), ats_name="greenhouse", **kwargs,
+        )
+        recorder.record_checkpoint("greenhouse_preflight_inventory", inventory_sha256="b" * 64, boundary_signal_count=0, passive_inventory=True)
+        recorder.record_screenshot(b"synthetic screenshot", label="preflight")
+        return recorder.finalize(outcome="prepared")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("review reached release or form mutation")
+
+    monkeypatch.setattr(session_module, "capture_or_recover_greenhouse_forensic_observation", capture)
+    monkeypatch.setattr(session_module.CandidateAuthorityReleaseGate, "issue", forbidden)
+    monkeypatch.setattr(GutuaGreenhouseSession, "_fill_supported_form", forbidden)
+    monkeypatch.setattr(session_module, "load_provider_observation_authority", forbidden)
+    prepared = fixture.session.prepare_review(fixture.item, fixture.recorder, page, fixture.sink)
+    assert type(prepared) is PreparedGreenhouseReview
+    assert fixture.order == ["inventory.passive", "sanity", "forensics"]
+    reviewed_package = fixture.observed["review_once_package"]
+    assert (
+        "question_1",
+        answer_question,
+        "Built a small synthetic internal demo.",
+    ) in reviewed_package.form_fields
+    assert reviewed_package.form_answer_bindings == (
+        ("question_1", "answer-1"),
+    )
+    assert dict(reviewed_package.form_field_authorities)["question_1"] == (
+        "answer.answer-1"
+    )
+    assert reviewed_package.form_inventory_sha256 == hashlib.sha256(
+        fixture.inventory_bytes()
+    ).hexdigest()
+    assert not hasattr(prepared, "gate") and not hasattr(prepared, "release_token")
+    with pytest.raises((AttributeError, TypeError)):
+        prepared.release_token = "forbidden"
+    assert not (fixture.archive_root / "production-runtime").exists()
+    original = fixture.recorder.attempt._events()
+    resumed = GreenhouseAttemptRecorder.resume(
+        archive_root=fixture.archive_root, repository_root=fixture.session.repository_root,
+        attempt_id=fixture.recorder.attempt.attempt_id,
+    )
+    resumed.begin_review_only()
+    recovered = fixture.session.prepare_review(fixture.item, resumed, page, fixture.sink)
+    assert type(recovered) is PreparedGreenhouseReview
+    assert fixture.order == [
+        "inventory.passive",
+        "sanity",
+        "forensics",
+        "inventory.passive",
+    ]
+    assert resumed.attempt._events() == original
+
+
+def test_synthetic_review_backend_failure_is_archived_safely(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from career_automation.application_sanity_review import ApplicationSanityReviewError
+
+    fixture = _synthetic_seam_fixture(
+        tmp_path, monkeypatch, html=_SYNTHETIC_SEAM_HTML
+    )
+    fixture.recorder.begin_review_only()
+    fixture.session._browser = SimpleNamespace(
+        browser_type=SimpleNamespace(name="synthetic"), version="1"
+    )
+    page = SimpleNamespace(
+        content=lambda: fixture.html,
+        locator=lambda selector: SimpleNamespace(
+            inner_text=lambda: "Graduate Engineer at Example"
+        ),
+        evaluate=lambda script: "synthetic",
+    )
+    failure = ApplicationSanityReviewError(
+        "review.backend_failure",
+        "synthetic denial",
+        backend_failure={
+            "error_category": "sandbox_runtime_denied",
+            "exit_code": 73,
+            "stderr_diagnosis": "sandbox_runtime_denied operation=open errno=EACCES path=[PATH]",
+        },
+    )
+
+    def fail_review(*args, **kwargs):
+        fixture.order.append("sanity")
+        raise failure
+
+    monkeypatch.setattr(session_module.LLMClient, "from_config", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(session_module, "review_application_package", fail_review)
+    with pytest.raises(ApplicationSanityReviewError):
+        fixture.session.prepare_review(
+            fixture.item, fixture.recorder, page, fixture.sink
+        )
+
+    objects = fixture.recorder.attempt._objects(fixture.recorder.attempt._events())
+    archived = [row for row in objects if row.role == "review.sanity_result"]
+    assert len(archived) == 1
+    assert archived[0].disposition == "rejected"
+    assert json.loads(fixture.recorder.attempt.read_artifact(archived[0])) == failure.document()
+    assert any(row.role == "review.semantic_intent" for row in objects)
+    assert not any(row.role == "assurance.semantic.receipt" for row in objects)
+    assert fixture.order == ["inventory.passive", "sanity"]
+
+
+def test_native_plan_rejects_mismatched_source_question_before_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _synthetic_seam_fixture(
+        tmp_path,
+        monkeypatch,
+        html=_SYNTHETIC_SEAM_HTML,
+        answer_question="Describe your experience for this synthetic role",
+    )
+    fixture.inventory_document["form_state"]["fields"][-1]["labels"] = [
+        "A different synthetic question"
+    ]
+    fixture.session._browser = SimpleNamespace(
+        browser_type=SimpleNamespace(name="synthetic"), version="1"
+    )
+    page = SimpleNamespace(
+        content=lambda: fixture.html,
+        locator=lambda selector: SimpleNamespace(
+            inner_text=lambda: "Graduate Engineer at Example"
+        ),
+        evaluate=lambda script: "synthetic",
+    )
+
+    with pytest.raises(
+        ProductionATSBoundaryError,
+        match="source answer does not identify one exact live Greenhouse question",
+    ):
+        fixture.session.prepare_review(
+            fixture.item, fixture.recorder, page, fixture.sink
+        )
+
+    assert fixture.order == ["inventory.passive"]
+    objects = fixture.recorder.attempt._objects(fixture.recorder.attempt._events())
+    assert not any(row.role == "review.form_inventory" for row in objects)
+    assert not any(row.role == "review.semantic_intent" for row in objects)
+
+
+def test_synthetic_seam_passive_forensics_after_sanity_before_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _synthetic_seam_fixture(
+        tmp_path, monkeypatch, html=_SYNTHETIC_SEAM_HTML
+    )
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        fixture.session._browser = browser
+        page = browser.new_page()
+        page.route(
+            "**/*",
+            lambda route: route.fulfill(
+                status=200, content_type="text/html", body=fixture.html
+            ),
+        )
+        page.goto(fixture.application_url)
+        fixture.recorder.record_navigation(
+            {"method": "GET", "status": 200, "url": fixture.application_url}
+        )
+        fixture.recorder.record_prefill(page)
+        with pytest.raises(_SyntheticFillBoundaryReached):
+            fixture.session.prepare_release(
+                fixture.item, fixture.recorder, page, fixture.sink
+            )
+        browser.close()
+    assert fixture.order == [
+        "inventory.passive",
+        "sanity",
+        "forensics",
+        "gate.issue",
+        "inventory.active",
+        "fill",
+    ]
+    assert fixture.observed["combined_review_kwargs"] == {}
+    capture_kwargs = fixture.observed["capture_kwargs"]
+    assert capture_kwargs["artifact_set_sha256"] == fixture.artifact_set_sha256
+    assert capture_kwargs["release_manifest_sha256"] is None
+    assert capture_kwargs["application_id"] == "1234567"
+    assert capture_kwargs["application_url"] == fixture.application_url
+    assert capture_kwargs["attempt_id"] == fixture.recorder.attempt.attempt_id
+    manifest = json.loads(
+        (
+            fixture.archive_root
+            / "passive-forensics"
+            / "manifests"
+            / f"{fixture.recorder.attempt.attempt_id}.json"
+        ).read_text()
+    )
+    assert manifest["outcome"] == "prepared"
+    assert manifest["artifact_set_sha256"] == fixture.artifact_set_sha256
+    assert manifest["diagnostic_only"] is True
+    assert manifest["release_authority"] is False
+    assert manifest["submission_authority"] is False
+    assert manifest["runtime"]["headless"] is True
+    assert manifest["runtime"]["runtime_sha256"]
+    from career_automation.application_archive import load_complete_attempt_view
+
+    view = load_complete_attempt_view(
+        fixture.recorder.attempt.attempt_id,
+        root=fixture.recorder.attempt.archive.root,
+        repository_root=fixture.recorder.attempt.archive.repository_root,
+    )
+    forensics_artifacts = [
+        row
+        for row in view["objects"]
+        if row.get("role") == "review.ats_passive_forensics"
+    ]
+    assert len(forensics_artifacts) == 1
+    assert forensics_artifacts[0]["disposition"] == "observed"
+
+
+def test_synthetic_seam_blocked_forensics_archives_then_refuses_before_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    html = _SYNTHETIC_SEAM_HTML.replace(
+        "<form>",
+        "<form><iframe width='300' height='60' "
+        "src='https://www.google.com/recaptcha/api2/bframe'></iframe>",
+    )
+    fixture = _synthetic_seam_fixture(tmp_path, monkeypatch, html=html)
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        fixture.session._browser = browser
+        page = browser.new_page()
+        page.route(
+            "**/*",
+            lambda route: route.fulfill(
+                status=200, content_type="text/html", body=fixture.html
+            ),
+        )
+        page.goto(fixture.application_url)
+        fixture.recorder.record_navigation(
+            {"method": "GET", "status": 200, "url": fixture.application_url}
+        )
+        fixture.recorder.record_prefill(page)
+        with pytest.raises(ProductionATSBoundaryError, match="blocked release"):
+            fixture.session.prepare_release(
+                fixture.item, fixture.recorder, page, fixture.sink
+            )
+        browser.close()
+    assert fixture.order == ["inventory.passive", "sanity", "forensics"]
+    assert fixture.observed["combined_review_kwargs"] == {}
+    manifest = json.loads(
+        (
+            fixture.archive_root
+            / "passive-forensics"
+            / "manifests"
+            / f"{fixture.recorder.attempt.attempt_id}.json"
+        ).read_text()
+    )
+    assert manifest["outcome"] == "blocked"
+    assert manifest["failure_class"] == "human_verification"
 
 
 @pytest.mark.parametrize(
@@ -741,8 +1914,38 @@ def test_graphcore_recurring_fields_use_only_stable_candidate_authority(
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
         page.set_content(html)
+        vacancy_bytes = page.content().encode("utf-8")
+        vacancy = VacancyArchiveIdentity(
+            job_key="greenhouse:fixture:graphcore",
+            vacancy_sha256=hashlib.sha256(vacancy_bytes).hexdigest(),
+            role_title="Synthetic engineer",
+            company_name="Fixture company",
+            source_url="https://job-boards.greenhouse.io/fixture/jobs/1234567",
+        )
+        recorder = GreenhouseAttemptRecorder.create(
+            archive_root=tmp_path / "archive",
+            repository_root=Path.cwd(),
+            vacancy=vacancy,
+            complete_vacancy=vacancy_bytes,
+            structured_vacancy={"job_key": vacancy.job_key},
+            assessment={"eligible": True, "fixture_only": True},
+        )
+        recorder.add_revision(
+            role="document.cv.final_pdf",
+            value=b"%PDF-fixture",
+            media_type="application/pdf",
+            prior_sha256=None,
+            approved=True,
+        )
+        recorder.record_navigation(
+            {"method": "GET", "status": 200, "url": vacancy.source_url}
+        )
+        recorder.record_prefill(page)
         _, _, authorities, consents, _ = session._fill_supported_form(
-            page, package, artifact_directory=artifact_directory
+            page,
+            package,
+            artifact_directory=artifact_directory,
+            recorder=recorder,
         )
         assert dict(authorities) == {
             "first_name": "contact.given_name",
@@ -759,6 +1962,25 @@ def test_graphcore_recurring_fields_use_only_stable_candidate_authority(
         assert page.locator("#question_3").input_value() == "EU Settled Status"
         assert page.locator("#gender").input_value() == "I don't wish to answer"
         assert dict(consents) == {"gdpr_demographic_data_consent_given": True}
+        from career_automation.application_archive import load_complete_attempt_view
+
+        view = load_complete_attempt_view(
+            recorder.attempt.attempt_id,
+            root=recorder.attempt.archive.root,
+            repository_root=recorder.attempt.archive.repository_root,
+        )
+        kinds = {row["payload"]["event_kind"] for row in view["evidence_events"]}
+        assert {
+            "navigation",
+            "preflight",
+            "field_filled",
+            "field_selected",
+            "file_uploaded",
+            "click",
+            "screenshot",
+        } <= kinds
+        assert view["gaps"]["action_timeline"] is False
+        assert "Alex Example" not in json.dumps(view, sort_keys=True)
         browser.close()
 
 
@@ -889,7 +2111,335 @@ def test_dynamic_option_is_bound_to_its_own_controlled_listbox() -> None:
 
 
 def test_concrete_preparation_uses_only_owned_candidate_generator() -> None:
-    source = inspect.getsource(GutuaGreenhouseSession.prepare_release)
+    source = inspect.getsource(GutuaGreenhouseSession._prepare_application)
     assert "sink.generate_candidate_application(" in source
     assert "producer=" not in source
     assert "generate_product" not in source
+    for method, selection in ((GutuaGreenhouseSession.prepare_release, "False"),
+                              (GutuaGreenhouseSession.prepare_review, "True")):
+        entrypoint = inspect.getsource(method)
+        assert f"self._prepare_application(item, recorder, page, sink, review_only={selection})" in entrypoint
+        assert "sink.generate_candidate_application(" not in entrypoint
+
+
+def test_session_initializes_and_forwards_approved_evidence_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "archive"
+    repository = tmp_path / "repository"
+    archive.mkdir()
+    repository.mkdir()
+    evidence_path = tmp_path / "approved-evidence.json"
+    observed_market_path = {}
+
+    def initialize_market(session, _arguments, _receipt):
+        observed_market_path["value"] = session.approved_evidence_path
+
+    monkeypatch.setattr(
+        GutuaGreenhouseSession, "_initialize_market_execution", initialize_market
+    )
+    market_session = GutuaGreenhouseSession(
+        SimpleNamespace(
+            archive_root=archive,
+            repository_root=repository,
+            market_execution_receipt=tmp_path / "market-receipt.json",
+            approved_evidence_path=evidence_path,
+        )
+    )
+    assert market_session.approved_evidence_path == evidence_path
+    assert observed_market_path["value"] == evidence_path
+
+    normal_session = object.__new__(GutuaGreenhouseSession)
+
+    class StopAfterInitialization(Exception):
+        pass
+
+    def stop_before_discovery(_name):
+        assert normal_session.approved_evidence_path == evidence_path
+        raise StopAfterInitialization
+
+    monkeypatch.setattr(session_module, "_required_file", stop_before_discovery)
+    with pytest.raises(StopAfterInitialization):
+        normal_session.__init__(SimpleNamespace(approved_evidence_path=evidence_path))
+
+
+def test_prepare_application_forwards_explicit_approved_evidence_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vacancy_body = b"Synthetic local vacancy: build and test a demonstration service."
+    vacancy = VacancyArchiveIdentity(
+        job_key="greenhouse:synthetic-local:0002",
+        vacancy_sha256=hashlib.sha256(vacancy_body).hexdigest(),
+        source_url="http://127.0.0.1:1/synthetic/application",
+        role_title="Synthetic Software Engineer",
+        company_name="Example Systems",
+    )
+    evidence_path = tmp_path / "accepted-synthetic-evidence.json"
+    evidence_path.write_text('{"synthetic":true}\n')
+    session = object.__new__(GutuaGreenhouseSession)
+    session.approved_evidence_path = evidence_path
+    session.archive_root = tmp_path
+    session.repository_root = Path(__file__).resolve().parents[2]
+    session.market_context_by_key = {}
+    session.complete_vacancy_by_key = {vacancy.job_key: vacancy_body}
+    session.decision_by_key = {vacancy.job_key: {"receipt": {"synthetic": True}}}
+    session.candidate_projection = {"synthetic": True}
+    monkeypatch.setattr(
+        session_module,
+        "verify_vacancy_body_equivalence",
+        lambda *_args, **_kwargs: {"equivalent": True},
+    )
+    monkeypatch.setattr(
+        session_module,
+        "build_vacancy_review_material",
+        lambda **_kwargs: SimpleNamespace(document=lambda: {"synthetic": True}),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_required_file",
+        lambda _name: tmp_path / "contact-authority.json",
+    )
+    monkeypatch.setattr(
+        session_module,
+        "load_candidate_contact_authority",
+        lambda *_args, **_kwargs: SimpleNamespace(contact="synthetic-contact"),
+    )
+
+    class Attempt:
+        def add_artifact(self, *_args, **_kwargs):
+            pass
+
+    class Recorder:
+        attempt = Attempt()
+
+        def add_revision(self, *_args, **_kwargs):
+            pass
+
+    class Page:
+        def content(self):
+            return "<html><body>Synthetic local vacancy</body></html>"
+
+        def locator(self, _selector):
+            return SimpleNamespace(inner_text=lambda: "Synthetic local vacancy")
+
+    captured = {}
+
+    class Sink:
+        def generate_candidate_application(self, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    item = SimpleNamespace(vacancy=SimpleNamespace(vacancy=vacancy))
+    with pytest.raises(
+        TypeError, match="owned candidate generator returned an invalid package"
+    ):
+        session._prepare_application(item, Recorder(), Page(), Sink(), review_only=True)
+    assert captured["approved_evidence_path"] == evidence_path
+
+
+def test_production_runner_cli_accepts_optional_approved_evidence_path(
+    tmp_path: Path,
+) -> None:
+    common = ["--repository-root", str(tmp_path), "--archive-root", str(tmp_path)]
+    explicit = runner_module._build_parser().parse_args(
+        [
+            *common,
+            "--review-only",
+            "--approved-evidence-path",
+            str(tmp_path / "evidence.json"),
+        ]
+    )
+    legacy = runner_module._build_parser().parse_args([*common, "--review-only"])
+    assert explicit.approved_evidence_path == tmp_path / "evidence.json"
+    assert legacy.approved_evidence_path is None
+
+
+def test_original_visible_listing_is_archived_before_contact_authority(tmp_path, monkeypatch):
+    from playwright.sync_api import sync_playwright
+
+    def stop_before_private_authority(_name):
+        raise RuntimeError("synthetic stop before contact authority")
+
+    monkeypatch.setattr(session_module, "_required_file", stop_before_private_authority)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content("<html><body><h1>Cafe\u0301 engineer</h1><p>Build systems.</p></body></html>")
+        raw = page.content().encode("utf-8")
+        original = page.locator("body").inner_text().encode("utf-8")
+        vacancy = VacancyArchiveIdentity(
+            job_key="greenhouse:fixture:visible-source", vacancy_sha256=hashlib.sha256(raw).hexdigest(),
+            role_title="Synthetic engineer", company_name="Fixture company",
+            source_url="https://example.test/synthetic-listing",
+        )
+        recorder = GreenhouseAttemptRecorder.create(
+            archive_root=tmp_path / "archive", repository_root=Path.cwd(), vacancy=vacancy,
+            complete_vacancy=raw, structured_vacancy={"job_key": vacancy.job_key},
+            assessment={"fixture_only": True},
+        )
+        session = object.__new__(GutuaGreenhouseSession)
+        session.complete_vacancy_by_key = {vacancy.job_key: raw}
+        item = SimpleNamespace(vacancy=SimpleNamespace(vacancy=vacancy))
+        with pytest.raises(RuntimeError, match="synthetic stop before contact authority"):
+            session.prepare_release(item, recorder, page, GeneratedRevisionSink(recorder))
+        objects = recorder.attempt._objects(recorder.attempt._events())
+        captured = [obj for obj in objects if obj.role == "vacancy.visible_listing_capture"]
+        assert len(captured) == 1
+        obj = captured[0]
+        assert recorder.attempt.archive.open_attempt(recorder.attempt.attempt_id).read_artifact(obj) == original
+        assert obj.sha256 == hashlib.sha256(original).hexdigest()
+        assert obj.lineage == (vacancy.vacancy_sha256,)
+        assert obj.disposition == "observed"
+        review = next(obj for obj in objects if obj.role == "vacancy.review_material")
+        projected = json.loads((recorder.attempt.archive.root / review.relative_path).read_bytes())
+        assert projected["exact_text"].encode("utf-8") != original
+        browser.close()
+
+
+def test_prepare_application_uses_current_contact_provenance_without_legacy_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_hash = "a" * 64
+    contact_values = {
+        "full_name": "Synthetic Candidate",
+        "email": "candidate@example.org",
+        "phone": "+12025550123",
+        "city": None,
+    }
+    sources = {
+        name: [
+            {
+                "sha256": source_hash,
+                "locator": f"saved_cv_1.page1.line{line}",
+            }
+        ]
+        for name, line in (("full_name", 1), ("email", 2), ("phone", 3))
+    }
+    bound = contact_module.bind_contact_sources(
+        contact_values,
+        sources,
+        [source_hash],
+        {
+            "manifest_sha256": "b" * 64,
+            "activation_sha256": "c" * 64,
+            "profile_sha256": "d" * 64,
+            "approval_id": "synthetic-approval",
+        },
+    )
+    semantic_sha256 = str(bound["provenance_sha256"])
+    candidate_contact = CandidateContact(
+        full_name=contact_values["full_name"],
+        email=contact_values["email"],
+        phone=contact_values["phone"],
+        city=None,
+        record_id=f"current-contact-{semantic_sha256}",
+        record_version=1,
+        provenance_sha256=semantic_sha256,
+    )
+    encoded = (canonical_json(bound) + "\n").encode("utf-8")
+    provenance = contact_module.CurrentContactProvenance(
+        contact=candidate_contact,
+        encoded_document=encoded,
+        sha256=hashlib.sha256(encoded).hexdigest(),
+    )
+    vacancy_body = b"Synthetic local vacancy: build and test a demonstration service."
+    vacancy = VacancyArchiveIdentity(
+        job_key="greenhouse:synthetic-local:0003",
+        vacancy_sha256=hashlib.sha256(vacancy_body).hexdigest(),
+        source_url="http://127.0.0.1:1/synthetic/application",
+        role_title="Synthetic Software Engineer",
+        company_name="Example Systems",
+    )
+    revalidations = []
+
+    class CurrentContext:
+        application_id = "app_" + "e" * 64
+        contact_authority_path = None
+        contact_provenance = provenance
+        market_decision_authority = SimpleNamespace(
+            environment=session_module.CURRENT_RUNTIME_ENVIRONMENT,
+            decision_receipt=lambda: {"synthetic": True},
+        )
+
+        def __post_init__(self):
+            self.contact_provenance.__post_init__()
+            revalidations.append("current")
+
+    context = CurrentContext()
+    session = object.__new__(GutuaGreenhouseSession)
+    session.approved_evidence_path = tmp_path / "approved-evidence.json"
+    session.archive_root = tmp_path
+    session.repository_root = Path(__file__).resolve().parents[2]
+    session.market_context_by_key = {vacancy.job_key: context}
+    session.current_runtime_pre_review_kwargs_by_key = {
+        vacancy.job_key: {
+            "current_runtime_config_path": str(tmp_path / "runtime.json"),
+            "current_runtime_config_sha256": "f" * 64,
+            "current_runtime_private_root": str(tmp_path / "private"),
+            "current_recovery_manifest_relative_path": "recovered/manifest.json",
+        }
+    }
+    session.complete_vacancy_by_key = {vacancy.job_key: vacancy_body}
+    session.decision_by_key = {vacancy.job_key: {"receipt": {"synthetic": True}}}
+    session.candidate_projection = {"synthetic": True}
+    monkeypatch.setattr(
+        session_module,
+        "verify_vacancy_body_equivalence",
+        lambda *_args, **_kwargs: {"equivalent": True},
+    )
+    monkeypatch.setattr(
+        session_module,
+        "build_vacancy_review_material",
+        lambda **_kwargs: SimpleNamespace(document=lambda: {"synthetic": True}),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_required_file",
+        lambda _name: pytest.fail("current mode requested a legacy contact path"),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "load_candidate_contact_authority",
+        lambda *_args, **_kwargs: pytest.fail("current mode invoked the legacy loader"),
+    )
+    captured = {}
+
+    class Attempt:
+        def add_artifact(self, *_args, **_kwargs):
+            pass
+
+    class Recorder:
+        attempt = Attempt()
+
+        def add_revision(self, *_args, **_kwargs):
+            pass
+
+    class Page:
+        def content(self):
+            return "<html><body>Synthetic local vacancy</body></html>"
+
+        def locator(self, _selector):
+            return SimpleNamespace(inner_text=lambda: "Synthetic local vacancy")
+
+    class Sink:
+        def generate_candidate_application(self, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    item = SimpleNamespace(vacancy=SimpleNamespace(vacancy=vacancy))
+    with pytest.raises(
+        TypeError, match="owned candidate generator returned an invalid package"
+    ):
+        session._prepare_application(item, Recorder(), Page(), Sink(), review_only=True)
+
+    assert captured["contact"] is candidate_contact
+    assert captured["current_runtime_application_id"] == context.application_id
+    assert captured["current_runtime_pre_review_kwargs"] == (
+        session.current_runtime_pre_review_kwargs_by_key[vacancy.job_key]
+    )
+    assert "approved_evidence_path" not in captured
+    assert revalidations == ["current"]
+    assert provenance.sha256 != candidate_contact.provenance_sha256
+    assert session_module._contact_authority_provenance_sha256(
+        provenance, current_runtime=True
+    ) == candidate_contact.provenance_sha256

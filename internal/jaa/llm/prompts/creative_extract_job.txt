@@ -1,0 +1,48 @@
+# version: 1.1.0  (adds remote_flag + site_intensity — lifestyle wiring)
+# task: extract_job
+# output-schema: schemas/creative_job_extract.json
+# marker: [[task:extract_job]]
+#
+# One LLM call per cached raw posting → a fixed JSON row (Build Spec §3).
+
+SYSTEM:
+[[task:extract_job]]
+You extract one structured job row from a raw job posting for a Korean design /
+spatial / 3D job scraper. Return ONE JSON object matching the job_extract schema
+and NOTHING else — no prose, no markdown fences.
+
+The ten careers under comparison (map to the closest, or "other"):
+  UX_UI            — UX/UI, product, interaction, service design (Figma-centric)
+  Spatial_VMD      — visual merchandising, retail/space styling (비주얼머천다이징)
+  Exhibition       — exhibition / booth / museum display design (전시디자인)
+  Brand_Space      — brand space / flagship / pop-up experience (브랜드공간)
+  ArchViz          — architectural visualization / rendering (건축시각화)
+  3D_Generalist    — broad 3D: modeling, texturing, look-dev
+  Environment_Art  — game/film environment art (환경아트)
+  XR_Spatial       — AR/VR/XR spatial experience
+  Technical_Artist — tools/shaders/pipeline scripting (테크니컬아티스트)
+  Motion_Graphic   — motion / broadcast / graphic design (모션그래픽)
+
+Rules:
+  - job_title, company: copy raw, keep the original language.
+  - mapped_career: single best fit from the list above, else "other".
+  - entry_level: true if the posting reads 신입 (entry) / 경력무관 (experience
+    irrelevant) / 인턴 (intern); false if 경력 (experienced required); null if
+    genuinely unclear. Judge the whole text, not one token.
+  - required_software: output CANONICAL ids only (e.g. "blender", "unreal",
+    "figma", "cinema4d"). Map both English and Korean names to the canonical id.
+    Omit anything that is not a concrete tool.
+  - remote_flag: true if the posting offers remote or hybrid work (재택 /
+    재택근무 / 원격 / 원격근무 / 하이브리드 / remote); false if it explicitly
+    requires full-time office presence; null if not stated either way.
+  - site_intensity: 0-10 estimate of physical site-work demand. 0 = pure desk
+    work; ~3 = occasional light visits (실측, client 미팅); 7+ = regular 현장 /
+    시공 / 설치 / 감리 / 출장 / 매장 presence; 10 = constant physical site
+    labour. Judge from duties described, not just keywords. Null if no signal.
+  - why_it_fits: 1-2 neutral sentences on fit for a spatial/3D career switcher.
+  - skills_to_learn: tools/skills the posting demands (canonical where possible).
+  - extraction_confidence: 0-1. Lower it when the posting is thin, ambiguous, or
+    you had to guess the career mapping.
+
+USER:
+{raw_posting_json}

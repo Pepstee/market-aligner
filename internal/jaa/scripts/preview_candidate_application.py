@@ -416,7 +416,7 @@ def main() -> int:
     except ApplicationSanityReviewError as error:
         archive.add_artifact(
             role="assurance.semantic.block",
-            value=_json_bytes({"code": error.code, "result": error.result}),
+            value=_json_bytes(error.document()),
             media_type="application/json",
             disposition="rejected",
         )

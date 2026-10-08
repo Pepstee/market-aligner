@@ -121,10 +121,10 @@ def test_locked_environment_refuses_an_import_from_another_project(
 def test_bootstrap_constructs_only_relative_locked_install_arguments() -> None:
     """The bootstrap remains portable; it is never run from pytest."""
     script = BOOTSTRAP.read_text(encoding="utf-8")
-    pip_commands = [line.strip() for line in script.splitlines() if ' -m pip install ' in line]
+    pip_commands = [line.strip() for line in script.splitlines() if ' -m pip --isolated install ' in line]
 
-    assert '"$TEST_PYTHON" -m pip install --no-build-isolation --requirement requirements-test.lock' in pip_commands
-    assert '"$TEST_PYTHON" -m pip install --no-build-isolation --no-deps --editable .' in pip_commands
+    assert '"$TEST_PYTHON" -m pip --isolated install --no-build-isolation --no-deps --requirement internal/jaa/requirements-test.lock' in pip_commands
+    assert '"$TEST_PYTHON" -m pip --isolated install --no-deps "$JAA_WHEEL" "$MARKET_WHEEL"' in pip_commands
     assert all("$REPOSITORY_ROOT" not in command for command in pip_commands)
     assert all(not re.search(r"(?:^|[ =])/(?:Users|home)/", command) for command in pip_commands)
     assert all("~/" not in command and "$HOME" not in command for command in pip_commands)

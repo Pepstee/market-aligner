@@ -689,6 +689,81 @@ def parse_handoff(raw: bytes, *, require_strict_profile: bool = False) -> Parsed
     )
 
 
+_CURRENT_RUNTIME_SCHEMA = "market-aligner.jaa-handoff.current-runtime.v1"
+_CURRENT_RUNTIME_PROFILE = "current_runtime_non_release_v1"
+_RUNTIME_DISPATCH_ERROR = "invalid handoff consumer dispatch"
+
+
+def parse_handoff_for_runtime(
+    raw: bytes,
+    *,
+    current_runtime: bool = False,
+    require_strict_profile: bool = False,
+    legacy_parser,
+    current_parser,
+    make_parsed,
+) -> ParsedHandoff:
+    if (
+        type(current_runtime) is not bool
+        or type(require_strict_profile) is not bool
+        or type(raw) is not bytes
+        or not raw
+        or len(raw) > MAX_WIRE_BYTES
+        or not callable(legacy_parser)
+        or not callable(current_parser)
+        or not callable(make_parsed)
+    ):
+        raise ValueError(_RUNTIME_DISPATCH_ERROR)
+
+    if not current_runtime:
+        return legacy_parser(raw, require_strict_profile=require_strict_profile)
+    if require_strict_profile:
+        raise ValueError(_RUNTIME_DISPATCH_ERROR)
+
+    parsed = current_parser(raw)
+    try:
+        if (
+            type(parsed.exact_bytes) is not bytes
+            or parsed.exact_bytes != raw
+            or type(parsed.payload_sha256) is not str
+            or type(parsed.root_sha256) is not str
+            or type(parsed.schema_version) is not str
+            or type(parsed.emission_profile) is not str
+            or type(parsed.release_blocked) is not bool
+            or re.fullmatch(r"[0-9a-f]{64}", parsed.payload_sha256) is None
+            or re.fullmatch(r"[0-9a-f]{64}", parsed.root_sha256) is None
+            or parsed.schema_version != _CURRENT_RUNTIME_SCHEMA
+            or parsed.emission_profile != _CURRENT_RUNTIME_PROFILE
+            or parsed.release_blocked is not True
+            or parsed.root_sha256 != hashlib.sha256(raw).hexdigest()
+        ):
+            raise ValueError(_RUNTIME_DISPATCH_ERROR)
+
+        envelope = json.loads(raw.decode("utf-8"))
+        if (
+            type(envelope) is not dict
+            or set(envelope) != {"payload", "payload_sha256", "schema_version"}
+            or type(envelope["payload"]) is not dict
+            or envelope["schema_version"] != _CURRENT_RUNTIME_SCHEMA
+            or envelope["payload_sha256"] != parsed.payload_sha256
+            or hashlib.sha256(canonical_json_bytes(envelope["payload"])).hexdigest()
+            != parsed.payload_sha256
+        ):
+            raise ValueError(_RUNTIME_DISPATCH_ERROR)
+    except (AttributeError, UnicodeError, ValueError):
+        raise ValueError(_RUNTIME_DISPATCH_ERROR) from None
+
+    return make_parsed(
+        original_bytes=raw,
+        envelope=envelope,
+        payload=envelope["payload"],
+        payload_sha256=parsed.payload_sha256,
+        root_sha256=parsed.root_sha256,
+        emission_profile=_CURRENT_RUNTIME_PROFILE,
+        strict_profile_violations=(),
+    )
+
+
 __all__ = [
     "ACCEPTANCE_MATRIX_SHA256",
     "ACCEPTANCE_MATRIX_V1_1_SHA256",
@@ -712,5 +787,6 @@ __all__ = [
     "canonical_sha256",
     "decode_canonical_json",
     "parse_handoff",
+    "parse_handoff_for_runtime",
     "validate_handoff_payload",
 ]

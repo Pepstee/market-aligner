@@ -25,10 +25,12 @@ from career_automation.application_compiler import (
     ApplicationSource,
     DocumentSection,
     FactualSentence,
+    PendingCurrentOutwardDraft,
     StyleSlot,
     verify_application_source,
 )
 from career_automation.candidate_application_factory import (
+    CURRENT_RUNTIME_ENVIRONMENT,
     CandidateApplicationMaterializationReceipt,
     CandidateApplicationPackage,
     GenerationRevisionWriter,
@@ -40,6 +42,7 @@ from career_automation.rendering import (
     CV_SECTION_HEADINGS,
     ApplicationArtifacts,
     render_pdf_artifacts,
+    render_editable_text,
     verify_application_artifacts,
 )
 
@@ -52,6 +55,8 @@ from .adversarial_rebuild import (
     rebuild_from_recruiter_assessment,
 )
 from .constraints import (
+    BASE_CV_POLICY,
+    CandidateSourcePolicyReceipt,
     CVConstraintReceipt,
     CVPopplerQualityReceipt,
     policy_for_candidate,
@@ -78,6 +83,7 @@ from .editorial_composition import (
     EditorialStageEvidence,
     admit_cover_letter_editorial_composition,
     admit_editorial_composition,
+    editorial_section_policy,
     validate_cover_letter_editorial_draft,
     validate_editorial_draft,
 )
@@ -145,6 +151,7 @@ def _source_for_editorial_draft(
     base_source: ApplicationSource,
     request: CVEditorialRequest,
     draft: CVEditorialDraft,
+    materialization_receipt: CandidateApplicationMaterializationReceipt | None = None,
 ) -> ApplicationSource:
     """Project an admitted draft onto existing authority-backed source atoms."""
 
@@ -161,10 +168,35 @@ def _source_for_editorial_draft(
     ):
         raise CVCompositionServiceError("artifact contact differs from editorial authority")
 
+    allowed_headings = (
+        editorial_section_policy(current_runtime=True)
+        if request.authority.current_runtime
+        else CV_SECTION_HEADINGS
+    )
+    facts_by_id: dict[str, FactualSentence] = {}
     facts_by_text: dict[str, list[FactualSentence]] = {}
     for fact in base_source.facts:
         if fact.document_kind == "cv":
+            facts_by_id[fact.sentence_id] = fact
             facts_by_text.setdefault(fact.text, []).append(fact)
+    claims_by_id = {claim.claim_id: claim for claim in request.approved_claims}
+    current_runtime = request.authority.current_runtime
+    if current_runtime:
+        if type(materialization_receipt) is not CandidateApplicationMaterializationReceipt:
+            raise CVCompositionServiceError(
+                "current draft requires its exact materialization receipt"
+            )
+        materialization_receipt.__post_init__()
+        if (
+            materialization_receipt.deployment_binding.environment
+            != CURRENT_RUNTIME_ENVIRONMENT
+            or materialization_receipt.application_source_id != base_source.source_id
+            or materialization_receipt.application_source_sha256
+            != base_source.content_sha256
+        ):
+            raise CVCompositionServiceError(
+                "current draft differs from its admitted materialization"
+            )
     style_by_text = {
         slot.text: slot
         for slot in base_source.style_slots
@@ -174,7 +206,7 @@ def _source_for_editorial_draft(
     selected_slots: dict[str, StyleSlot] = {}
     sections: list[DocumentSection] = []
     for section in draft.sections:
-        if section.heading not in CV_SECTION_HEADINGS:
+        if section.heading not in allowed_headings:
             raise CVCompositionServiceError(
                 "editorial section is unsupported by the canonical renderer"
             )
@@ -204,12 +236,56 @@ def _source_for_editorial_draft(
                 slot_ids.append(slot.slot_id)
                 continue
             factual_span_seen = True
-            candidates = facts_by_text.get(atom.text, ())
-            if not candidates:
-                raise CVCompositionServiceError(
-                    "editorial claim has no canonical artifact fact"
+            claim = claims_by_id.get(atom.claim_id or "")
+            if current_runtime:
+                fact = facts_by_id.get(atom.claim_id or "")
+                if fact is None or claim is None or fact.text != claim.text:
+                    raise CVCompositionServiceError(
+                        "editorial claim has no canonical artifact fact"
+                    )
+                if hashlib.sha256(claim.text.encode("utf-8")).hexdigest() != claim.text_sha256:
+                    raise CVCompositionServiceError("editorial claim source hash differs")
+            else:
+                candidates = facts_by_text.get(atom.text, ())
+                if not candidates:
+                    raise CVCompositionServiceError(
+                        "editorial claim has no canonical artifact fact"
+                    )
+                fact = sorted(candidates, key=lambda row: row.sentence_id)[0]
+            if current_runtime:
+                if fact.fact_kind != "candidate":
+                    raise CVCompositionServiceError(
+                        "current editorial rewrites require candidate facts"
+                    )
+                authority = fact.authority
+                if getattr(authority, "rewrite_authority", None) is not None:
+                    authority = replace(authority, rewrite_authority=None)
+                pending = None
+                if atom.text != fact.approved_source_text:
+                    pending = PendingCurrentOutwardDraft(
+                        sentence_id=fact.sentence_id,
+                        document_kind="cv",
+                        materialization_receipt_sha256=(
+                            materialization_receipt.receipt_sha256
+                        ),
+                        editorial_request_sha256=request.request_sha256,
+                        original_text_sha256=hashlib.sha256(
+                            fact.approved_source_text.encode("utf-8")
+                        ).hexdigest(),
+                        outward_text_sha256=hashlib.sha256(
+                            atom.text.encode("utf-8")
+                        ).hexdigest(),
+                    )
+                fact = replace(
+                    fact,
+                    text=atom.text,
+                    authority=authority,
+                    pending_current_outward_draft=pending,
                 )
-            fact = sorted(candidates, key=lambda row: row.sentence_id)[0]
+            elif atom.text != fact.text:
+                raise CVCompositionServiceError(
+                    "editorial claim differs from its exact source text"
+                )
             selected_facts[fact.sentence_id] = fact
             sentence_ids.append(fact.sentence_id)
         sections.append(
@@ -240,6 +316,8 @@ def _source_for_cover_letter_draft(
     base_source: ApplicationSource,
     request: CoverLetterEditorialRequest,
     draft: CoverLetterEditorialDraft,
+    materialization_receipt: CandidateApplicationMaterializationReceipt | None = None,
+    materialized_source: ApplicationSource | None = None,
 ) -> ApplicationSource:
     """Project an admitted cover letter onto canonical evidence-backed atoms."""
     verify_application_source(base_source)
@@ -256,6 +334,27 @@ def _source_for_cover_letter_draft(
         for fact in base_source.facts
         if fact.document_kind == "cover_letter"
     }
+    if request.authority.current_runtime:
+        if type(materialization_receipt) is not CandidateApplicationMaterializationReceipt:
+            raise CVCompositionServiceError(
+                "current cover draft requires its exact materialization receipt"
+            )
+        materialization_receipt.__post_init__()
+        if type(materialized_source) is not ApplicationSource:
+            raise CVCompositionServiceError(
+                "current cover draft lacks its original materialized source"
+            )
+        verify_application_source(materialized_source)
+        if (
+            materialization_receipt.deployment_binding.environment
+            != CURRENT_RUNTIME_ENVIRONMENT
+            or materialization_receipt.application_source_id != materialized_source.source_id
+            or materialization_receipt.application_source_sha256
+            != materialized_source.content_sha256
+        ):
+            raise CVCompositionServiceError(
+                "current cover draft differs from its admitted materialization"
+            )
     style_by_text = {
         slot.text: slot
         for slot in base_source.style_slots
@@ -292,19 +391,65 @@ def _source_for_cover_letter_draft(
                 continue
             factual_span_seen = True
             fact = facts_by_id.get(atom.claim_id or "")
-            if fact is None or fact.text != atom.text:
+            if fact is None:
                 raise CVCompositionServiceError(
                     "cover-letter claim has no canonical artifact fact"
                 )
+            if request.authority.current_runtime:
+                if fact.fact_kind == "employer":
+                    if (
+                        atom.text != fact.text
+                        or atom.text != fact.approved_source_text
+                        or fact.pending_current_outward_draft is not None
+                    ):
+                        raise CVCompositionServiceError(
+                            "current employer facts must remain exact"
+                        )
+                elif fact.fact_kind != "candidate":
+                    raise CVCompositionServiceError(
+                        "current cover claims have an unsupported fact kind"
+                    )
+                else:
+                    authority = fact.authority
+                    if getattr(authority, "rewrite_authority", None) is not None:
+                        authority = replace(authority, rewrite_authority=None)
+                    original = fact.approved_source_text
+                    pending = None
+                    if atom.text != original:
+                        pending = PendingCurrentOutwardDraft(
+                            sentence_id=fact.sentence_id,
+                            document_kind="cover_letter",
+                            materialization_receipt_sha256=(
+                                materialization_receipt.receipt_sha256
+                            ),
+                            editorial_request_sha256=request.request_sha256,
+                            original_text_sha256=hashlib.sha256(
+                                original.encode("utf-8")
+                            ).hexdigest(),
+                            outward_text_sha256=hashlib.sha256(
+                                atom.text.encode("utf-8")
+                            ).hexdigest(),
+                        )
+                    fact = replace(
+                        fact,
+                        text=atom.text,
+                        authority=authority,
+                        pending_current_outward_draft=pending,
+                    )
+            elif fact.text != atom.text:
+                raise CVCompositionServiceError(
+                    "cover-letter claim differs from its exact source text"
+                )
             selected_facts[fact.sentence_id] = fact
             sentence_ids.append(fact.sentence_id)
-        sections.append(
-            DocumentSection(
-                heading=section.heading,
-                sentence_ids=tuple(sentence_ids),
-                style_slot_ids=tuple(slot_ids),
+        if sentence_ids or slot_ids:
+            sections.append(
+                DocumentSection(
+                    heading=section.heading,
+                    sentence_ids=tuple(sentence_ids),
+                    style_slot_ids=tuple(slot_ids),
+                )
             )
-        )
     non_letter_facts = tuple(
         fact for fact in base_source.facts if fact.document_kind != "cover_letter"
     )
@@ -326,10 +471,33 @@ def _validate_artifact_cv(
     draft: CVEditorialDraft,
     source: ApplicationSource,
     artifacts: ApplicationArtifacts,
-) -> CVConstraintReceipt:
+) -> CVConstraintReceipt | CandidateSourcePolicyReceipt:
     verify_application_artifacts(artifacts)
     if artifacts.source_id != source.source_id:
         raise CVCompositionServiceError("rendered artifacts target another source")
+    if request.authority.current_runtime:
+        receipt = validate_generated_cv(
+            source_id=source.source_id,
+            candidate_name=source.contact.full_name,
+            candidate_city=source.contact.city,
+            cv_text=artifacts.editable.cv_text,
+            cv_sha256=artifacts.editable.cv_sha256,
+            sections={
+                section.heading: tuple(atom.text for atom in section.atoms)
+                for section in draft.sections
+            },
+            rendered_pages=artifacts.cv_pdf.rendered_lines,
+            policy=BASE_CV_POLICY,
+            target_role_title=request.role_title,
+            section_policy=editorial_section_policy(current_runtime=True),
+            _source_policy_only=True,
+            allow_missing_city=request.authority.allow_missing_city,
+        )
+        if type(receipt) is not CandidateSourcePolicyReceipt:
+            raise CVCompositionServiceError(
+                "current pre-review CV validation returned the wrong receipt"
+            )
+        return receipt
     selected = policy_for_candidate(request.authority.candidate_name)
     if selected.candidate_name is not None and (
         selected.candidate_name != request.authority.candidate_name
@@ -567,6 +735,117 @@ class CVCompositionOrchestrationResult:
         return value
 
 
+@dataclass(frozen=True)
+class CurrentRuntimeDraftCompositionResult:
+    editorial_receipt: EditorialCompositionReceipt
+    cover_letter_editorial_receipt: CoverLetterEditorialCompositionReceipt
+    initial_constraint_receipt: CandidateSourcePolicyReceipt
+    initial_source: ApplicationSource
+    initial_artifacts: ApplicationArtifacts
+    initial_quality_receipt: DocumentQualityReceipt
+    initial_benchmark_receipt: CVBenchmarkDiagnosticReceipt | None
+    orchestration_sha256: str
+    review_status: str = "not_performed"
+    release_authority: bool = False
+    schema_version: str = "jaa.cv-current-runtime-pre-review.v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "jaa.cv-current-runtime-pre-review.v1":
+            raise CVCompositionServiceError(
+                "current pre-review result schema is unsupported"
+            )
+        if self.review_status != "not_performed" or self.release_authority is not False:
+            raise CVCompositionServiceError(
+                "current pre-review result cannot claim review or release"
+            )
+        if type(self.editorial_receipt) is not EditorialCompositionReceipt:
+            raise CVCompositionServiceError(
+                "current pre-review result lacks editorial composition evidence"
+            )
+        if type(self.cover_letter_editorial_receipt) is not CoverLetterEditorialCompositionReceipt:
+            raise CVCompositionServiceError(
+                "current pre-review result lacks cover-letter composition evidence"
+            )
+        if type(self.initial_constraint_receipt) is not CandidateSourcePolicyReceipt:
+            raise CVCompositionServiceError(
+                "current pre-review result lacks source-only CV validation"
+            )
+        self.editorial_receipt.__post_init__()
+        self.cover_letter_editorial_receipt.__post_init__()
+        self.initial_constraint_receipt.__post_init__()
+        self.initial_quality_receipt.__post_init__()
+        if type(self.initial_source) is not ApplicationSource:
+            raise CVCompositionServiceError(
+                "current pre-review result lacks its typed prepared source"
+            )
+        verify_application_source(self.initial_source)
+        verify_application_artifacts(self.initial_artifacts)
+        if (
+            self.initial_artifacts.source_id != self.initial_source.source_id
+            or render_editable_text(self.initial_source) != self.initial_artifacts.editable
+            or self.initial_constraint_receipt.source_id
+            != self.initial_source.source_id
+            or self.initial_constraint_receipt.cv_sha256
+            != self.initial_artifacts.editable.cv_sha256
+            or
+            self.initial_constraint_receipt.source_id
+            != self.initial_artifacts.source_id
+            or self.initial_quality_receipt.artifact_set_sha256
+            != self.initial_artifacts.artifact_set_sha256
+        ):
+            raise CVCompositionServiceError(
+                "current pre-review evidence is out of order"
+            )
+        if self.initial_benchmark_receipt is not None:
+            self.initial_benchmark_receipt.__post_init__()
+            if (
+                self.initial_benchmark_receipt.draft_sha256
+                != self.editorial_receipt.final_draft_sha256
+            ):
+                raise CVCompositionServiceError(
+                    "current pre-review benchmark differs from the admitted draft"
+                )
+        if not _SHA256.fullmatch(self.orchestration_sha256):
+            raise CVCompositionServiceError(
+                "current pre-review orchestration hash is malformed"
+            )
+        if self.orchestration_sha256 != content_hash(
+            self.document(include_identity=False)
+        ):
+            raise CVCompositionServiceError(
+                "current pre-review orchestration identity is invalid"
+            )
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "environment": CURRENT_RUNTIME_ENVIRONMENT,
+            "final_document_admitted": False,
+            "initial_artifact_set_sha256": self.initial_artifacts.artifact_set_sha256,
+            "initial_constraint_receipt_sha256": (
+                self.initial_constraint_receipt.receipt_sha256
+            ),
+            "initial_source_sha256": self.initial_source.content_sha256,
+            "initial_quality_receipt_sha256": (
+                self.initial_quality_receipt.receipt_sha256
+            ),
+            "initial_benchmark_receipt_sha256": (
+                self.initial_benchmark_receipt.receipt_sha256
+                if self.initial_benchmark_receipt is not None
+                else None
+            ),
+            "editorial_receipt_sha256": self.editorial_receipt.receipt_sha256,
+            "cover_letter_editorial_receipt_sha256": (
+                self.cover_letter_editorial_receipt.receipt_sha256
+            ),
+            "release_authority": False,
+            "review_status": "not_performed",
+            "schema_version": self.schema_version,
+        }
+        if include_identity:
+            value["orchestration_sha256"] = self.orchestration_sha256
+        return value
+
+
 def run_cv_composition_orchestration(
     *,
     request: CVEditorialRequest,
@@ -593,10 +872,64 @@ def run_cv_composition_orchestration(
     cover_letter_bindings: Sequence[CoverLetterRecruiterImprovementBinding] = (),
     cover_letter_improvement_binder: CoverLetterImprovementBinder | None = None,
     poppler_runtime: PopplerRuntime | None = None,
-) -> CVCompositionOrchestrationResult:
+    current_runtime_pre_review: bool = False,
+) -> CVCompositionOrchestrationResult | CurrentRuntimeDraftCompositionResult:
     """Run one offline-safe CV composition, assessment and rebuild cycle."""
 
-    if environment == "production":
+    if type(current_runtime_pre_review) is not bool:
+        raise CVCompositionServiceError("current pre-review mode must be boolean")
+    if environment == CURRENT_RUNTIME_ENVIRONMENT:
+        cover_inputs = (
+            cover_letter_request,
+            cover_letter_writer_draft,
+            cover_letter_humanized_draft,
+            cover_letter_writer_evidence,
+            cover_letter_humanizer_evidence,
+        )
+        if (
+            current_runtime_pre_review is not True
+            or type(materialization_receipt)
+            is not CandidateApplicationMaterializationReceipt
+            or any(value is None for value in cover_inputs)
+        ):
+            raise CVCompositionServiceError(
+                "current runtime requires the explicit pre-review composition path"
+            )
+        try:
+            CandidateApplicationMaterializationReceipt.__post_init__(
+                materialization_receipt
+            )
+            CandidateApplicationMaterializationReceipt.authorize_editorial_request(
+                materialization_receipt, request
+            )
+            CandidateApplicationMaterializationReceipt.authorize_editorial_request(
+                materialization_receipt, cover_letter_request
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise CVCompositionServiceError(
+                "current editorial request differs from materialization"
+            ) from exc
+        if (
+            production_recruiter_assessor is not None
+            or recruiter_assessor is not None
+            or recruiter_receipt is not None
+            or improvement_binder is not None
+            or bindings
+            or cover_letter_improvement_binder is not None
+            or cover_letter_bindings
+        ):
+            raise CVCompositionServiceError(
+                "current pre-review path refuses recruiter assessment inputs"
+            )
+        if type(poppler_runtime) is not PopplerRuntime or not poppler_runtime.tool_descriptors:
+            raise CVCompositionServiceError(
+                "current pre-review path requires a pinned Poppler runtime"
+            )
+    elif environment == "production":
+        if current_runtime_pre_review:
+            raise CVCompositionServiceError(
+                "legacy production cannot enter current pre-review mode"
+            )
         if type(materialization_receipt) is not CandidateApplicationMaterializationReceipt:
             raise CVCompositionServiceError(
                 "production requires exact candidate source materialization"
@@ -640,6 +973,10 @@ def run_cv_composition_orchestration(
                 "production requires a pinned Poppler runtime"
             )
     elif environment == "synthetic":
+        if current_runtime_pre_review:
+            raise CVCompositionServiceError(
+                "synthetic composition cannot enter current pre-review mode"
+            )
         if production_recruiter_assessor is not None or (
             (recruiter_assessor is None) == (recruiter_receipt is None)
         ):
@@ -720,12 +1057,23 @@ def run_cv_composition_orchestration(
         base_source=base_source,
         request=request,
         draft=humanized_draft,
+        materialization_receipt=(
+            materialization_receipt
+            if current_runtime_pre_review
+            else None
+        ),
     )
     if cover_letter_request is not None:
         initial_source = _source_for_cover_letter_draft(
             base_source=initial_source,
             request=cover_letter_request,
             draft=cover_letter_humanized_draft,
+            materialization_receipt=(
+                materialization_receipt
+                if current_runtime_pre_review
+                else None
+            ),
+            materialized_source=base_source,
         )
     initial_artifacts = render_pdf_artifacts(initial_source)
     initial_constraint = _validate_artifact_cv(
@@ -747,6 +1095,45 @@ def run_cv_composition_orchestration(
         )
         if benchmark_manifest is not None else None
     )
+    if environment == CURRENT_RUNTIME_ENVIRONMENT:
+        if type(initial_constraint) is not CandidateSourcePolicyReceipt:
+            raise CVCompositionServiceError(
+                "current pre-review CV validation returned the wrong receipt"
+            )
+        values = {
+            "cover_letter_editorial_receipt_sha256": (
+                cover_letter_editorial_receipt.receipt_sha256
+                if cover_letter_editorial_receipt is not None
+                else None
+            ),
+            "editorial_receipt_sha256": editorial_receipt.receipt_sha256,
+            "environment": CURRENT_RUNTIME_ENVIRONMENT,
+            "final_document_admitted": False,
+            "initial_artifact_set_sha256": initial_artifacts.artifact_set_sha256,
+            "initial_benchmark_receipt_sha256": (
+                initial_benchmark.receipt_sha256
+                if initial_benchmark is not None
+                else None
+            ),
+            "initial_constraint_receipt_sha256": initial_constraint.receipt_sha256,
+            "initial_source_sha256": initial_source.content_sha256,
+            "initial_quality_receipt_sha256": initial_quality.receipt_sha256,
+            "release_authority": False,
+            "review_status": "not_performed",
+            "schema_version": "jaa.cv-current-runtime-pre-review.v1",
+        }
+        result = CurrentRuntimeDraftCompositionResult(
+            editorial_receipt=editorial_receipt,
+            cover_letter_editorial_receipt=cover_letter_editorial_receipt,
+            initial_constraint_receipt=initial_constraint,
+            initial_source=initial_source,
+            initial_artifacts=initial_artifacts,
+            initial_quality_receipt=initial_quality,
+            initial_benchmark_receipt=initial_benchmark,
+            orchestration_sha256=content_hash(values),
+        )
+        result.__post_init__()
+        return result
     package = RecruiterAssessmentPackage(
         listing_text=listing_text,
         listing_text_sha256=listing_sha256,
@@ -946,6 +1333,7 @@ def run_cv_composition_orchestration(
 __all__ = [
     "CVCompositionOrchestrationResult",
     "CVCompositionServiceError",
+    "CVConstraintReceipt",
     "CandidateApplicationPackage",
     "CVPopplerQualityReceipt",
     "GenerationRevisionWriter",

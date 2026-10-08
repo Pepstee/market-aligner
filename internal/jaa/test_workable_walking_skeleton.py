@@ -50,6 +50,7 @@ from cv_generation.constraints import (
     validate_generated_cv,
     verify_poppler_cv_quality,
 )
+from cv_generation.document_quality import resolve_poppler_runtime
 from test_jaa08_independent_acceptance import (
     DIGEST,
     ROOT,
@@ -59,9 +60,13 @@ from test_jaa08_independent_acceptance import (
 from test_workable_live_adapter import _install
 
 
-POPPLER_ROOT = Path("/home/gutua/software-factory/.control/poppler-26.01.0/root")
-POPPLER_BIN = POPPLER_ROOT / "usr/bin"
-POPPLER_LIB = POPPLER_ROOT / "usr/lib/x86_64-linux-gnu"
+POPPLER_RUNTIME = resolve_poppler_runtime()
+POPPLER_BIN = Path(dict(POPPLER_RUNTIME.tool_paths)["pdfinfo"]).resolve().parent
+POPPLER_LIB = (
+    Path(POPPLER_RUNTIME.library_directory)
+    if POPPLER_RUNTIME.library_directory is not None
+    else None
+)
 ADMISSION_TIME = datetime(2026, 8, 10, 10, 5, tzinfo=timezone.utc)
 
 
@@ -75,9 +80,9 @@ def _market_vacancy_references(
     role_title: str,
 ) -> dict[str, bytes]:
     fixture = json.loads(
-        files("career_automation").joinpath(
-            "fixtures/market-aligner-v1-vectors.json"
-        ).read_bytes()
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
     )
     original = {
         entry["metadata"]["reference_key"]: json.loads(
@@ -152,9 +157,11 @@ def _handoff_for_source(
     source,
     vacancy_snapshot_bytes: bytes,
 ) -> tuple[dict[str, object], bytes]:
-    fixture_bytes = files("career_automation").joinpath(
-        "fixtures/market-aligner-v1-vectors.json"
-    ).read_bytes()
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
     document = json.loads(fixture_bytes)
     envelope = json.loads(
         base64.b64decode(document["handoff"]["canonical_base64"], validate=True)
@@ -213,9 +220,11 @@ def _admit(
     document: dict[str, object] | None = None,
     handoff_bytes: bytes | None = None,
 ):
-    fixture_bytes = files("career_automation").joinpath(
-        "fixtures/market-aligner-v1-vectors.json"
-    ).read_bytes()
+    fixture_bytes = (
+        files("career_automation")
+        .joinpath("fixtures/market-aligner-v1-vectors.json")
+        .read_bytes()
+    )
     if document is None:
         document = json.loads(fixture_bytes)
     if handoff_bytes is None:
@@ -377,9 +386,7 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
             if typed[row.sentence_id] in {"achievement", "project"}
         )
         education = tuple(
-            row.sentence_id
-            for row in cv_facts
-            if typed[row.sentence_id] == "education"
+            row.sentence_id for row in cv_facts if typed[row.sentence_id] == "education"
         )
         return compile_application_source(
             strategy=strategy,
@@ -531,6 +538,7 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
             True,
         ),
     )
+
     def issue_after_cv_constraint(receipt):
         if (
             receipt is None
@@ -558,7 +566,9 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
     with pytest.raises(ValueError, match="constraint receipt"):
         issue_after_cv_constraint(None)
     with database.connection() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM release_tokens").fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM release_tokens").fetchone()[0] == 0
+        )
     issued = issue_after_cv_constraint(constraint)
     consumed_at = datetime(today.year, today.month, today.day, 12, tzinfo=timezone.utc)
     with pytest.raises(ValueError, match="release token"):
@@ -576,10 +586,16 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
         )
 
     authority = JAA08ReleaseAuthority(
-        gate=gate, release_token=issued.release_token, source=source,
-        artifacts=artifacts, contact=contact, questions=questions,
-        artifact_root=artifact_root, repository_root=ROOT,
-        jurisdiction="GB", contract_type="employee",
+        gate=gate,
+        release_token=issued.release_token,
+        source=source,
+        artifacts=artifacts,
+        contact=contact,
+        questions=questions,
+        artifact_root=artifact_root,
+        repository_root=ROOT,
+        jurisdiction="GB",
+        contract_type="employee",
         consumed_at=consumed_at,
     )
     answers = {
@@ -616,7 +632,11 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
         review = adapter.prepare_review(page, policy=policy, application=application)
         assert review.consequential_click_authority is False
         receipt = adapter.submit(
-            page, policy=policy, application=application, review=review, authority=authority
+            page,
+            policy=policy,
+            application=application,
+            review=review,
+            authority=authority,
         )
         assert page.evaluate("window.submitClicks") == 1
         browser.close()
@@ -624,10 +644,16 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
     assert circuit.snapshot()["state"] == "succeeded"
     transitions = tuple(row["to_state"] for row in circuit.journal())
     assert transitions == (
-        "prepared", "release_consumption_started", "release_consumed",
-        "click_started", "succeeded",
+        "prepared",
+        "release_consumption_started",
+        "release_consumed",
+        "click_started",
+        "succeeded",
     )
-    assert receipt.document["release_manifest_sha256"] == issued.manifest.release_manifest_sha256
+    assert (
+        receipt.document["release_manifest_sha256"]
+        == issued.manifest.release_manifest_sha256
+    )
     consumed = gate.verify_consumed_release_token(
         release_token=issued.release_token,
         source=source,
@@ -654,8 +680,14 @@ def test_authenticated_market_to_one_use_workable_receipt_chain(
             contract_type="employee",
             consumed_at=consumed_at,
         )
-    assert application.package_document()["handoff_root_sha256"] == admission.handoff_root_sha256
-    assert application.package_document()["cv_quality_receipt_sha256"] == quality.receipt_sha256
+    assert (
+        application.package_document()["handoff_root_sha256"]
+        == admission.handoff_root_sha256
+    )
+    assert (
+        application.package_document()["cv_quality_receipt_sha256"]
+        == quality.receipt_sha256
+    )
 
 
 def test_poppler_rejects_tampered_retained_cv(tmp_path: Path) -> None:
@@ -676,7 +708,10 @@ def test_workable_policy_rejects_derived_or_tampered_market_job_key() -> None:
     with pytest.raises(ValueError, match="job identity"):
         replace(
             WorkablePolicy(
-                "synthetic", "ABC123", "job_opaque", (WorkableField("name", "text", True, "Name"),)
+                "synthetic",
+                "ABC123",
+                "job_opaque",
+                (WorkableField("name", "text", True, "Name"),),
             ),
             job_key="",
         )

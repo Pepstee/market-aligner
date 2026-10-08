@@ -7,24 +7,38 @@ import base64
 import hashlib
 import importlib
 import json
+import os
 import pickle
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Protocol, Sequence
+from typing import BinaryIO, Callable, Iterable, Mapping, Protocol, Sequence
 
 from playwright.sync_api import Page
 
-from .application_archive import ApplicationArchive
+from .application_archive import (
+    ApplicationArchive,
+    ApplicationArchiveError,
+    _scan_secret_bytes,
+)
 from .application_compiler import ApplicationSource, CandidateContact
-from .application_sanity_review import SanityReviewReceipt
+from .application_sanity_review import (
+    SanityReviewPackage,
+    SanityReviewReceipt,
+    VacancyReviewMaterial,
+)
+from .application_quality import ApplicationQualityInput
+from .application_quality_contracts import ApplicationPreflightQualityReview
+from .ats_application_authority import AtsApplicationAuthority
 from .browser_executor import (
     GreenhouseSuccessEvidence,
 )
 from .candidate_release_authority import CandidateReleaseExecutionAuthority
+from .current_greenhouse_navigation import CurrentGreenhouseNavigationProof
 from cv_generation.service import CandidateApplicationPackage
 from .external_document_assurance import ExternalDocumentAssuranceReceipt
 from .evidence_matching import canonical_json
@@ -45,6 +59,7 @@ from .production_queue import (
 from .provider_observation_capture import exact_clean_head
 from .release_gate import ReleaseGateStore
 from .rendering import ApplicationArtifacts
+from form_filling.ats_forensics import ATSForensicReceipt
 
 
 PRODUCTION_FACTORY_REFERENCE = (
@@ -72,6 +87,109 @@ _GENERATOR_SOURCE_PATHS = (
     "career_automation/models.py",
     "career_automation/rendering.py",
 )
+_CURRENT_RUNTIME_GENERATOR_SOURCE_PATHS = (
+    "career_automation/candidate_contact_authority.py",
+    "career_automation/current_time.py",
+    "career_automation/handoff_admission.py",
+    "career_automation/market_aligner_preparation.py",
+    "career_automation/production_handoff_admission_runner.py",
+    "career_automation/production_handoff_runner.py",
+    "career_automation/production_preparation_runner.py",
+    "cv_generation/benchmark_learning.py",
+    "cv_generation/document_quality.py",
+    "cv_generation/editorial_composition.py",
+)
+MAX_PRIVATE_GENERATOR_DIAGNOSTIC_BYTES = 1_048_576
+_BROWSER_RUNTIME_FLAGS = (
+    ("current_runtime_config_path", "--current-runtime-config"),
+    ("current_runtime_config_sha256", "--current-runtime-config-sha256"),
+    ("current_runtime_private_root", "--current-runtime-private-root"),
+    (
+        "current_recovery_manifest_relative_path",
+        "--current-recovery-manifest-relative-path",
+    ),
+)
+_LOWERCASE_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _clean_browser_runtime_string(value: object, flag: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{flag} must be a string")
+    if (
+        not value
+        or value != value.strip()
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise ValueError(f"{flag} must be a nonempty clean string")
+    return value
+
+
+def browser_runtime_options(arguments) -> dict[str, object]:
+    values = {name: getattr(arguments, name, None) for name, _ in _BROWSER_RUNTIME_FLAGS}
+    present = [name for name, _ in _BROWSER_RUNTIME_FLAGS if values[name] is not None]
+    if not present:
+        return {
+            "current_runtime": False,
+            "admission_kwargs": {},
+            "materialization_kwargs": {},
+            "selection_kwargs": {},
+        }
+    if len(present) != len(_BROWSER_RUNTIME_FLAGS):
+        missing = ", ".join(
+            flag for name, flag in _BROWSER_RUNTIME_FLAGS if values[name] is None
+        )
+        raise ValueError(
+            "all four current-runtime options are required together; missing: "
+            + missing
+        )
+    if getattr(arguments, "market_execution_receipt", None) is None:
+        raise ValueError(
+            "current-runtime options require market_execution_receipt"
+        )
+
+    config_path = _clean_browser_runtime_string(
+        values["current_runtime_config_path"], "--current-runtime-config"
+    )
+    config_sha256 = _clean_browser_runtime_string(
+        values["current_runtime_config_sha256"],
+        "--current-runtime-config-sha256",
+    )
+    private_root = _clean_browser_runtime_string(
+        values["current_runtime_private_root"], "--current-runtime-private-root"
+    )
+    manifest_path = _clean_browser_runtime_string(
+        values["current_recovery_manifest_relative_path"],
+        "--current-recovery-manifest-relative-path",
+    )
+    if not config_path.startswith("/") or not private_root.startswith("/"):
+        raise ValueError("current-runtime configuration and private root must be absolute")
+    if _LOWERCASE_SHA256.fullmatch(config_sha256) is None:
+        raise ValueError(
+            "--current-runtime-config-sha256 must be 64 lowercase hex characters"
+        )
+    if (
+        manifest_path.startswith("/")
+        or "\\" in manifest_path
+        or any(part in {"", ".", ".."} for part in manifest_path.split("/"))
+    ):
+        raise ValueError(
+            "--current-recovery-manifest-relative-path must be a confined relative path"
+        )
+
+    shared = {
+        "current_runtime_config_path": config_path,
+        "current_runtime_config_sha256": config_sha256,
+        "current_runtime_private_root": private_root,
+    }
+    return {
+        "current_runtime": True,
+        "admission_kwargs": dict(shared),
+        "materialization_kwargs": dict(
+            shared,
+            current_recovery_manifest_relative_path=manifest_path,
+        ),
+        "selection_kwargs": dict(shared),
+    }
 
 
 @dataclass(frozen=True)
@@ -137,6 +255,7 @@ class GeneratedRevisionSink:
         self._authority: SinkBoundGenerationAuthority | None = None
         self._owned_generation_active = False
         self._archive_event_sha256s: list[str] = []
+        self._current_runtime_generation = False
 
     @property
     def revisions(self) -> tuple[GeneratedApplicationRevision, ...]:
@@ -195,6 +314,8 @@ class GeneratedRevisionSink:
         company_name: str,
         contact: CandidateContact,
         approved_evidence_path: Path | None = None,
+        current_runtime_application_id: str | None = None,
+        current_runtime_pre_review_kwargs: Mapping[str, str] | None = None,
     ) -> object:
         """Generate and archive the concrete package without a caller callback.
 
@@ -206,7 +327,39 @@ class GeneratedRevisionSink:
             raise ValueError("owned generation requires a pristine archive sink")
         if type(self._recorder) is not GreenhouseAttemptRecorder:
             raise ValueError("owned generation requires the durable attempt recorder")
-        repository_head, source_sha256s = self._generator_source_identity()
+        current_runtime = (
+            current_runtime_application_id is not None
+            or current_runtime_pre_review_kwargs is not None
+        )
+        expected_pre_review_keys = {
+            "current_runtime_config_path",
+            "current_runtime_config_sha256",
+            "current_runtime_private_root",
+            "current_recovery_manifest_relative_path",
+        }
+        if current_runtime:
+            if (
+                type(current_runtime_application_id) is not str
+                or len(current_runtime_application_id) != 68
+                or not current_runtime_application_id.startswith("app_")
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in current_runtime_application_id[4:]
+                )
+                or type(current_runtime_pre_review_kwargs) is not dict
+                or set(current_runtime_pre_review_kwargs) != expected_pre_review_keys
+                or any(
+                    type(value) is not str or not value
+                    for value in current_runtime_pre_review_kwargs.values()
+                )
+                or approved_evidence_path is not None
+            ):
+                raise ValueError("current pre-review generation bindings are incomplete")
+            repository_head, source_sha256s = self._generator_source_identity(
+                current_runtime=True
+            )
+        else:
+            repository_head, source_sha256s = self._generator_source_identity()
         arguments: dict[str, object] = {
             "decision_receipt": decision_receipt,
             "candidate_projection": candidate_projection,
@@ -227,74 +380,84 @@ class GeneratedRevisionSink:
         }
         if approved_evidence_path is not None:
             arguments["approved_evidence_path"] = str(approved_evidence_path)
+        if current_runtime:
+            arguments["current_runtime_application_id"] = current_runtime_application_id
+            arguments["current_runtime_pre_review_kwargs"] = dict(
+                current_runtime_pre_review_kwargs
+            )
         self._owned_generation_active = True
         try:
             repository = self._recorder.attempt.archive.repository_root
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "career_automation.candidate_generation_worker",
-                ],
-                cwd=repository,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            assert process.stdin is not None
-            assert process.stdout is not None
-            process.stdin.write(canonical_json(arguments))
-            process.stdin.close()
-            package_pickle_sha256: str | None = None
-            for line in process.stdout:
-                message = json.loads(line)
-                if not isinstance(message, dict):
-                    process.kill()
-                    raise ValueError(
-                        "isolated candidate generator emitted malformed output"
-                    )
-                if message.get("kind") == "revision":
+            from .candidate_generation_worker import GENERATION_OUTPUT_FD_ENV
+
+            # Archive revisions while the child runs. Public status and diagnostic
+            # output use separate private files so neither can block the pipe.
+            with tempfile.TemporaryFile() as status, tempfile.TemporaryFile() as diagnostics:
+                read_fd, write_fd = os.pipe()
+                with os.fdopen(read_fd, "rb") as revisions:
+                    environment = dict(os.environ)
+                    package_root = Path(__file__).resolve().parents[1]
+                    project_src = package_root.parents[1] / "src"
+                    pythonpath = [str(package_root), str(project_src)]
+                    inherited_pythonpath = environment.get("PYTHONPATH")
+                    if inherited_pythonpath:
+                        pythonpath.append(inherited_pythonpath)
+                    environment["PYTHONPATH"] = os.pathsep.join(pythonpath)
+                    environment[GENERATION_OUTPUT_FD_ENV] = str(write_fd)
                     try:
-                        value = base64.b64decode(
-                            str(message["value_base64"]), validate=True
+                        process = subprocess.Popen(
+                            [sys.executable, "-m", "career_automation.candidate_generation_worker"],
+                            cwd=repository,
+                            stdin=subprocess.PIPE,
+                            stdout=status,
+                            stderr=diagnostics,
+                            env=environment,
+                            pass_fds=(write_fd,),
                         )
-                    except (KeyError, ValueError) as exc:
-                        process.kill()
-                        raise ValueError(
-                            "isolated candidate generator revision is malformed"
-                        ) from exc
-                    self._archive_owned_revision(
-                        role=message.get("role"),
-                        value=value,
-                        media_type=message.get("media_type"),
-                        prior_sha256=message.get("prior_sha256"),
-                        approved=message.get("approved"),
-                        rejection_codes=message.get("rejection_codes", ()),
-                    )
-                elif message.get("kind") == "result" and package_pickle_sha256 is None:
-                    package_pickle_sha256 = str(
-                        message.get("package_pickle_sha256", "")
-                    )
-                    if not re.fullmatch(r"[0-9a-f]{64}", package_pickle_sha256):
-                        process.kill()
-                        raise ValueError(
-                            "isolated candidate generator result is malformed"
+                    finally:
+                        os.close(write_fd)
+                    try:
+                        assert process.stdin is not None
+                        process.stdin.write(canonical_json(arguments).encode())
+                        process.stdin.close()
+                        for line in revisions:
+                            try:
+                                message = json.loads(line)
+                                if not isinstance(message, dict) or message.get("kind") != "revision":
+                                    raise ValueError("invalid revision kind")
+                                value = base64.b64decode(str(message["value_base64"]), validate=True)
+                            except (KeyError, ValueError, UnicodeDecodeError):
+                                raise ValueError("isolated candidate generator revision is malformed") from None
+                            self._archive_owned_revision(
+                                role=message.get("role"),
+                                value=value,
+                                media_type=message.get("media_type"),
+                                prior_sha256=message.get("prior_sha256"),
+                                approved=message.get("approved"),
+                                rejection_codes=message.get("rejection_codes", ()),
+                            )
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                        exit_code = process.wait()
+                        if process.stdin is not None:
+                            process.stdin.close()
+                        self._archive_worker_diagnostics(
+                            diagnostics,
+                            exit_code=exit_code,
                         )
-                else:
-                    process.kill()
+                    if process.returncode != 0:
+                        raise RuntimeError("isolated candidate generator failed")
+                status.seek(0)
+                try:
+                    result = json.load(status)
+                except (ValueError, UnicodeDecodeError):
+                    raise ValueError("isolated candidate generator result is malformed") from None
+                if not isinstance(result, dict) or result.get("kind") != "result":
                     raise ValueError("isolated candidate generator protocol differs")
-            return_code = process.wait()
-            stderr = process.stderr.read() if process.stderr is not None else ""
-            if return_code != 0:
-                raise RuntimeError(
-                    "isolated candidate generator failed: "
-                    + (
-                        stderr.strip().splitlines()[-1]
-                        if stderr.strip()
-                        else "unknown error"
-                    )
-                )
+                package_pickle_sha256 = str(result.get("package_pickle_sha256", ""))
+                if not re.fullmatch(r"[0-9a-f]{64}", package_pickle_sha256):
+                    raise ValueError("isolated candidate generator result is malformed")
             durable = self._verified_durable_revisions()
             package_rows = [
                 row for row in durable if row.role == "generation.package_pickle"
@@ -318,6 +481,242 @@ class GeneratedRevisionSink:
             self._owned_generation_active = False
         if type(package) is not CandidateApplicationPackage:
             raise TypeError("owned candidate generator returned an invalid package")
+        if current_runtime:
+            from cv_generation.constraints import CandidateSourcePolicyReceipt
+            from .application_compiler import ApplicationSource, verify_application_source
+            from .candidate_application_factory import (
+                CURRENT_RUNTIME_ENVIRONMENT,
+                CandidateApplicationMaterialization,
+                MarketApplicationDecisionAuthority,
+            )
+            from .rendering import render_editable_text, verify_application_artifacts
+
+            child_materialization = package.current_runtime_materialization
+            child_authority = package.current_runtime_decision_authority
+            if (
+                type(package.source) is not ApplicationSource
+                or type(package.materialized_source) is not ApplicationSource
+                or type(child_materialization) is not CandidateApplicationMaterialization
+                or type(child_authority) is not MarketApplicationDecisionAuthority
+                or type(package.source_policy_receipt) is not CandidateSourcePolicyReceipt
+                or package.source_policy_receipt.release_authority is not False
+                or package.source_policy_receipt.passed is not True
+                or package.source_policy_receipt.source_id != package.source.source_id
+                or package.source_policy_receipt.cv_sha256
+                != package.artifacts.editable.cv_sha256
+                or package.artifacts.source_id != package.source.source_id
+                or package.materialized_source.job_key != package.source.job_key
+                or package.materialized_source.vacancy_sha256
+                != package.source.vacancy_sha256
+                or package.materialized_source.vacancy_source_identity
+                != package.source.vacancy_source_identity
+                or package.materialized_source.role_title != package.source.role_title
+                or package.materialized_source.company_name != package.source.company_name
+                or package.materialized_source.contact != package.source.contact
+                or child_materialization.source != package.materialized_source
+                or child_materialization.vacancy_requirements
+                != package.vacancy_requirements
+                or child_materialization.receipt.application_source_id
+                != package.materialized_source.source_id
+                or child_materialization.receipt.application_source_sha256
+                != package.materialized_source.content_sha256
+                or child_materialization.receipt.deployment_binding.application_id
+                != current_runtime_application_id
+                or child_materialization.receipt.deployment_binding.environment
+                != CURRENT_RUNTIME_ENVIRONMENT
+                or child_materialization.receipt.decision_authority_schema
+                != child_authority.schema_version
+                or child_materialization.receipt.decision_authority_sha256
+                != child_authority.authority_sha256
+                or child_authority.application_id != current_runtime_application_id
+                or child_authority.environment != CURRENT_RUNTIME_ENVIRONMENT
+                or child_authority.source_job_key != job_key
+                or child_authority.raw_listing_sha256 != vacancy_sha256
+                or child_authority.source_url != source_url
+                or child_authority.role_title != role_title
+                or child_authority.company_name != company_name
+                or child_authority.candidate_projection_sha256
+                != candidate_projection.get("projection_sha256")
+                or child_authority.decision_receipt() != dict(decision_receipt)
+                or child_materialization.receipt.decision_receipt_sha256
+                != hashlib.sha256(
+                    (
+                        canonical_json(child_authority.decision_receipt())
+                        + "\n"
+                    ).encode("utf-8")
+                ).hexdigest()
+                or package.source.job_key != job_key
+                or package.source.vacancy_sha256 != vacancy_sha256
+                or package.source.role_title != role_title
+                or package.source.company_name != company_name
+                or package.source.contact != contact
+                or type(package.vacancy_requirements) is not tuple
+                or any(type(value) is not str for value in package.vacancy_requirements)
+            ):
+                raise ValueError("current pre-review package binding differs")
+            package.source_policy_receipt.__post_init__()
+            child_materialization.receipt.__post_init__()
+            child_authority.__post_init__()
+            verify_application_source(package.materialized_source)
+            verify_application_source(package.source)
+            verify_application_artifacts(package.artifacts)
+            if render_editable_text(package.source) != package.artifacts.editable:
+                raise ValueError("current pre-review artifacts differ from prepared source")
+            current_durable = self._verified_durable_revisions()
+            current_rows = {row.role: row for row in current_durable}
+            if len(current_rows) != 9 or len(current_durable) != 9:
+                raise ValueError("current pre-review revision inventory is ambiguous")
+            expected_values = {
+                "document.source_inputs": (
+                    (canonical_json(package.source.document()) + "\n").encode(),
+                    "application/json",
+                ),
+                "document.cv.constraints": (
+                    (
+                        canonical_json(package.source_policy_receipt.document())
+                        + "\n"
+                    ).encode(),
+                    "application/json",
+                ),
+                "document.cv.source": (
+                    package.artifacts.editable.cv_text.encode(),
+                    "text/plain",
+                ),
+                "document.cv.final_pdf": (
+                    package.artifacts.cv_pdf.pdf_bytes,
+                    "application/pdf",
+                ),
+                "document.cover_letter.source": (
+                    package.artifacts.editable.cover_letter_text.encode(),
+                    "text/plain",
+                ),
+                "document.cover_letter.final_pdf": (
+                    package.artifacts.cover_letter_pdf.pdf_bytes,
+                    "application/pdf",
+                ),
+                "form.answers": (
+                    package.artifacts.editable.answers_text.encode(),
+                    "text/plain",
+                ),
+            }
+            if any(
+                current_rows[role].value != expected_value
+                or current_rows[role].media_type != expected_media_type
+                for role, (expected_value, expected_media_type)
+                in expected_values.items()
+            ):
+                raise ValueError("current pre-review revisions differ from package")
+            generation_inputs = current_rows["generation.inputs"].value
+            try:
+                generation_document = json.loads(generation_inputs)
+            except (ValueError, UnicodeDecodeError):
+                raise ValueError("current generation input receipt is malformed") from None
+            if (
+                type(generation_document) is not dict
+                or set(generation_document)
+                != {
+                    "application_id",
+                    "company_name",
+                    "current_recovery_manifest_relative_path",
+                    "current_runtime_config_sha256",
+                    "draft_decision_authority_sha256",
+                    "draft_materialization_receipt_sha256",
+                    "environment",
+                    "job_key",
+                    "materialized_source_id",
+                    "materialized_source_sha256",
+                    "preparation_id",
+                    "preparation_orchestration_sha256",
+                    "preparation_receipt_sha256",
+                    "release_authority",
+                    "review_status",
+                    "role_title",
+                    "schema_version",
+                    "source_sha256",
+                    "source_url",
+                    "vacancy_source_identity",
+                    "vacancy_sha256",
+                }
+                or canonical_json(generation_document).encode() + b"\n"
+                != generation_inputs
+                or generation_document.get("application_id")
+                != current_runtime_application_id
+                or generation_document.get("company_name") != package.source.company_name
+                or generation_document.get("environment") != "current_runtime"
+                or generation_document.get("job_key") != job_key
+                or generation_document.get("role_title") != package.source.role_title
+                or generation_document.get("source_url") != source_url
+                or generation_document.get("vacancy_source_identity")
+                != package.source.vacancy_source_identity
+                or generation_document.get("vacancy_sha256") != vacancy_sha256
+                or generation_document.get("source_sha256")
+                != package.source.content_sha256
+                or generation_document.get("materialized_source_id")
+                != package.materialized_source.source_id
+                or generation_document.get("materialized_source_sha256")
+                != package.materialized_source.content_sha256
+                or generation_document.get("release_authority") is not False
+                or generation_document.get("review_status") != "not_performed"
+                or generation_document.get("schema_version")
+                != "jaa.current-runtime-generation-inputs.v2"
+                or generation_document.get("draft_decision_authority_sha256")
+                != child_authority.authority_sha256
+                or generation_document.get("draft_materialization_receipt_sha256")
+                != child_materialization.receipt.receipt_sha256
+                or type(
+                    generation_document.get("draft_decision_authority_sha256")
+                )
+                is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["draft_decision_authority_sha256"]
+                ) is None
+                or type(
+                    generation_document.get("draft_materialization_receipt_sha256")
+                )
+                is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["draft_materialization_receipt_sha256"]
+                ) is None
+                or type(generation_document.get("preparation_id")) is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["preparation_id"]
+                ) is None
+                or type(generation_document.get("preparation_receipt_sha256"))
+                is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["preparation_receipt_sha256"]
+                ) is None
+                or type(
+                    generation_document.get("preparation_orchestration_sha256")
+                )
+                is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["preparation_orchestration_sha256"]
+                )
+                is None
+                or generation_document.get("current_runtime_config_sha256")
+                != current_runtime_pre_review_kwargs[
+                    "current_runtime_config_sha256"
+                ]
+                or type(generation_document.get("current_runtime_config_sha256"))
+                is not str
+                or _LOWERCASE_SHA256.fullmatch(
+                    generation_document["current_runtime_config_sha256"]
+                ) is None
+                or generation_document.get(
+                    "current_recovery_manifest_relative_path"
+                )
+                != current_runtime_pre_review_kwargs[
+                    "current_recovery_manifest_relative_path"
+                ]
+            ):
+                raise ValueError("current generation input receipt binding differs")
+            self._current_runtime_generation = True
+        elif (
+            package.current_runtime_materialization is not None
+            or package.current_runtime_decision_authority is not None
+        ):
+            raise ValueError("legacy generation cannot carry current materialization")
         required = {
             "generation.inputs",
             "document.source_inputs",
@@ -343,6 +742,80 @@ class GeneratedRevisionSink:
             self._marker,
         )
         return package
+
+    def _archive_worker_diagnostics(
+        self,
+        diagnostics: BinaryIO,
+        *,
+        exit_code: int,
+    ) -> None:
+        """Keep child diagnostics in the private attempt archive, never in errors."""
+        diagnostics.seek(0)
+        digest = hashlib.sha256()
+        captured = bytearray()
+        byte_length = 0
+        while chunk := diagnostics.read(64 * 1024):
+            byte_length += len(chunk)
+            digest.update(chunk)
+            remaining = MAX_PRIVATE_GENERATOR_DIAGNOSTIC_BYTES - len(captured)
+            if remaining > 0:
+                captured.extend(chunk[:remaining])
+        if byte_length == 0:
+            return
+
+        diagnostic_bytes = bytes(captured)
+        content_state = "archived"
+        if byte_length > MAX_PRIVATE_GENERATOR_DIAGNOSTIC_BYTES:
+            content_state = "withheld_size_limit"
+        else:
+            try:
+                _scan_secret_bytes(diagnostic_bytes, "text/plain")
+            except ApplicationArchiveError:
+                content_state = "withheld_secret_like"
+
+        attempt = self._recorder.attempt
+        metadata = {"exit_code": exit_code, "phase": "candidate_generation"}
+        if content_state == "archived":
+            attempt.add_artifact(
+                self._review_diagnostic_role("generation.worker.stderr"),
+                diagnostic_bytes,
+                media_type="text/plain",
+                disposition="observed",
+                metadata=metadata,
+            )
+            return
+
+        receipt = {
+            "schema_version": "jaa.worker-diagnostic-receipt.v1",
+            "byte_length": byte_length,
+            "content_sha256": digest.hexdigest(),
+            "content_state": content_state,
+            "exit_code": exit_code,
+            "phase": "candidate_generation",
+        }
+        attempt.add_artifact(
+            self._review_diagnostic_role("generation.worker.stderr_receipt"),
+            canonical_json(receipt).encode("utf-8"),
+            media_type="application/json",
+            disposition="observed",
+            metadata={"phase": "candidate_generation"},
+        )
+
+    def _review_diagnostic_role(self, base_role: str) -> str:
+        if not self._recorder._review_only_active:
+            return base_role
+        attempt = self._recorder.attempt
+        existing = {
+            row.role for row in attempt._objects(attempt._events())
+        }
+        if base_role not in existing:
+            return base_role
+        suffix = 1
+        while True:
+            role = f"{base_role}.{suffix:04d}"
+            if role not in existing:
+                return role
+            suffix += 1
 
     def _archive_owned_revision(
         self, **arguments: object
@@ -373,11 +846,33 @@ class GeneratedRevisionSink:
         self._revisions.append(revision)
         return revision
 
-    def _generator_source_identity(self) -> tuple[str, tuple[tuple[str, str], ...]]:
-        repository = self._recorder.attempt.archive.repository_root
+    def _generator_source_identity(
+        self, *, current_runtime: bool = False
+    ) -> tuple[str, tuple[tuple[str, str], ...]]:
+        repository = Path(self._recorder.attempt.archive.repository_root)
         head = exact_clean_head(repository)
+
+        repository_root = repository.resolve(strict=True)
+        package_root = Path(__file__).resolve().parents[1]
+
+        def git_top_level(directory: Path) -> Path:
+            completed = subprocess.run(
+                ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            value = completed.stdout.strip()
+            if not value:
+                raise ValueError("Git repository root is missing")
+            return Path(value).resolve(strict=True)
+
+        if git_top_level(package_root) != git_top_level(repository_root):
+            raise ValueError(
+                "running candidate generator is outside the recorder Git repository"
+            )
         prefix = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "--show-prefix"],
+            ["git", "-C", str(package_root), "rev-parse", "--show-prefix"],
             check=True,
             capture_output=True,
             text=True,
@@ -385,7 +880,13 @@ class GeneratedRevisionSink:
         if prefix and not prefix.endswith("/"):
             raise ValueError("repository prefix is not canonical")
         identities: list[tuple[str, str]] = []
-        for relative in _GENERATOR_SOURCE_PATHS:
+        source_paths = _GENERATOR_SOURCE_PATHS
+        if current_runtime:
+            source_paths = (
+                *_GENERATOR_SOURCE_PATHS,
+                *_CURRENT_RUNTIME_GENERATOR_SOURCE_PATHS,
+            )
+        for relative in source_paths:
             committed_path = f"{prefix}{relative}"
             completed = subprocess.run(
                 ["git", "-C", str(repository), "show", f"{head}:{committed_path}"],
@@ -393,7 +894,7 @@ class GeneratedRevisionSink:
                 capture_output=True,
             )
             committed = completed.stdout
-            if committed != (repository / relative).read_bytes():
+            if committed != (package_root / relative).read_bytes():
                 raise ValueError(
                     "running candidate generator differs from exact clean HEAD"
                 )
@@ -456,7 +957,12 @@ class GeneratedRevisionSink:
         if self._authority is None:
             raise ValueError("only completed owned generation can be sealed")
         durable = self._verified_durable_revisions()
-        repository_head, source_sha256s = self._generator_source_identity()
+        if self._current_runtime_generation:
+            repository_head, source_sha256s = self._generator_source_identity(
+                current_runtime=True
+            )
+        else:
+            repository_head, source_sha256s = self._generator_source_identity()
         if (
             self._authority._sink_marker is not self._marker
             or self._authority.revisions != durable
@@ -484,6 +990,9 @@ class PreparedGreenhouseRelease:
         ExternalDocumentAssuranceReceipt,
     ]
     sanity_review_receipt: SanityReviewReceipt
+    ats_application_authority: AtsApplicationAuthority
+    quality_input: ApplicationQualityInput
+    quality_review: ApplicationPreflightQualityReview
     production_identity: ProductionIdentity
     generation_authority: SinkBoundGenerationAuthority
     attached_roles: tuple[str, ...]
@@ -502,11 +1011,60 @@ class PreparedGreenhouseRelease:
     jurisdiction: str
     contract_type: str
     consumed_at: datetime
+    vacancy_review_material: VacancyReviewMaterial
     vacancy_requirements: tuple[str, ...] = ()
     submit_button_name: str = "Submit Application"
     timeout_ms: int = 20_000
+    form_answer_bindings: tuple[tuple[str, str], ...] = ()
+    review_form_fields: tuple[tuple[str, str, str], ...] | None = None
+    form_field_authorities: tuple[tuple[str, str], ...] = ()
+    form_inventory_sha256: str | None = None
+    form_inventory: bytes | None = None
+    current_provider_proof: CurrentGreenhouseNavigationProof | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedGreenhouseReview:
+    source: ApplicationSource
+    artifacts: ApplicationArtifacts
+    document_assurance_receipts: tuple[ExternalDocumentAssuranceReceipt, ExternalDocumentAssuranceReceipt]
+    sanity_review_receipt: SanityReviewReceipt
+    production_identity: ProductionIdentity
+    generation_authority: SinkBoundGenerationAuthority
+    vacancy_review_material: VacancyReviewMaterial
+    vacancy_requirements: tuple[str, ...]
+    forensic_root: Path
+    forensic_receipt: ATSForensicReceipt
+    questions: dict[str, tuple[str, str]] | None = None
+    form_answer_bindings: tuple[tuple[str, str], ...] = ()
+    review_form_fields: tuple[tuple[str, str, str], ...] | None = None
+    form_field_authorities: tuple[tuple[str, str], ...] = ()
+    form_inventory_sha256: str | None = None
+    form_inventory: bytes | None = None
+    sanity_package: SanityReviewPackage | None = field(
+        default=None, repr=False, compare=False
+    )
+    current_runtime_context: object | None = field(
+        default=None, repr=False, compare=False
+    )
+    current_runtime_materialization: object | None = field(
+        default=None, repr=False, compare=False
+    )
+    current_runtime_decision_authority: object | None = field(
+        default=None, repr=False, compare=False
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewOnlyCompletion:
+    attempt_id: str
+    terminal_manifest_sha256: str
+
+
+PrepareReview = Callable[
+    [QueueItem, GreenhouseAttemptRecorder, Page, GeneratedRevisionSink],
+    PreparedGreenhouseReview,
+]
 PrepareRelease = Callable[
     [QueueItem, GreenhouseAttemptRecorder, Page, GeneratedRevisionSink],
     PreparedGreenhouseRelease,
@@ -519,6 +1077,7 @@ class ProductionRunnerSession(Protocol):
     candidates: Sequence[ProductionRunCandidate]
     open_vacancy: OpenVacancy
     prepare_release: PrepareRelease
+    prepare_review: PrepareReview
     gmail_confirmation_checker: GmailConfirmationChecker | None
 
     def close(self) -> None: ...
@@ -534,7 +1093,10 @@ class GreenhouseProductionRunner:
         archive_root: str | Path,
         gmail_confirmation_checker: GmailConfirmationChecker | None = None,
         retry_repairable_preclick_blocks: bool = False,
+        review_only: bool = False,
     ) -> None:
+        if type(review_only) is not bool:
+            raise TypeError("review-only selection must be boolean")
         if type(retry_repairable_preclick_blocks) is not bool:
             raise TypeError("repairable-block retry policy must be boolean")
         self.repository_root = Path(repository_root).resolve(strict=True)
@@ -542,7 +1104,8 @@ class GreenhouseProductionRunner:
             archive_root,
             repository_root=self.repository_root,
         )
-        self.executor = CertifiedGreenhouseSubmitExecutor(
+        self.review_only = review_only
+        self.executor = None if review_only else CertifiedGreenhouseSubmitExecutor(
             repository_root=self.repository_root,
             gmail_confirmation_checker=gmail_confirmation_checker,
         )
@@ -553,6 +1116,7 @@ class GreenhouseProductionRunner:
             (candidate.vacancy for candidate in candidates),
             prior_attempts=prior_attempts_from_archive(self.archive),
             retry_repairable_preclick_blocks=self.retry_repairable_preclick_blocks,
+            review_only=self.review_only,
         )
 
     @staticmethod
@@ -562,7 +1126,12 @@ class GreenhouseProductionRunner:
     ) -> None:
         authority = prepared.generation_authority
         durable = sink._verified_durable_revisions()
-        repository_head, source_sha256s = sink._generator_source_identity()
+        if sink._current_runtime_generation:
+            repository_head, source_sha256s = sink._generator_source_identity(
+                current_runtime=True
+            )
+        else:
+            repository_head, source_sha256s = sink._generator_source_identity()
         if (
             authority is not sink.authority
             or authority._sink_marker is not sink._marker
@@ -618,14 +1187,41 @@ class GreenhouseProductionRunner:
             if not row.approved and not row.rejection_codes:
                 raise ValueError("rejected generated revision lacks rejection codes")
 
+    @staticmethod
+    def _review_route_handler(recorder: GreenhouseAttemptRecorder):
+        """Abort non-GET requests before dispatch and archive only successful blocks."""
+
+        def review_route(route) -> None:
+            request = route.request
+            method = getattr(request, "method", None)
+            if type(method) is str and method.upper() == "GET":
+                route.continue_()
+                return
+            try:
+                route.abort()
+            except Exception as exc:
+                recorder.record_review_boundary_fault(
+                    "policy route abort failed: " + str(exc)
+                )
+                raise
+            recorder.record_review_blocked_intent(request)
+
+        return review_route
+
     def execute_next(
         self,
         page: Page,
         *,
         candidates: Sequence[ProductionRunCandidate],
         open_vacancy: OpenVacancy,
-        prepare_release: PrepareRelease,
-    ) -> ProductionSubmissionReceipt | None:
+        prepare_release: PrepareRelease | None = None,
+        prepare_review: PrepareReview | None = None,
+    ) -> ProductionSubmissionReceipt | ReviewOnlyCompletion | None:
+        if self.review_only:
+            if prepare_release is not None or prepare_review is None:
+                raise ValueError("review-only execution requires only a review preparer")
+        elif prepare_release is None or prepare_review is not None:
+            raise ValueError("live execution requires only a release preparer")
         queue = self._queue(candidates)
         item = queue.next_action
         if item is None:
@@ -643,7 +1239,6 @@ class GreenhouseProductionRunner:
                 item.vacancy.vacancy.vacancy_sha256,
             )
         ]
-        navigation = open_vacancy(item, page)
         recorder = (
             GreenhouseAttemptRecorder.resume(
                 archive_root=self.archive.root,
@@ -660,7 +1255,40 @@ class GreenhouseProductionRunner:
                 assessment={**candidate.assessment, "queue_rank": item.queue_rank},
             )
         )
-        boundary_signals = self.executor.boundary_signals(page)
+        if self.review_only:
+            recorder.begin_review_only()
+            recovered = recorder.recover_review_only_completion()
+            if recovered is not None:
+                return ReviewOnlyCompletion(recorder.attempt.attempt_id, recovered)
+        elif any(row.role == "review.intent" for row in recorder.attempt._objects(recorder.attempt._events())):
+            raise ValueError("a review-only attempt cannot resume as live execution")
+        recorder.attach_page_evidence(page)
+        if self.review_only:
+            page.route("**/*", self._review_route_handler(recorder))
+        try:
+            navigation = open_vacancy(item, page)
+            if isinstance(navigation, Mapping) and "_current_navigation_capture" in navigation:
+                recorder.record_navigation(navigation, page=page)
+                navigation = {
+                    key: value
+                    for key, value in navigation.items()
+                    if key != "_current_navigation_capture"
+                }
+            else:
+                recorder.record_navigation(navigation)
+            if self.review_only:
+                recorder.ensure_review_network_boundary()
+        except Exception as exc:
+            if self.review_only:
+                raise
+            recorder.finalize_preintent_failure(
+                page,
+                reason_code="navigation_failed",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            raise
+        boundary_signals = () if self.review_only else self.executor.boundary_signals(page)
         if boundary_signals:
             observed_network = list(candidate.network_evidence)
             if navigation is not None:
@@ -675,11 +1303,15 @@ class GreenhouseProductionRunner:
             row.role for row in recorder.attempt._objects(recorder.attempt._events())
         }
         if "browser.prefill_snapshot" not in roles:
-            recorder.record_prefill(page)
+            recorder.record_prefill(page, **({"passive": True} if self.review_only else {}))
+        if self.review_only:
+            recorder.ensure_review_network_boundary()
         try:
             revision_sink = GeneratedRevisionSink(recorder)
-            prepared = prepare_release(item, recorder, page, revision_sink)
+            prepared = (prepare_review if self.review_only else prepare_release)(item, recorder, page, revision_sink)
         except Exception as exc:
+            if self.review_only:
+                raise
             recorder.finalize_preintent_failure(
                 page,
                 reason_code="release_preparation_failed",
@@ -687,6 +1319,13 @@ class GreenhouseProductionRunner:
                 error_message=str(exc),
             )
             raise
+        if self.review_only:
+            recorder.ensure_review_network_boundary()
+            if type(prepared) is not PreparedGreenhouseReview:
+                raise ValueError("review-only preparation crossed its passive boundary")
+            self._validate_generation_inventory(prepared, revision_sink)
+            digest = recorder.finalize_review_only(prepared)
+            return ReviewOnlyCompletion(recorder.attempt.attempt_id, digest)
         try:
             self._validate_generation_inventory(prepared, revision_sink)
         except Exception as exc:
@@ -701,8 +1340,12 @@ class GreenhouseProductionRunner:
             page,
             source=prepared.source,
             artifacts=prepared.artifacts,
+            questions=prepared.questions,
             document_assurance_receipts=prepared.document_assurance_receipts,
             sanity_review_receipt=prepared.sanity_review_receipt,
+            ats_application_authority=prepared.ats_application_authority,
+            quality_input=prepared.quality_input,
+            quality_review=prepared.quality_review,
             production_identity=prepared.production_identity,
             attached_roles=prepared.attached_roles,
             upload_field_names=prepared.upload_field_names,
@@ -710,6 +1353,9 @@ class GreenhouseProductionRunner:
             consent_states=prepared.consent_states,
             success_evidence=prepared.success_evidence,
             success_observation=prepared.success_observation,
+            current_provider_proof=getattr(
+                prepared, "current_provider_proof", None
+            ),
         )
         authority = CandidateReleaseExecutionAuthority(
             gate=prepared.gate,
@@ -720,6 +1366,9 @@ class GreenhouseProductionRunner:
             questions=prepared.questions,
             document_assurance_receipts=prepared.document_assurance_receipts,
             sanity_review_receipt=prepared.sanity_review_receipt,
+            ats_application_authority=prepared.ats_application_authority,
+            quality_input=prepared.quality_input,
+            quality_review=prepared.quality_review,
             archive_receipt=archive_receipt,
             archive_root=self.archive.root,
             artifact_root=prepared.artifact_root,
@@ -737,7 +1386,15 @@ class GreenhouseProductionRunner:
             receipt_url=prepared.receipt_url,
             application_id=prepared.application_id,
             job_key=prepared.source.job_key,
+            vacancy_review_material=prepared.vacancy_review_material,
             vacancy_requirements=prepared.vacancy_requirements,
+            form_answer_bindings=prepared.form_answer_bindings,
+            review_form_fields=prepared.review_form_fields,
+            review_form_field_authorities=prepared.form_field_authorities,
+            form_inventory_sha256=prepared.form_inventory_sha256,
+            current_provider_proof=getattr(
+                prepared, "current_provider_proof", None
+            ),
         )
         return self.executor.execute(
             page,
@@ -756,12 +1413,19 @@ class GreenhouseProductionRunner:
         *,
         candidates: Sequence[ProductionRunCandidate],
         open_vacancy: OpenVacancy,
-        prepare_release: PrepareRelease,
+        prepare_release: PrepareRelease | None = None,
+        prepare_review: PrepareReview | None = None,
         max_terminal_attempts: int | None = None,
-    ) -> tuple[ProductionSubmissionReceipt, ...]:
+    ) -> tuple[ProductionSubmissionReceipt | ReviewOnlyCompletion, ...]:
         if max_terminal_attempts is not None and max_terminal_attempts < 1:
             raise ValueError("max_terminal_attempts must be at least one")
-        receipts: list[ProductionSubmissionReceipt] = []
+        if self.review_only:
+            if max_terminal_attempts not in (None, 1):
+                raise ValueError("review-only invocation permits one terminal outcome")
+            max_terminal_attempts = 1
+        elif max_terminal_attempts != 1:
+            raise ValueError("live execution requires exactly one terminal outcome")
+        receipts: list[ProductionSubmissionReceipt | ReviewOnlyCompletion] = []
         terminal_attempts = 0
         while self._queue(candidates).next_action is not None:
             if (
@@ -778,6 +1442,7 @@ class GreenhouseProductionRunner:
                     candidates=candidates,
                     open_vacancy=open_vacancy,
                     prepare_release=prepare_release,
+                    **({"prepare_review": prepare_review} if self.review_only else {}),
                 )
             except ProductionATSBoundaryError:
                 queue = self._queue(candidates)
@@ -805,12 +1470,38 @@ def _load_factory(reference: str):
     return factory
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository-root", type=Path, required=True)
     parser.add_argument("--archive-root", type=Path, required=True)
-    parser.add_argument("--factory", default=PRODUCTION_FACTORY_REFERENCE)
     parser.add_argument(
+        "--approved-evidence-path",
+        type=Path,
+        help="explicit approved evidence file for owned application generation",
+    )
+    parser.add_argument(
+        "--market-execution-receipt",
+        type=Path,
+        help=(
+            "run one verified Market Aligner handoff through the production "
+            "Greenhouse flow"
+        ),
+    )
+    parser.add_argument("--current-runtime-config", dest="current_runtime_config_path")
+    parser.add_argument(
+        "--current-runtime-config-sha256", dest="current_runtime_config_sha256"
+    )
+    parser.add_argument(
+        "--current-runtime-private-root", dest="current_runtime_private_root"
+    )
+    parser.add_argument(
+        "--current-recovery-manifest-relative-path",
+        dest="current_recovery_manifest_relative_path",
+    )
+    parser.add_argument("--factory", default=PRODUCTION_FACTORY_REFERENCE)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--review-only", action="store_true", help="prepare one review-only terminal attempt without release or submission")
+    mode.add_argument(
         "--execute-live",
         action="store_true",
         help="required acknowledgement for consequential production execution",
@@ -828,15 +1519,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             "retry only archived human-verification blocks that contain no click intent"
         ),
     )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_parser()
     arguments = parser.parse_args(argv)
-    if not arguments.execute_live:
-        parser.error("--execute-live is required")
+    try:
+        browser_runtime_options(arguments)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if arguments.review_only and arguments.max_terminal_attempts not in (None, 1):
+        parser.error("--review-only permits at most one terminal outcome")
+    if arguments.execute_live and arguments.max_terminal_attempts != 1:
+        parser.error("--execute-live requires --max-terminal-attempts 1")
     session: ProductionRunnerSession = _load_factory(arguments.factory)(arguments)
     try:
-        GreenhouseProductionRunner(
+        outcomes = GreenhouseProductionRunner(
             repository_root=arguments.repository_root,
             archive_root=arguments.archive_root,
             gmail_confirmation_checker=session.gmail_confirmation_checker,
+            review_only=arguments.review_only,
             retry_repairable_preclick_blocks=(
                 arguments.retry_repairable_preclick_blocks
             ),
@@ -844,12 +1547,67 @@ def main(argv: Sequence[str] | None = None) -> int:
             session.page,
             candidates=session.candidates,
             open_vacancy=session.open_vacancy,
-            prepare_release=session.prepare_release,
+            **({"prepare_review": session.prepare_review} if arguments.review_only else {"prepare_release": session.prepare_release}),
             max_terminal_attempts=arguments.max_terminal_attempts,
         )
+        if not outcomes:
+            print(
+                canonical_json(
+                    {
+                        "outcome": "no_terminal_attempt",
+                        "submission_receipt": None,
+                    }
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        if arguments.review_only:
+            if len(outcomes) != 1 or type(outcomes[0]) is not ReviewOnlyCompletion:
+                print(
+                    canonical_json({"outcome": "unexpected_review_result"}),
+                    file=sys.stderr,
+                )
+                return 2
+            review = outcomes[0]
+            print(
+                canonical_json(
+                    {
+                        "attempt_id": review.attempt_id,
+                        "outcome": "review_only",
+                        "terminal_manifest_sha256": review.terminal_manifest_sha256,
+                    }
+                )
+            )
+            return 0
+        if len(outcomes) != 1 or type(outcomes[0]) is not ProductionSubmissionReceipt:
+            print(
+                canonical_json({"outcome": "unexpected_live_result"}),
+                file=sys.stderr,
+            )
+            return 2
+        receipt = outcomes[0]
+        receipt.__post_init__()
+        if not any(
+            candidate.vacancy.vacancy.job_key == receipt.job_key
+            and candidate.vacancy.vacancy.vacancy_sha256 == receipt.vacancy_sha256
+            for candidate in session.candidates
+        ):
+            print(
+                canonical_json({"outcome": "submission_receipt_candidate_mismatch"}),
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            canonical_json(
+                {
+                    "outcome": "submitted_success",
+                    "submission_receipt": receipt.document(),
+                }
+            )
+        )
+        return 0
     finally:
         session.close()
-    return 0
 
 
 if __name__ == "__main__":

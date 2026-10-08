@@ -55,6 +55,366 @@ def test_detached_response_schema_types_every_property() -> None:
     require_property_types(editorial_module._COVER_LETTER_RESPONSE_SCHEMA)
 
 
+def _synthetic_cover_response() -> dict[str, object]:
+    return {
+        "candidate_name": "Casey Synthetic",
+        "schema_version": editorial_module.COVER_LETTER_DRAFT_SCHEMA,
+        "sections": [
+            {
+                "heading": heading,
+                "atoms": [
+                    {
+                        "claim_id": None,
+                        "source_kind": "connective",
+                        "text": "Synthetic text.",
+                    }
+                ],
+            }
+            for heading in ("Opening", "Evidence Match", "Company Fit", "Close")
+        ],
+    }
+
+
+def _cover_response_bytes(document: dict[str, object]) -> bytes:
+    return canonical_json(document).encode("utf-8")
+
+
+def test_cover_response_parser_keeps_canonical_mode_and_allows_current_formatting() -> None:
+    document = _synthetic_cover_response()
+    canonical = _cover_response_bytes(document)
+    pretty = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+
+    legacy = editorial_module._cover_letter_draft_from_response(
+        canonical, current_runtime=False
+    )
+    assert legacy.document(include_identity=False) == document
+
+    expected_current = {
+        **document,
+        "current_runtime": True,
+        "sections": [
+            {**section, "current_runtime": True} for section in document["sections"]
+        ],
+    }
+    canonical_current = editorial_module._cover_letter_draft_from_response(
+        canonical, current_runtime=True
+    )
+    assert canonical_current.document(include_identity=False) == expected_current
+
+    parsed = editorial_module._cover_letter_draft_from_response(
+        pretty, current_runtime=True
+    )
+    assert parsed.document(include_identity=False) == expected_current
+    with pytest.raises(EditorialCompositionError, match="not canonical JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            pretty, current_runtime=False
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b'{"candidate_name":"Casey","candidate_name":"Other"}',
+        b'{"candidate_name":"Casey","nested":{"key":1,"key":2}}',
+        b'{"candidate_name":"Casey","nested":{"x":1,"\\u0078":2}}',
+    ),
+)
+def test_cover_response_parser_rejects_duplicate_keys_in_current_mode(raw: bytes) -> None:
+    with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            raw, current_runtime=True
+        )
+
+
+@pytest.mark.parametrize(
+    "number",
+    (b"NaN", b"Infinity", b"-Infinity", b"1e400", b"-1e400"),
+)
+def test_cover_response_parser_rejects_nonfinite_numbers_in_current_mode(
+    number: bytes,
+) -> None:
+    raw = b'{"candidate_name":"Casey","value":' + number + b"}"
+    with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            raw, current_runtime=True
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b"\xef\xbb\xbf{}",
+        b'{"candidate_name":"Casey"} trailing',
+        b"[1,2]",
+        b"\xff",
+    ),
+)
+def test_cover_response_parser_rejects_malformed_json_in_current_mode(raw: bytes) -> None:
+    with pytest.raises(EditorialCompositionError):
+        editorial_module._cover_letter_draft_from_response(
+            raw, current_runtime=True
+        )
+
+
+@pytest.mark.parametrize("current_runtime", (1, 0, "true", None))
+def test_cover_response_parser_rejects_non_exact_mode_types(current_runtime) -> None:
+    with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            _cover_response_bytes(_synthetic_cover_response()),
+            current_runtime=current_runtime,
+        )
+
+
+def test_cover_response_parser_rejects_non_bytes_and_unpaired_surrogates() -> None:
+    class BytesSubclass(bytes):
+        pass
+
+    with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            BytesSubclass(b"{}"), current_runtime=True
+        )
+    with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+        editorial_module._cover_letter_draft_from_response(
+            bytearray(b"{}"), current_runtime=True
+        )
+    for raw in (
+        b'{"candidate_name":"\\ud800"}',
+        b'{"candidate_name":"Casey","sections":[{"text":"\\ude00"}]}',
+    ):
+        with pytest.raises(EditorialCompositionError, match="invalid JSON"):
+            editorial_module._cover_letter_draft_from_response(
+                raw, current_runtime=True
+            )
+
+    document = _synthetic_cover_response()
+    document["candidate_name"] = "Casey 😀"
+    paired = json.dumps(document, ensure_ascii=True).encode("utf-8")
+    parsed = editorial_module._cover_letter_draft_from_response(
+        paired, current_runtime=True
+    )
+    assert parsed.candidate_name == "Casey 😀"
+
+
+def test_editorial_section_policy_keeps_legacy_and_maps_current_headings() -> None:
+    legacy = editorial_module.editorial_section_policy()
+    current = editorial_module.editorial_section_policy(current_runtime=True)
+
+    assert legacy == editorial_module._CATEGORY_BY_HEADING
+    assert all(type(categories) is frozenset for categories in current.values())
+    assert current["Highlights"] == frozenset({"highlight"})
+    assert current["Skills"] == frozenset({"skill"})
+    assert editorial_module.category_for_source_heading(
+        "Highlights", current_runtime=True
+    ) == "highlight"
+    assert editorial_module.category_for_source_heading(
+        "Skills", current_runtime=True
+    ) == "skill"
+    with pytest.raises(ValueError, match="invalid editorial section policy"):
+        editorial_module.category_for_source_heading("highlight", current_runtime=True)
+    with pytest.raises(ValueError, match="invalid editorial section policy"):
+        editorial_module.category_for_source_heading("Highlights")
+
+    schema = editorial_module._DRAFT_RESPONSE_SCHEMA
+    legacy_schema = editorial_module.editorial_layout_response_schema(dict(schema))
+    current_schema = editorial_module.editorial_layout_response_schema(
+        dict(schema), current_runtime=True
+    )
+    assert legacy_schema == schema
+    assert legacy_schema is not schema
+    assert current_schema["properties"]["sections"]["minItems"] == 1
+    assert current_schema["properties"]["sections"]["items"]["properties"][
+        "heading"
+    ]["enum"] == sorted(current)
+    assert schema["properties"]["sections"]["minItems"] == 2
+    assert editorial_module.validate_editorial_layout(("Highlights",), current_runtime=True) is None
+    with pytest.raises(ValueError, match="invalid editorial section policy"):
+        editorial_module.validate_editorial_layout(("Highlights",))
+
+
+def test_current_highlight_draft_round_trips_without_legacy_required_sections() -> None:
+    authority = CandidateEditorialAuthority(
+        candidate_name="Synthetic Candidate",
+        candidate_city="London, United Kingdom",
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+        current_runtime=True,
+    )
+    claim = _claim(
+        "highlight-1",
+        "Delivered a workflow improvement.",
+        editorial_module.category_for_source_heading(
+            "Highlights", current_runtime=True
+        ),
+    )
+    request = build_editorial_request(
+        authority=authority,
+        role_title="Synthetic Analyst",
+        company_name="Example Employer",
+        vacancy_sha256="b" * 64,
+        approved_claims=(claim,),
+    )
+    assert request.approved_claims == (claim,)
+
+    legacy_authority = CandidateEditorialAuthority(
+        candidate_name="Synthetic Candidate",
+        candidate_city="London, United Kingdom",
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+    )
+    with pytest.raises(
+        EditorialCompositionError,
+        match="category is unsupported for editorial runtime",
+    ):
+        build_editorial_request(
+            authority=legacy_authority,
+            role_title="Synthetic Analyst",
+            company_name="Example Employer",
+            vacancy_sha256="b" * 64,
+            approved_claims=(claim,),
+        )
+    draft = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        sections=(
+            CVSection(
+                "Highlights",
+                (EditorialAtom("approved_claim", claim.text, claim.claim_id),),
+            ),
+        ),
+        current_runtime=True,
+    )
+
+    response = editorial_module._draft_from_response(
+        canonical_json(draft.document()).encode(), current_runtime=True
+    )
+    validate_editorial_draft(request, response, current_runtime=True)
+    assert response.document() == draft.document()
+    assert response.current_runtime is True
+    with pytest.raises(EditorialCompositionError, match="layout is invalid"):
+        build_editorial_draft(
+            candidate_name=authority.candidate_name,
+            candidate_city=authority.candidate_city,
+            sections=draft.sections,
+        )
+    with pytest.raises(EditorialCompositionError, match="mode differs from authority"):
+        validate_editorial_draft(request, response, current_runtime=False)
+
+
+def test_current_claim_assignment_uses_unique_primary_headings() -> None:
+    categories_by_heading = editorial_module.editorial_section_policy(
+        current_runtime=True
+    )
+    primary_category_by_heading = {
+        heading: editorial_module.category_for_source_heading(
+            heading, current_runtime=True
+        )
+        for heading in categories_by_heading
+    }
+    claims = [
+        {"claim_id": "project-claim", "category": "project"},
+        {"claim_id": "summary-claim", "category": "summary"},
+    ]
+
+    assignment = editorial_module.build_cv_claim_assignment_contract(
+        claims, categories_by_heading, primary_category_by_heading
+    )
+
+    assert assignment == {
+        "claim_section_policy": {
+            "project-claim": ["Projects"],
+            "summary-claim": ["Professional Summary"],
+        },
+        "required_claim_ids": ["project-claim", "summary-claim"],
+    }
+    assert "project" in categories_by_heading["Professional Summary"]
+
+    class _HeadingKey(str):
+        pass
+
+    subclass_heading_map = {
+        _HeadingKey(heading): category
+        for heading, category in primary_category_by_heading.items()
+    }
+    with pytest.raises(ValueError, match="invalid CV claim assignment"):
+        editorial_module.build_cv_claim_assignment_contract(
+            claims, categories_by_heading, subclass_heading_map
+        )
+
+
+def test_current_cv_draft_allows_whole_claim_omission_but_rejects_repeats() -> None:
+    request, draft = _current_fixture()
+    validate_editorial_draft(request, draft, current_runtime=True)
+    highlight_claim, project_claim = request.approved_claims
+
+    omitted = build_editorial_draft(
+        candidate_name=request.authority.candidate_name,
+        candidate_city=request.authority.candidate_city,
+        sections=(
+            CVSection(
+                "Highlights",
+                (
+                    EditorialAtom(
+                        "approved_claim", highlight_claim.text, highlight_claim.claim_id
+                    ),
+                ),
+            ),
+        ),
+        current_runtime=True,
+    )
+    validate_editorial_draft(request, omitted, current_runtime=True)
+
+    repeated = build_editorial_draft(
+        candidate_name=request.authority.candidate_name,
+        candidate_city=request.authority.candidate_city,
+        sections=(
+            CVSection(
+                "Highlights",
+                (
+                    EditorialAtom(
+                        "approved_claim", highlight_claim.text, highlight_claim.claim_id
+                    ),
+                ),
+            ),
+            CVSection(
+                "Projects",
+                (
+                    EditorialAtom(
+                        "approved_claim", project_claim.text, project_claim.claim_id
+                    ),
+                    EditorialAtom(
+                        "approved_claim", project_claim.text, project_claim.claim_id
+                    ),
+                ),
+            ),
+        ),
+        current_runtime=True,
+    )
+    with pytest.raises(EditorialCompositionError, match="repeats an approved claim"):
+        validate_editorial_draft(request, repeated, current_runtime=True)
+
+    wrong_primary_section = build_editorial_draft(
+        candidate_name=request.authority.candidate_name,
+        candidate_city=request.authority.candidate_city,
+        sections=(
+            CVSection(
+                "Professional Summary",
+                (
+                    EditorialAtom(
+                        "approved_claim", project_claim.text, project_claim.claim_id
+                    ),
+                ),
+            ),
+        ),
+        current_runtime=True,
+    )
+    with pytest.raises(
+        EditorialCompositionError, match="outside its assigned CV section"
+    ):
+        validate_editorial_draft(request, wrong_primary_section, current_runtime=True)
+
+
 def _claim(claim_id: str, text: str, category: str) -> ApprovedCVClaim:
     return ApprovedCVClaim(
         claim_id=claim_id,
@@ -63,6 +423,12 @@ def _claim(claim_id: str, text: str, category: str) -> ApprovedCVClaim:
         evidence_ids=(f"evidence:{claim_id}",),
         category=category,
     )
+
+
+def _adapter_request_bytes() -> bytes:
+    return canonical_json(
+        {"editorial_request": {"authority": {"candidate_city": "London"}}}
+    ).encode()
 
 
 def _fixture():
@@ -132,6 +498,145 @@ def _fixture():
         sections=sections,
     )
     return request, writer, final
+
+
+def _current_fixture():
+    authority = CandidateEditorialAuthority(
+        candidate_name="Synthetic Candidate",
+        candidate_city="Example City, United Kingdom",
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="c" * 64,
+        current_runtime=True,
+    )
+    claims = (
+        _claim("highlight", "Delivered a structured workflow improvement.", "highlight"),
+        _claim("project", "Built a synthetic planning workflow.", "project"),
+    )
+    request = build_editorial_request(
+        authority=authority,
+        role_title="Synthetic Engineer",
+        company_name="Example Employer",
+        vacancy_sha256="d" * 64,
+        approved_claims=claims,
+    )
+    draft = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        sections=(
+            CVSection(
+                "Highlights",
+                (EditorialAtom("approved_claim", claims[0].text, claims[0].claim_id),),
+            ),
+            CVSection(
+                "Projects",
+                (EditorialAtom("approved_claim", claims[1].text, claims[1].claim_id),),
+            ),
+        ),
+        current_runtime=True,
+    )
+    return request, draft
+
+
+@pytest.mark.parametrize("require_transport_shape", (False, True))
+def test_current_cv_response_parser_accepts_equivalent_json_formatting(
+    require_transport_shape: bool,
+) -> None:
+    _, draft = _current_fixture()
+    document = draft.document(include_identity=not require_transport_shape)
+    canonical = canonical_json(document).encode("utf-8")
+    pretty = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+    reordered = json.dumps(
+        dict(reversed(tuple(document.items()))),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    expected = editorial_module._draft_from_response(
+        canonical,
+        require_transport_shape=require_transport_shape,
+        current_runtime=True,
+    )
+
+    for raw in (pretty, canonical + b"\n", reordered):
+        parsed = editorial_module._draft_from_response(
+            raw,
+            require_transport_shape=require_transport_shape,
+            current_runtime=True,
+        )
+        assert parsed == expected
+        assert parsed.document() == draft.document()
+
+
+@pytest.mark.parametrize("require_transport_shape", (False, True))
+def test_legacy_cv_response_parser_still_requires_canonical_bytes(
+    require_transport_shape: bool,
+) -> None:
+    _, draft = _current_fixture()
+    document = draft.document(include_identity=not require_transport_shape)
+    pretty = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
+
+    with pytest.raises(EditorialCompositionError, match="not canonical JSON"):
+        editorial_module._draft_from_response(
+            pretty,
+            require_transport_shape=require_transport_shape,
+            current_runtime=False,
+        )
+
+
+@pytest.mark.parametrize("current_runtime", (1, 0, "true", None))
+def test_cv_response_parser_rejects_non_exact_runtime_mode(
+    current_runtime: object,
+) -> None:
+    _, draft = _current_fixture()
+    with pytest.raises(EditorialCompositionError):
+        editorial_module._draft_from_response(
+            canonical_json(draft.document()).encode("utf-8"),
+            current_runtime=current_runtime,
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b"\xef\xbb\xbf{}",
+        b'{"candidate_name":"Synthetic","candidate_name":"Other"}',
+        b'{"candidate_name":"Synthetic","nested":{"x":1,"\\u0078":2}}',
+        b'{"candidate_name":"Synthetic","value":NaN}',
+        b'{"candidate_name":"Synthetic","value":1e400}',
+        b'{"candidate_name":"\\ud800"}',
+        b'{"candidate_name":"Synthetic"} trailing',
+        b"\xff",
+        b"[]",
+    ),
+)
+def test_current_cv_response_parser_rejects_unsafe_json(raw: bytes) -> None:
+    with pytest.raises(EditorialCompositionError):
+        editorial_module._draft_from_response(raw, current_runtime=True)
+
+
+def test_current_cv_response_parser_preserves_schema_atom_and_identity_guards() -> None:
+    _, draft = _current_fixture()
+    extra_key = draft.document(include_identity=False)
+    extra_key["unexpected"] = True
+    wrong_schema = draft.document(include_identity=False)
+    wrong_schema["schema_version"] = "unsupported"
+    malformed_atom = draft.document(include_identity=False)
+    malformed_atom["sections"][0]["atoms"][0].pop("claim_id")
+
+    for document in (extra_key, wrong_schema, malformed_atom):
+        with pytest.raises(EditorialCompositionError):
+            editorial_module._draft_from_response(
+                canonical_json(document).encode("utf-8"),
+                current_runtime=True,
+            )
+
+    wrong_identity = draft.document()
+    wrong_identity["draft_sha256"] = "0" * 64
+    with pytest.raises(EditorialCompositionError, match="identity is invalid"):
+        editorial_module._draft_from_response(
+            canonical_json(wrong_identity).encode("utf-8"),
+            current_runtime=True,
+        )
 
 
 def _stage_evidence(request, writer, final):
@@ -224,6 +729,138 @@ def test_runtime_invokes_explicit_writer_and_humanizer_then_admits_outputs() -> 
         "project": ["Professional Summary", "Projects"],
         "summary": ["Professional Summary"],
     }
+    assert writer_request["instructions"] == [
+        "Return only one canonical JSON object matching the supplied response schema.",
+        "Use approved_claim atoms verbatim; never paraphrase, split, or invent facts.",
+        "Place every approved_claim atom only in a section listed for its claim ID in claim_section_policy.",
+        "Omit connective atoms or select them only from the supplied finite rhetorical catalog.",
+        "Do not add Curriculum Vitae/CV labels, work-rights text, or unsupported capabilities.",
+        "Do not add AI-authorship disclosure or em/en dashes, including inside approved facts.",
+        "Keep formats and datastores out of Core Capabilities.",
+    ]
+    assert "required_claim_ids" not in writer_request
+    assert not any(
+        "exactly once globally" in instruction
+        for instruction in writer_request["instructions"]
+    )
+
+
+def test_current_runtime_writer_request_exposes_available_claims() -> None:
+    request, draft = _current_fixture()
+    writer_adapter = _ScriptedStageAdapter(
+        "fixture-current-writer", "writer-v2", draft
+    )
+    humanizer_adapter = _ScriptedStageAdapter(
+        "fixture-current-humanizer", "humanizer-v2", draft
+    )
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+    )
+
+    run_editorial_composition_runtime(request, runtime=runtime)
+
+    writer_request = json.loads(writer_adapter.calls[0][0])
+    education_date_instruction = next(
+        instruction
+        for instruction in writer_request["instructions"]
+        if instruction.startswith("In Education, never emit day-level dates.")
+    )
+    assert "exact graduation_month_year supplied in candidate authority" in education_date_instruction
+    assert "if it is absent, omit the graduation date" in education_date_instruction
+    assert "overrides the general instruction to preserve dates" in education_date_instruction
+    assert writer_request["editorial_request"]["authority"]["graduation_month_year"] is None
+    assert writer_request["claim_section_policy"] == {
+        "highlight": ["Highlights"],
+        "project": ["Projects"],
+    }
+    assert writer_request["available_claim_ids"] == ["highlight", "project"]
+    assert "required_claim_ids" not in writer_request
+    assert not any(
+        "exactly once globally" in instruction
+        for instruction in writer_request["instructions"]
+    )
+    assert not any(
+        "second copy" in instruction
+        for instruction in writer_request["instructions"]
+    )
+    current_framing_instruction = next(
+        instruction
+        for instruction in writer_request["instructions"]
+        if instruction.startswith("Omit whole claims that narrate internal governance")
+    )
+    assert "evidence origin or provenance" in current_framing_instruction
+    assert "weakness" in current_framing_instruction
+    assert "irrelevant to the target role" in current_framing_instruction
+    assert "genuine AI/LLM technical experience" in current_framing_instruction
+    assert "Preserve every material caveat, qualifier, limitation, and negation" in current_framing_instruction
+
+
+def _current_education_fixture(education_text: str, graduation_month_year: str | None):
+    request, draft = _current_fixture()
+    authority = replace(
+        request.authority,
+        graduation_month_year=graduation_month_year,
+    )
+    education_claim = _claim("education", education_text, "education")
+    request = build_editorial_request(
+        authority=authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=(*request.approved_claims, education_claim),
+    )
+    draft = build_editorial_draft(
+        candidate_name=authority.candidate_name,
+        candidate_city=authority.candidate_city,
+        sections=(
+            *draft.sections,
+            CVSection(
+                "Education",
+                (
+                    EditorialAtom(
+                        "approved_claim", education_claim.text, education_claim.claim_id
+                    ),
+                ),
+            ),
+        ),
+        current_runtime=True,
+    )
+    return request, draft
+
+
+def test_current_education_dates_remain_bound_to_authorized_month_and_year() -> None:
+    no_authority_request, no_authority_draft = _current_education_fixture(
+        "Synthetic degree.", None
+    )
+    validate_editorial_draft(
+        no_authority_request, no_authority_draft, current_runtime=True
+    )
+
+    day_request, day_draft = _current_education_fixture(
+        "Synthetic degree, 2 July 2026.", "July 2026"
+    )
+    with pytest.raises(EditorialCompositionError, match="month and year only"):
+        validate_editorial_draft(day_request, day_draft, current_runtime=True)
+
+    month_year_request, month_year_draft = _current_education_fixture(
+        "Synthetic degree, July 2026.", "July 2026"
+    )
+    validate_editorial_draft(
+        month_year_request, month_year_draft, current_runtime=True
+    )
+
+    mismatched_request, mismatched_draft = _current_education_fixture(
+        "Synthetic degree, June 2026.", "July 2026"
+    )
+    with pytest.raises(
+        EditorialCompositionError,
+        match="authoritative graduation month and year are absent",
+    ):
+        validate_editorial_draft(
+            mismatched_request, mismatched_draft, current_runtime=True
+        )
 
 
 def test_production_runtime_requires_exact_source_materialization() -> None:
@@ -404,7 +1041,9 @@ def test_runtime_rejects_backend_with_history_access() -> None:
         run_editorial_composition_runtime(request, runtime=runtime)
 
 
-def _detached_adapter(tmp_path, draft, *, stage="resume_writer"):
+def _detached_adapter(
+    tmp_path, draft, *, stage="resume_writer", allow_missing_city=False
+):
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / f"codex-{stage}"
     binary.write_bytes(f"synthetic {stage} codex binary".encode())
@@ -420,6 +1059,7 @@ def _detached_adapter(tmp_path, draft, *, stage="resume_writer"):
             "OPENAI_API_KEY": "must-not-cross",
             "CANDIDATE_SECRET": "must-not-cross",
         },
+        allow_missing_city=allow_missing_city,
     ), binary, draft
 
 
@@ -451,7 +1091,7 @@ def test_detached_codex_adapter_is_one_shot_hash_bound_and_scrubbed(
         return SimpleNamespace(returncode=0, stdout=json.dumps(event), stderr="")
 
     monkeypatch.setattr("cv_generation.editorial_composition.subprocess.run", fake_run)
-    request_bytes = canonical_json({"synthetic": "request"}).encode()
+    request_bytes = _adapter_request_bytes()
     session = adapter.open_fresh_session(invocation_id="writer-invocation")
     result = session.invoke(request_bytes=request_bytes)
 
@@ -508,7 +1148,7 @@ def test_detached_codex_adapter_rejects_invalid_jsonl_event(
     monkeypatch.setattr("cv_generation.editorial_composition.subprocess.run", fake_run)
     with pytest.raises(EditorialCompositionError, match=message):
         adapter.open_fresh_session(invocation_id="writer").invoke(
-            request_bytes=b"{}"
+            request_bytes=_adapter_request_bytes()
         )
     assert len(calls) == 1
 
@@ -536,7 +1176,9 @@ def test_detached_codex_adapter_rejects_model_supplied_draft_identity(
 
     monkeypatch.setattr("cv_generation.editorial_composition.subprocess.run", fake_run)
     with pytest.raises(EditorialCompositionError, match="draft schema differs"):
-        adapter.open_fresh_session(invocation_id="writer").invoke(request_bytes=b"{}")
+        adapter.open_fresh_session(invocation_id="writer").invoke(
+            request_bytes=_adapter_request_bytes()
+        )
 
 
 def test_runtime_rejects_swapped_detached_stage_adapters(tmp_path) -> None:
@@ -694,6 +1336,142 @@ def test_location_is_bound_to_candidate_authority() -> None:
     )
     with pytest.raises(EditorialCompositionError, match="location differs"):
         validate_editorial_draft(request, draft)
+
+
+def test_current_runtime_allows_only_authority_bound_absent_city() -> None:
+    request, writer, _ = _fixture()
+    authority = replace(
+        request.authority,
+        candidate_city=None,
+        allow_missing_city=True,
+        current_runtime=True,
+    )
+    current_request = build_editorial_request(
+        authority=authority,
+        role_title=request.role_title,
+        company_name=request.company_name,
+        vacancy_sha256=request.vacancy_sha256,
+        approved_claims=request.approved_claims,
+    )
+    draft = build_editorial_draft(
+        candidate_name=writer.candidate_name,
+        candidate_city=None,
+        sections=writer.sections,
+        allow_missing_city=True,
+        current_runtime=True,
+    )
+    validate_editorial_draft(current_request, draft)
+    schema = editorial_module.editorial_city_response_schema(
+        dict(editorial_module._DRAFT_RESPONSE_SCHEMA),
+        authority_city=None,
+        allow_missing_city=True,
+    )
+    assert schema["properties"]["candidate_city"] == {"type": "null"}
+    assert editorial_module._DRAFT_RESPONSE_SCHEMA["properties"]["candidate_city"] == {
+        "type": "string",
+        "minLength": 1,
+    }
+    with pytest.raises(EditorialCompositionError):
+        CandidateEditorialAuthority(
+            candidate_name=request.authority.candidate_name,
+            candidate_city=None,
+            graduation_month_year=None,
+            dissertation_title=None,
+            source_sha256="a" * 64,
+        )
+    with pytest.raises(EditorialCompositionError):
+        validate_editorial_draft(
+            current_request,
+            build_editorial_draft(
+                candidate_name=writer.candidate_name,
+                candidate_city="Invented City",
+                sections=writer.sections,
+                allow_missing_city=True,
+            ),
+        )
+
+
+def test_detached_adapter_city_mode_is_stage_scoped_and_preserves_legacy_identity(
+    tmp_path,
+) -> None:
+    _, draft, _ = _fixture()
+    for stage in (
+        "resume_writer",
+        "humanizer",
+        "cover_letter_writer",
+        "cover_letter_humanizer",
+    ):
+        for requested_mode in (False, True):
+            adapter, binary, _ = _detached_adapter(
+                tmp_path / stage / str(requested_mode),
+                draft,
+                stage=stage,
+                allow_missing_city=requested_mode,
+            )
+            expected_mode = requested_mode and stage in {
+                "resume_writer",
+                "humanizer",
+            }
+            assert adapter.allow_missing_city is expected_mode
+
+            expected_identity = {
+                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "cli_contract_sha256": editorial_module.content_hash(
+                    {
+                        "environment": "synthetic",
+                        "executable_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                    }
+                ),
+                "cwd_policy": "fresh-request-material-only",
+                "disabled_features": list(editorial_module._DISABLED_CODEX_FEATURES),
+                "environment_names": sorted(
+                    editorial_module._scrubbed_codex_environment(
+                        adapter.process_environment
+                    )
+                ),
+                "ignore_project_rules": True,
+                "model": "gpt-5.6-sol",
+                "network_tools_enabled": False,
+                "project_doc_max_bytes": 0,
+                "provider": editorial_module.EDITORIAL_PROVIDER_IDENTITY,
+                "response_schema_sha256": editorial_module.content_hash(
+                    adapter._response_schema
+                ),
+                "sandbox": "read-only",
+                "single_attempt": True,
+                "stage": stage,
+                "timeout_seconds": 120.0,
+                "output_path_policy": "fresh-response-directory-only",
+            }
+            if expected_mode:
+                null_city_schema = editorial_module.editorial_city_response_schema(
+                    dict(adapter._response_schema),
+                    authority_city=None,
+                    allow_missing_city=True,
+                )
+                expected_identity.update(
+                    {
+                        "allow_missing_city": True,
+                        "null_city_response_schema_sha256": editorial_module.content_hash(
+                            null_city_schema
+                        ),
+                    }
+                )
+            assert adapter.transport_identity == editorial_module.content_hash(
+                expected_identity
+            )
+
+
+def test_editorial_city_mode_rejects_non_exact_stage_and_flag_types() -> None:
+    class StageSubclass(str):
+        pass
+
+    for stage, flag in (
+        (StageSubclass("resume_writer"), True),
+        ("resume_writer", 1),
+    ):
+        with pytest.raises(EditorialCompositionError, match="invalid editorial city mode"):
+            editorial_module.effective_editorial_city_mode(stage, flag)
 
 
 def test_graduation_day_and_wrong_dissertation_are_rejected() -> None:

@@ -44,13 +44,16 @@ class ResearchWorker:
         profile_id: str | None = None,
         job_key: str | None = None,
         require_refresh_bridge: bool = False,
+        initial_only: bool = False,
     ) -> ResearchRun:
-        task = self.store.claim_research(
-            self.worker_id,
-            profile_id=profile_id,
-            job_key=job_key,
-            require_refresh_bridge=require_refresh_bridge,
-        )
+        claim_options = {
+            "profile_id": profile_id,
+            "job_key": job_key,
+            "require_refresh_bridge": require_refresh_bridge,
+        }
+        if initial_only:
+            claim_options["initial_only"] = True
+        task = self.store.claim_research(self.worker_id, **claim_options)
         if task is None:
             return ResearchRun("idle")
         try:

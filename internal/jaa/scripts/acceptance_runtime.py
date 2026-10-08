@@ -98,7 +98,7 @@ def validate_config_path(path: Path, *, may_be_absent: bool) -> Path:
 
 
 def load_runtime_config(path: Path) -> dict[str, Any]:
-    config_path = validate_config_path(path, may_be_absent=False)
+    config_path = validate_config_path(path, may_be_absent=True)
     try:
         mode = stat.S_IMODE(config_path.stat().st_mode)
         if mode != 0o600 or not config_path.is_file():

@@ -20,10 +20,24 @@ from career_automation.production_queue import (
     build_ascending_queue,
     prior_attempts_from_archive,
 )
+from career_automation.production_attempt import GreenhouseAttemptRecorder
 
 
 ROOT = Path(__file__).resolve().parent
 NOW = datetime(2026, 8, 5, 12, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("review_only", [False, True])
+def test_review_only_terminal_never_automatically_reenters(retry, review_only):
+    candidate = _candidate("10", "0.2")
+    prior = PriorAttempt(candidate.vacancy, "jaa-20260805T120000Z-0123456789abcdef",
+                         "review_only", _digest("review-terminal"))
+    queue = build_ascending_queue((candidate,), prior_attempts=(prior,), as_of=NOW,
+                                  retry_repairable_preclick_blocks=retry,
+                                  review_only=review_only)
+    assert queue.next_action is None
+    assert queue.excluded[0].reason == "prior_review_only"
 
 
 def _digest(label: str) -> str:
@@ -165,9 +179,142 @@ def test_incomplete_attempt_is_resumed_without_creating_a_duplicate() -> None:
     assert queue.next_action.attempt_id == prior.attempt_id
 
 
+def test_incomplete_review_only_intent_is_mode_aware_from_archive(tmp_path: Path) -> None:
+    candidate = _candidate("10", "0.2")
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=tmp_path / "archive",
+        repository_root=ROOT,
+        vacancy=candidate.vacancy,
+        complete_vacancy=b"vacancy-10",
+        structured_vacancy={},
+        assessment={},
+    )
+    recorder.begin_review_only()
+    prior = prior_attempts_from_archive(recorder.attempt.archive)
+
+    assert len(prior) == 1
+    assert prior[0].review_only_intent_present is True
+    assert prior[0].semantic_fence_present is False
+    assert prior[0].terminal_recovery_pending is False
+    live_queue = build_ascending_queue((candidate,), prior_attempts=prior, as_of=NOW)
+    assert live_queue.next_action is None
+    assert live_queue.excluded[0].reason == "prior_incomplete_review_only"
+    explicit_live_queue = build_ascending_queue(
+        (candidate,), prior_attempts=prior, as_of=NOW, review_only=False
+    )
+    assert explicit_live_queue == live_queue
+
+    review_queue = build_ascending_queue(
+        (candidate,), prior_attempts=prior, as_of=NOW, review_only=True
+    )
+    assert review_queue.next_action is not None
+    assert review_queue.next_action.action == "resume_attempt"
+    assert review_queue.next_action.attempt_id == recorder.attempt.attempt_id
+
+    with pytest.raises(ProductionQueueError, match="review-only queue mode"):
+        build_ascending_queue((candidate,), prior_attempts=prior, review_only=1)
+    with pytest.raises(ProductionQueueError, match="review-only intent state"):
+        replace(prior[0], review_only_intent_present=1)
+    with pytest.raises(ProductionQueueError, match="semantic fence state"):
+        replace(prior[0], semantic_fence_present=1)
+    with pytest.raises(ProductionQueueError, match="terminal recovery state"):
+        replace(prior[0], terminal_recovery_pending=1)
+
+
+def test_review_only_queue_skips_fenced_archive_and_selects_fresh_candidate(
+    tmp_path: Path,
+) -> None:
+    consumed = _candidate("10", "0.1")
+    fresh = _candidate("11", "0.2")
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=tmp_path / "archive",
+        repository_root=ROOT,
+        vacancy=consumed.vacancy,
+        complete_vacancy=b"vacancy-10",
+        structured_vacancy={},
+        assessment={},
+    )
+    recorder.begin_review_only()
+    recorder.attempt.add_artifact(
+        "review.semantic_intent",
+        (
+            json.dumps(
+                {"attempt_id": recorder.attempt.attempt_id},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+            + b"\n"
+        ),
+        media_type="application/json",
+    )
+
+    prior = prior_attempts_from_archive(recorder.attempt.archive)
+    assert len(prior) == 1
+    assert prior[0].review_only_intent_present is True
+    assert prior[0].semantic_fence_present is True
+    assert prior[0].terminal_recovery_pending is False
+
+    queue = build_ascending_queue(
+        (consumed, fresh), prior_attempts=prior, as_of=NOW, review_only=True
+    )
+
+    assert len(queue.excluded) == 1
+    assert queue.excluded[0].vacancy.vacancy.job_key == consumed.vacancy.job_key
+    assert queue.excluded[0].reason == "prior_incomplete_review_only_semantic_fence"
+    assert len(queue.ready) == 1
+    assert queue.next_action is not None
+    assert queue.next_action.vacancy == fresh
+    assert queue.next_action.action == "create_attempt"
+    assert queue.next_action.attempt_id is None
+
+
+def test_review_only_queue_preserves_pending_terminal_recovery(tmp_path: Path) -> None:
+    candidate = _candidate("10", "0.2")
+    recorder = GreenhouseAttemptRecorder.create(
+        archive_root=tmp_path / "archive",
+        repository_root=ROOT,
+        vacancy=candidate.vacancy,
+        complete_vacancy=b"vacancy-10",
+        structured_vacancy={},
+        assessment={},
+    )
+    recorder.begin_review_only()
+    recorder.attempt.add_artifact(
+        "review.semantic_intent",
+        (
+            json.dumps(
+                {"attempt_id": recorder.attempt.attempt_id},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+            + b"\n"
+        ),
+        media_type="application/json",
+    )
+    recorder._record_evidence("terminal", result="completed", members={})
+
+    prior = prior_attempts_from_archive(recorder.attempt.archive)
+    assert prior[0].review_only_intent_present is True
+    assert prior[0].semantic_fence_present is True
+    assert prior[0].terminal_recovery_pending is True
+    review_queue = build_ascending_queue(
+        (candidate,), prior_attempts=prior, as_of=NOW, review_only=True
+    )
+    assert review_queue.next_action is not None
+    assert review_queue.next_action.action == "resume_attempt"
+    assert review_queue.next_action.attempt_id == recorder.attempt.attempt_id
+
+    live_queue = build_ascending_queue(
+        (candidate,), prior_attempts=prior, as_of=NOW
+    )
+    assert live_queue.next_action is None
+    assert live_queue.excluded[0].reason == "prior_incomplete_review_only"
+
+
+@pytest.mark.parametrize("review_only", [False, True])
 @pytest.mark.parametrize("outcome", (None, "crashed", "timed_out", "abandoned"))
 def test_click_intent_quarantines_regardless_of_terminal_state(
-    outcome: str | None,
+    outcome: str | None, review_only: bool,
 ) -> None:
     candidate = _candidate("10", "0.2")
     prior = PriorAttempt(
@@ -177,7 +324,9 @@ def test_click_intent_quarantines_regardless_of_terminal_state(
         _digest("terminal") if outcome is not None else None,
         click_intent_present=True,
     )
-    queue = build_ascending_queue((candidate,), prior_attempts=(prior,), as_of=NOW)
+    queue = build_ascending_queue(
+        (candidate,), prior_attempts=(prior,), as_of=NOW, review_only=review_only
+    )
     assert not queue.ready
     assert queue.excluded[0].reason == "prior_click_intent"
 
@@ -480,3 +629,25 @@ def test_historical_ashby_identity_is_quarantined_across_company_slug() -> None:
     queue = build_ascending_queue((candidate,), prior_attempts=(prior,), as_of=NOW)
     assert not queue.ready
     assert queue.excluded[0].reason == "prior_blocked"
+
+
+@pytest.mark.parametrize("selection", ["default", "environment", "explicit"])
+def test_queue_cli_archive_selection_uses_existing_archive(tmp_path, monkeypatch, capsys, selection):
+    from career_automation import production_queue as queue
+
+    roots = {name: tmp_path / name for name in ("default", "environment", "explicit")}
+    chosen = roots[selection]
+    archive = ApplicationArchive(chosen, repository_root=ROOT)
+    ProductionCheckpointLedger(archive)
+    monkeypatch.setattr(queue, "DEFAULT_ARCHIVE_ROOT", roots["default"])
+    monkeypatch.delenv(queue.ARCHIVE_ROOT_ENV, raising=False)
+    arguments = ["--repository-root", str(ROOT)]
+    if selection in ("environment", "explicit"):
+        monkeypatch.setenv(queue.ARCHIVE_ROOT_ENV, str(roots["environment"]))
+    if selection == "explicit":
+        arguments.extend(["--archive-root", str(chosen)])
+    assert queue._main(arguments) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["verified"] is True
+    assert document["event_count"] == document["attempt_count"] == 0
+    assert all(not path.exists() for name, path in roots.items() if name != selection)

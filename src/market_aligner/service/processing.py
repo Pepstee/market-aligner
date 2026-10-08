@@ -8,8 +8,9 @@ import os
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
+from market_aligner.applications.canonical import ContractValidationError
 from market_aligner.assessment.opportunity import (
     OpportunityAxisPolicy,
     derive_opportunity_axes,
@@ -26,9 +27,25 @@ from market_aligner.assessment.geography import (
 )
 from market_aligner.config import ProductPaths
 from market_aligner.config_loader import load_config
-from market_aligner.domain.contracts import Vacancy
-from market_aligner.llm.contracts import EvidenceAlignment, LLMGateway, LLMReceipt, canonical_hash
-from market_aligner.llm.pipeline import accept_alignment, accept_extraction
+from market_aligner.domain.contracts import RawPosting, Vacancy
+from market_aligner.llm.contracts import (
+    EvidenceAlignment,
+    LLMGateway,
+    LLMReceipt,
+    LLMTransportReceipt,
+    VACANCY_ELIGIBILITY_FIELDS,
+    VACANCY_ELIGIBILITY_FACTS_VERSION,
+    VACANCY_ELIGIBILITY_FACTS_TASK,
+    VacancyEligibilityEvidence,
+    VacancyEligibilityFacts,
+    canonical_hash,
+)
+from market_aligner.llm.pipeline import (
+    accept_alignment,
+    accept_extraction,
+    accept_vacancy_eligibility_facts,
+    vacancy_eligibility_input,
+)
 from market_aligner.normalisation.records import vacancy_shell_from_raw
 from market_aligner.profiler.store import ProfileStore
 from market_aligner.reporting.reports import RankedVacancy, write_reports
@@ -63,6 +80,53 @@ def _atomic_json(path: Path, value: object) -> None:
         raise
 
 
+_ELIGIBILITY_REJECTION_SCHEMA = "market-aligner.vacancy-eligibility-rejection.v1"
+
+
+def _accept_or_archive_eligibility_rejection(
+    *,
+    facts: VacancyEligibilityFacts,
+    receipt: LLMReceipt,
+    source_sha256: str,
+    validate: Callable[[], VacancyEligibilityFacts],
+    archive: Callable[[str, dict[str, object]], None],
+    archive_status: dict[str, str],
+) -> VacancyEligibilityFacts:
+    try:
+        return validate()
+    except ContractValidationError as original:
+        document: dict[str, object] = {
+            "schema_version": _ELIGIBILITY_REJECTION_SCHEMA,
+            "authority_scope": "diagnostic_only",
+            "application_authority": False,
+            "source_content_sha256": source_sha256,
+            "facts": asdict(facts),
+            "receipt": asdict(receipt),
+            "error_type": type(original).__name__,
+            "error_message": str(original),
+        }
+        try:
+            payload = _canonical_bytes(document)
+        except Exception as secondary:
+            archive_status.update(
+                status="archive_failed",
+                failure_type=type(secondary).__name__,
+            )
+            raise original from None
+        digest = hashlib.sha256(payload).hexdigest()
+        archive_status["sha256"] = digest
+        try:
+            archive(digest, document)
+        except Exception as secondary:
+            archive_status.update(
+                status="archive_failed",
+                failure_type=type(secondary).__name__,
+            )
+            raise original from None
+        archive_status["status"] = "archived"
+        raise original
+
+
 def _receipt(receipt: LLMReceipt, *, task: str, inputs: Mapping[str, Any]) -> None:
     if receipt.task != task:
         raise ValueError(f"semantic worker returned wrong task for {task}")
@@ -79,7 +143,43 @@ def _receipt(receipt: LLMReceipt, *, task: str, inputs: Mapping[str, Any]) -> No
     if receipt.input_sha256 != canonical_hash(dict(inputs)):
         raise ValueError("semantic worker input hash differs from exact context")
     if len(receipt.output_sha256) != 64:
-        raise ValueError("semantic worker output hash is invalid")
+        raise ValueError("semantic worker receipt output hash is invalid")
+
+
+def reuse_current_semantic_cache(
+    cached: object,
+    *,
+    expected_task: object,
+    expected_prompt_version: object,
+    validate_current: object,
+) -> object | None:
+    def is_exact_stripped_string(value: object) -> bool:
+        return type(value) is str and value != "" and value == value.strip()
+
+    if not is_exact_stripped_string(expected_task):
+        raise ValueError("invalid semantic cache")
+    if not is_exact_stripped_string(expected_prompt_version):
+        raise ValueError("invalid semantic cache")
+    if not callable(validate_current):
+        raise ValueError("invalid semantic cache")
+    if cached is None:
+        return None
+    if type(cached) is not dict:
+        raise ValueError("invalid semantic cache")
+    if "receipt" not in cached:
+        return None
+    receipt = cached["receipt"]
+    if type(receipt) is not dict:
+        raise ValueError("invalid semantic cache")
+    task = receipt.get("task")
+    version = receipt.get("prompt_version")
+    if not is_exact_stripped_string(task):
+        raise ValueError("invalid semantic cache")
+    if not is_exact_stripped_string(version):
+        raise ValueError("invalid semantic cache")
+    if task != expected_task or version != expected_prompt_version:
+        return None
+    return validate_current(cached)
 
 
 def _processing_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -183,11 +283,20 @@ def _cached_vacancy(
     *,
     job_key: str,
     source_content_sha256: str,
+    expected_prompt_version: str | None = None,
 ) -> Vacancy | None:
     """Replay only an exact-content accepted vacancy from processing state."""
 
     if not prior or not isinstance(prior.get("vacancy"), Mapping):
         return None
+    if expected_prompt_version is not None:
+        receipt = prior.get("extraction_receipt")
+        if (
+            not isinstance(receipt, Mapping)
+            or receipt.get("task") != "semantic_vacancy_extraction"
+            or receipt.get("prompt_version") != expected_prompt_version
+        ):
+            return None
     value = dict(prior["vacancy"])  # type: ignore[arg-type]
     for key in _VACANCY_SEQUENCE_FIELDS:
         value[key] = tuple(value.get(key) or ())
@@ -213,6 +322,85 @@ def _cached_alignment_axes(prior: Mapping[str, object] | None) -> tuple[float, f
     if not 0 <= technical <= 1 or not 0 <= evidence_match <= 1:
         raise ValueError("cached evidence alignment axes are outside [0,1]")
     return technical * 10, evidence_match * 10
+
+
+def _cached_vacancy_eligibility(
+    prior: Mapping[str, object] | None,
+    raw: RawPosting,
+    *,
+    inputs: Mapping[str, Any],
+    expected_prompt_version: str | None = None,
+) -> tuple[VacancyEligibilityFacts, LLMReceipt] | None:
+    if not prior:
+        return None
+    cached_record = prior.get("vacancy_eligibility")
+    if cached_record is None:
+        return None
+    if not isinstance(cached_record, Mapping):
+        raise ValueError("cached vacancy eligibility result is malformed")
+    if cached_record.get("status") not in {
+        "source_bound_extraction",
+        "reused_exact_source_receipt",
+    }:
+        return None
+    facts_value = cached_record.get("facts")
+    receipt_value = cached_record.get("receipt")
+    if not isinstance(facts_value, Mapping) or not isinstance(receipt_value, Mapping):
+        raise ValueError("cached vacancy eligibility result is incomplete")
+    cache_document = {"receipt": dict(receipt_value)}
+    current_prompt_version = expected_prompt_version
+    if current_prompt_version is None:
+        current_prompt_version = receipt_value.get("prompt_version")
+
+    def validate_current(
+        cache_record: dict[str, object],
+    ) -> tuple[VacancyEligibilityFacts, LLMReceipt]:
+        facts_document = dict(facts_value)
+        evidence_values = facts_document.get("source_evidence")
+        if not isinstance(evidence_values, list):
+            raise ValueError("cached vacancy eligibility evidence is malformed")
+        facts_document["source_evidence"] = tuple(
+            VacancyEligibilityEvidence(**dict(value))
+            for value in evidence_values
+            if isinstance(value, Mapping)
+        )
+        if len(facts_document["source_evidence"]) != len(evidence_values):
+            raise ValueError("cached vacancy eligibility evidence is malformed")
+        unknown_values = facts_document.get("unknown_fields")
+        if not isinstance(unknown_values, list):
+            raise ValueError("cached vacancy eligibility unknown fields are malformed")
+        facts_document["unknown_fields"] = tuple(unknown_values)
+        facts = VacancyEligibilityFacts(**facts_document)
+        receipt_document = dict(receipt_value)
+        transport_value = receipt_document.get("transport")
+        if isinstance(transport_value, Mapping):
+            receipt_document["transport"] = LLMTransportReceipt(**dict(transport_value))
+        receipt = LLMReceipt(**receipt_document)
+        accept_vacancy_eligibility_facts(raw, facts, receipt, inputs=inputs)
+        return facts, receipt
+
+    result = reuse_current_semantic_cache(
+        cache_document,
+        expected_task=VACANCY_ELIGIBILITY_FACTS_TASK,
+        expected_prompt_version=current_prompt_version,
+        validate_current=validate_current,
+    )
+    return result
+
+
+def _unknown_vacancy_eligibility(
+    inputs: Mapping[str, Any],
+) -> VacancyEligibilityFacts:
+    return VacancyEligibilityFacts(
+        source_content_sha256=str(inputs["content_sha256"]),
+        work_jurisdiction=None,
+        required_residence=None,
+        sponsorship_available=None,
+        minimum_years_experience=None,
+        contract_type=None,
+        source_evidence=(),
+        unknown_fields=tuple(sorted(VACANCY_ELIGIBILITY_FIELDS)),
+    )
 
 
 class ProcessingService:
@@ -295,14 +483,37 @@ class ProcessingService:
         }
         profile_context = profile.llm_context(evidence)
         authority_sha256 = _sha256(authority_document)
-        config_sha256 = _sha256(
-            {
-                "geographic_preference_policy": asdict(geographic_policy),
-                "first_job_scope_policy": asdict(first_job_policy),
-                "loaded_config": config,
-                "opportunity_policy": asdict(self.opportunity_policy),
-            }
+        extraction_prompt_version = getattr(
+            self.worker, "vacancy_extraction_prompt_version", None
         )
+        if extraction_prompt_version is not None and (
+            type(extraction_prompt_version) is not str
+            or not extraction_prompt_version
+            or extraction_prompt_version != extraction_prompt_version.strip()
+        ):
+            raise ValueError("semantic worker extraction prompt version is invalid")
+        eligibility_prompt_version = getattr(
+            self.worker, "vacancy_eligibility_prompt_version", None
+        )
+        if eligibility_prompt_version is not None and (
+            type(eligibility_prompt_version) is not str
+            or not eligibility_prompt_version
+            or eligibility_prompt_version != eligibility_prompt_version.strip()
+        ):
+            raise ValueError("semantic worker eligibility prompt version is invalid")
+        config_identity = {
+            "geographic_preference_policy": asdict(geographic_policy),
+            "first_job_scope_policy": asdict(first_job_policy),
+            "loaded_config": config,
+            "opportunity_policy": asdict(self.opportunity_policy),
+            "vacancy_eligibility_facts_version": VACANCY_ELIGIBILITY_FACTS_VERSION,
+            "vacancy_eligibility_prompt_version": eligibility_prompt_version,
+        }
+        if extraction_prompt_version is not None:
+            config_identity["vacancy_extraction_prompt_version"] = (
+                extraction_prompt_version
+            )
+        config_sha256 = _sha256(config_identity)
         report_scope = {
             "evidence_authority_sha256": authority_sha256,
             "processing_config_sha256": config_sha256,
@@ -330,6 +541,7 @@ class ProcessingService:
         completed = rejected = parked = errors = 0
         extraction_reuses = alignment_reuses = 0
         for raw in claimed:
+            eligibility_archive_status: dict[str, str] = {}
             try:
                 source_content_sha256 = str(raw.content_sha256)
                 prior = self.jobs.reusable_processing_result(
@@ -344,31 +556,101 @@ class ProcessingService:
                     prior,
                     job_key=raw.key,
                     source_content_sha256=source_content_sha256,
+                    expected_prompt_version=extraction_prompt_version,
                 )
+                vacancy_reused = vacancy is not None
+                shell = vacancy_shell_from_raw(raw)
+                raw_context = {
+                    "board": raw.board,
+                    "content_sha256": raw.content_sha256,
+                    "deterministic_shell": asdict(shell),
+                    "fetched_at": raw.fetched_at,
+                    "job_id": raw.job_id,
+                    "raw_json": raw.raw_json,
+                    "raw_text": raw.raw_text,
+                    "url": raw.url,
+                }
                 extraction_receipt_value: object | None = None
                 if vacancy is not None:
                     extraction_reuses += 1
                     extraction_receipt_value = prior.get("extraction_receipt") if prior else None
                 else:
-                    shell = vacancy_shell_from_raw(raw)
-                    raw_context = {
-                        "board": raw.board,
-                        "content_sha256": raw.content_sha256,
-                        "deterministic_shell": asdict(shell),
-                        "fetched_at": raw.fetched_at,
-                        "job_id": raw.job_id,
-                        "raw_json": raw.raw_json,
-                        "raw_text": raw.raw_text,
-                        "url": raw.url,
-                    }
                     extraction, extraction_receipt = self.worker.extract_vacancy(raw_context)
                     _receipt(
                         extraction_receipt,
                         task="semantic_vacancy_extraction",
                         inputs=raw_context,
                     )
+                    if (
+                        extraction_prompt_version is not None
+                        and extraction_receipt.prompt_version
+                        != extraction_prompt_version
+                    ):
+                        raise ValueError(
+                            "semantic worker extraction prompt version differs"
+                        )
                     vacancy = accept_extraction(raw, extraction, extraction_receipt)
                     extraction_receipt_value = asdict(extraction_receipt)
+                eligibility_inputs = vacancy_eligibility_input(raw)
+                cached_eligibility = _cached_vacancy_eligibility(
+                    prior,
+                    raw,
+                    inputs=eligibility_inputs,
+                    expected_prompt_version=eligibility_prompt_version,
+                )
+                eligibility_method = getattr(
+                    self.worker, "extract_vacancy_eligibility", None
+                )
+                if cached_eligibility is not None:
+                    eligibility_facts, eligibility_receipt = cached_eligibility
+                    eligibility_status = "reused_exact_source_receipt"
+                elif callable(eligibility_method):
+                    eligibility_facts, eligibility_receipt = eligibility_method(
+                        eligibility_inputs
+                    )
+                    _receipt(
+                        eligibility_receipt,
+                        task=VACANCY_ELIGIBILITY_FACTS_TASK,
+                        inputs=eligibility_inputs,
+                    )
+                    if (
+                        eligibility_prompt_version is not None
+                        and eligibility_receipt.prompt_version
+                        != eligibility_prompt_version
+                    ):
+                        raise ValueError(
+                            "semantic worker eligibility prompt version differs"
+                        )
+                    _accept_or_archive_eligibility_rejection(
+                        facts=eligibility_facts,
+                        receipt=eligibility_receipt,
+                        source_sha256=str(raw.content_sha256),
+                        validate=lambda: accept_vacancy_eligibility_facts(
+                            raw,
+                            eligibility_facts,
+                            eligibility_receipt,
+                            inputs=eligibility_inputs,
+                        ),
+                        archive=lambda digest, document: _atomic_json(
+                            self.paths.state
+                            / f"vacancy-eligibility-rejection-{digest}.json",
+                            document,
+                        ),
+                        archive_status=eligibility_archive_status,
+                    )
+                    eligibility_status = "source_bound_extraction"
+                else:
+                    eligibility_facts = _unknown_vacancy_eligibility(
+                        eligibility_inputs
+                    )
+                    eligibility_receipt = None
+                    eligibility_status = "gateway_capability_unavailable"
+                eligibility_value: dict[str, object] = {
+                    "facts": asdict(eligibility_facts),
+                    "status": eligibility_status,
+                }
+                if eligibility_receipt is not None:
+                    eligibility_value["receipt"] = asdict(eligibility_receipt)
                 geographic_preference = classify_geographic_preference(
                     location=vacancy.location,
                     remote_policy=vacancy.remote_policy,
@@ -391,7 +673,9 @@ class ProcessingService:
                     else:
                         parked += 1
                 else:
-                    reused_axes = _cached_alignment_axes(prior)
+                    reused_axes = (
+                        _cached_alignment_axes(prior) if vacancy_reused else None
+                    )
                     alignment_receipt_value: object | None = None
                     if reused_axes is not None:
                         technical_alignment, evidence_match = reused_axes
@@ -459,6 +743,7 @@ class ProcessingService:
                         result["extraction_receipt"] = extraction_receipt_value
                     completed += 1
                 result["processing_config_sha256"] = config_sha256
+                result["vacancy_eligibility"] = eligibility_value
                 if prior is not None:
                     result["semantic_cache"] = {
                         "prior_result_sha256": _sha256(prior),
@@ -476,6 +761,19 @@ class ProcessingService:
                 )
             except Exception as exc:
                 errors += 1
+                error = repr(exc)
+                if eligibility_archive_status.get("status") == "archived":
+                    error += (
+                        "; eligibility_rejection_archive=archived;sha256="
+                        + eligibility_archive_status["sha256"]
+                    )
+                elif eligibility_archive_status.get("status") == "archive_failed":
+                    error += (
+                        "; eligibility_rejection_archive=failed;failure_type="
+                        + eligibility_archive_status["failure_type"]
+                    )
+                    if "sha256" in eligibility_archive_status:
+                        error += ";sha256=" + eligibility_archive_status["sha256"]
                 self.jobs.fail_processing(
                     profile_id=profile_id,
                     track=track,
@@ -484,7 +782,7 @@ class ProcessingService:
                     source_content_sha256=str(raw.content_sha256),
                     processing_config_sha256=config_sha256,
                     worker_id=worker_id,
-                    error=repr(exc),
+                    error=error,
                 )
 
         with self.jobs.processing_report_snapshot(

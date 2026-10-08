@@ -11,12 +11,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from career_automation import CareerDatabase, OpportunityGate, OpportunityPolicy
-from career_automation.engine import read_scored_jsonl
+from career_automation import CareerDatabase  # noqa: E402
 
 
 DEFAULT_DB = ROOT / "outputs" / "career_automation" / "career_pipeline.sqlite3"
-DEFAULT_SCORED = ROOT / "skeleton" / "data_overnight" / "jobs_scored.jsonl"
 
 
 def _database(value: str) -> CareerDatabase:
@@ -29,11 +27,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", default=str(DEFAULT_DB))
     sub = parser.add_subparsers(dest="command", required=True)
 
-    bootstrap = sub.add_parser("bootstrap", help="import scores and apply Opportunity gate")
-    bootstrap.add_argument("--scored", default=str(DEFAULT_SCORED))
-    bootstrap.add_argument("--minimum-opportunity", type=float, default=0.55)
-    bootstrap.add_argument("--minimum-confidence", type=float, default=0.70)
-    bootstrap.add_argument("--high-priority-opportunity", type=float, default=0.75)
+    sub.add_parser(
+        "bootstrap",
+        help="disabled legacy command; use jaa-handoff admission",
+    )
 
     sub.add_parser("status", help="show materialised pipeline counts")
 
@@ -48,19 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    database = _database(args.database)
     if args.command == "bootstrap":
-        policy = OpportunityPolicy(
-            minimum_opportunity=args.minimum_opportunity,
-            minimum_extraction_confidence=args.minimum_confidence,
-            high_priority_opportunity=args.high_priority_opportunity,
+        raise SystemExit(
+            "direct scored-JSONL bootstrap is disabled; use "
+            "`jaa-handoff admit-legacy-scored-jsonl --database ... FILE`, whose "
+            "admissions are durably labelled and release-blocked"
         )
-        scored = Path(args.scored)
-        if not scored.is_absolute():
-            scored = ROOT / scored
-        summary = OpportunityGate(database, policy).bootstrap(read_scored_jsonl(scored))
-        print(json.dumps(summary.__dict__, sort_keys=True))
-        return
+    database = _database(args.database)
     if args.command == "status":
         print(json.dumps(database.stats(), sort_keys=True))
         return

@@ -35,10 +35,74 @@ DEFAULT_ARCHIVE_ROOT = Path(
 ARCHIVE_SCHEMA_VERSION = "jaa.application-archive.v1"
 RECEIPT_SCHEMA_VERSION = "jaa.application-archive-receipt.v1"
 EVENT_SCHEMA_VERSION = "jaa.application-archive-event.v1"
+EVIDENCE_VIEW_SCHEMA_VERSION = "jaa.application-evidence-view.v1"
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 ATTEMPT_ID = re.compile(r"^jaa-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$")
 ROLE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 MEDIA_TYPE = re.compile(r"^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")
+EVIDENCE_EVENT_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
+EVIDENCE_EVENT_KINDS = frozenset(
+    {
+        "preflight",
+        "navigation",
+        "field_observed",
+        "field_filled",
+        "field_selected",
+        "file_uploaded",
+        "click",
+        "request",
+        "response",
+        "request_failed",
+        "console_error",
+        "screenshot",
+        "release",
+        "terminal",
+    }
+)
+EVIDENCE_EVENT_RESULTS = frozenset(
+    {
+        "observed",
+        "completed",
+        "blocked",
+        "refused",
+        "indeterminate",
+        "failed",
+        "skipped",
+        "unavailable",
+    }
+)
+EVIDENCE_DETAIL_KEYS = frozenset(
+    {
+        "field_id",
+        "field_type",
+        "required",
+        "options",
+        "provenance",
+        "document_role",
+        "source_path_sha256",
+        "content_sha256",
+        "extracted_text_sha256",
+        "interaction_counts",
+        "url_sha256",
+        "method",
+        "status",
+        "provider_response_sha256",
+        "provider_redacted_response_sha256",
+        "provider_loader_config_sha256",
+        "current_market_context_sha256",
+        "resource_type",
+        "error_code",
+        "value_sha256",
+        "value_byte_length",
+        "readback_sha256",
+        "readback_byte_length",
+        "file_name_sha256",
+        "file_size",
+        "mime_type",
+        "checked",
+        "selected",
+    }
+)
 
 RELEASE_REQUIRED_ROLES = frozenset(
     {
@@ -73,6 +137,7 @@ RELEASE_REQUIRED_ROLES = frozenset(
 
 OUTCOME_VALUES = frozenset(
     {
+        "review_only",
         "submitted_success",
         "historical_submitted_success",
         "submitted_failure",
@@ -86,6 +151,103 @@ OUTCOME_VALUES = frozenset(
 )
 MAX_RELEASE_ARCHIVE_AGE = timedelta(hours=24)
 SUBMIT_OUTCOMES = frozenset({"submitted_success", "submitted_failure", "indeterminate"})
+
+REVIEW_ONLY_METADATA = {
+    "mode": "review_only",
+    "submission_attempted": False,
+    "release_authority": False,
+    "submission_authority": False,
+}
+REVIEW_BLOCKED_INTENT_ERROR_CODE = "policy_blocked_before_dispatch"
+REVIEW_BLOCKED_INTENT_DETAIL_KEYS = frozenset(
+    {"method", "url_sha256", "resource_type", "error_code"}
+)
+REVIEW_REQUIRED_ROLES = frozenset({
+    "review.intent", "review.result", "review.package", "review.ats_passive_forensics",
+    "vacancy.source_identity", "vacancy.capture", "vacancy.visible_listing_capture",
+    "document.source_inputs", "document.cv.final_pdf", "document.cover_letter.final_pdf",
+    "assurance.cv.receipt", "assurance.cover_letter.receipt", "assurance.semantic.receipt",
+    "production.identities", "browser.prefill_snapshot",
+})
+REVIEW_REPLAY_GENERATION_APPEND_ONLY_ROLES = frozenset(
+    {
+        "generation.inputs",
+        "document.source_inputs",
+        "document.cv.constraints",
+        "document.cv.source",
+        "document.cv.final_pdf",
+        "document.cover_letter.source",
+        "document.cover_letter.final_pdf",
+        "form.answers",
+        "generation.package_pickle",
+    }
+)
+REVIEW_REPLAY_APPEND_ONLY_ROLES = (
+    frozenset({"vacancy.destination_reverification"})
+    | REVIEW_REPLAY_GENERATION_APPEND_ONLY_ROLES
+)
+REVIEW_REPLAY_SEMANTIC_FENCE_ROLES = frozenset({
+    "review.semantic_intent",
+    "assurance.semantic.receipt",
+    "review.sanity_result",
+    "review.ats_passive_forensics",
+    "review.result",
+    "review.package",
+})
+
+
+def _review_event_allowed(event_type: str, payload: Mapping[str, object]) -> None:
+    if event_type == "artifact_archived":
+        role = str(payload.get("role", ""))
+        if (role.startswith(("release", "submission", "browser.upload", "browser.post_submit", "browser.pre_submit"))
+                or set(re.split(r"[._-]", role)) & {"issued", "consumed", "click", "filled", "selected", "uploaded", "token", "submit", "release", "submission", "gate", "fill", "selection", "upload"}):
+            raise ApplicationArchiveError("review-only attempt contains consequential evidence")
+    elif event_type == "evidence_recorded":
+        if payload.get("event_kind") not in {
+            "preflight", "navigation", "field_observed", "request", "response",
+            "request_failed", "console_error", "screenshot", "terminal",
+        }:
+            raise ApplicationArchiveError("review-only attempt contains a mutation event")
+        details = payload.get("details", {})
+        if not isinstance(details, Mapping):
+            raise ApplicationArchiveError("review-only event details are invalid")
+        blocked_intent = (
+            payload.get("event_kind") == "request"
+            and payload.get("result") == "blocked"
+        )
+        if blocked_intent:
+            method = details.get("method")
+            resource_type = details.get("resource_type")
+            url_sha256 = details.get("url_sha256")
+            if not (
+                type(method) is str
+                and method
+                and method == method.upper()
+                and method.isascii()
+                and all(
+                    character.isalnum() or character in "!#$%&'*+-.^_`|~"
+                    for character in method
+                )
+                and method != "GET"
+                and type(resource_type) is str
+                and resource_type
+                and type(url_sha256) is str
+                and re.fullmatch(r"[0-9a-f]{64}", url_sha256)
+                and details.get("error_code") == REVIEW_BLOCKED_INTENT_ERROR_CODE
+                and set(details) == REVIEW_BLOCKED_INTENT_DETAIL_KEYS
+            ):
+                raise ApplicationArchiveError(
+                    "review-only blocked request evidence is invalid"
+                )
+        elif "method" in details and details["method"] != "GET":
+            raise ApplicationArchiveError("review-only network evidence must use GET")
+        counts = details.get("interaction_counts", {})
+        if not isinstance(counts, Mapping) or any(type(value) is not int or value != 0 for value in counts.values()):
+            raise ApplicationArchiveError("review-only interaction counts must be zero")
+    else:
+        raise ApplicationArchiveError("unsupported review-only event")
+
+
 NETWORK_UNAVAILABLE_VALUES = frozenset(
     {
         "not_preserved_in_legacy_record",
@@ -274,6 +436,8 @@ def _scan_secret_bytes(value: bytes, media_type: str) -> None:
 
 
 def _terminal_required_roles(outcome: str) -> set[str]:
+    if outcome == "review_only":
+        return set(REVIEW_REQUIRED_ROLES)
     required = {"vacancy.source_identity", "vacancy.capture", "submission.result"}
     if outcome in SUBMIT_OUTCOMES:
         required.update(
@@ -567,6 +731,169 @@ def _verify_reconciliation_evidence(
         )
 
 
+def _verify_review_history(attempt, events, *, require_terminal: bool = True) -> None:
+    if any((attempt.path / name).exists() for name in ("release-manifest.json", "release-receipt.json")):
+        raise ApplicationArchiveError("review-only attempt has release authority")
+    intent_seen = False
+    for event in events[1:]:
+        payload = event["payload"]
+        if event["event_type"] == "artifact_archived" and payload.get("role") == "review.intent":
+            if intent_seen:
+                raise ApplicationArchiveError("review-only intent is ambiguous")
+            intent_seen = True
+        if event["event_type"] == "evidence_recorded" and not intent_seen:
+            raise ApplicationArchiveError("review-only intent must precede browser evidence")
+        _review_event_allowed(event["event_type"], payload)
+    if not intent_seen:
+        raise ApplicationArchiveError("review-only intent is missing")
+    terminals = [event for event in events if event["event_type"] == "evidence_recorded"
+                 and event["payload"].get("event_kind") == "terminal"]
+    if terminals and (len(terminals) != 1 or terminals[0] != events[-1]):
+        raise ApplicationArchiveError("review-only terminal event is ambiguous")
+    if require_terminal and not terminals:
+        raise ApplicationArchiveError("review-only intent/terminal evidence is missing")
+    if terminals and terminals[0]["payload"].get("result") != "completed":
+        raise ApplicationArchiveError("review-only terminal evidence is not completed")
+    for row in attempt._objects(events):
+        if row.role == "review.ats_passive_forensics":
+            forensic = json.loads(_regular_file_bytes(_safe_archive_path(attempt.archive.root, row.relative_path)))
+            if forensic.get("attempt_id") != attempt.attempt_id:
+                raise ApplicationArchiveError("review-only passive evidence belongs to another attempt")
+
+
+def _verify_review_only_evidence(objects, selected, *, root, vacancy) -> None:
+    from .application_sanity_review import (
+        SanityReviewPackage, SanityReviewReceipt, build_vacancy_review_material,
+        verify_sanity_review_receipt,
+    )
+    from .external_document_assurance import IntendedVacancy, assure_pdf_bytes
+    from form_filling.ats_forensics import EVENT_KINDS, SCHEMA_VERSION
+
+    def value(role):
+        return _selected_object_bytes(objects, selected, role, root=root)
+
+    def document(role):
+        raw = value(role)
+        result = json.loads(raw)
+        if not isinstance(result, dict) or raw != _json_bytes(result):
+            raise ApplicationArchiveError("review evidence must be canonical JSON")
+        return result
+
+    intent = document("review.intent")
+    result = document("review.result")
+    expected = {**REVIEW_ONLY_METADATA, "vacancy": vacancy.document()}
+    if intent != expected or result != {**expected, "outcome": "review_only"}:
+        raise ApplicationArchiveError("review-only intent/result binding differs")
+    intended = IntendedVacancy(vacancy.job_key, vacancy.vacancy_sha256, vacancy.role_title, vacancy.company_name)
+    for kind in ("cv", "cover_letter"):
+        assurance = assure_pdf_bytes(value(f"document.{kind}.final_pdf"), document_kind=kind, intended_vacancy=intended)
+        if value(f"assurance.{kind}.receipt") != _json_bytes(assurance.document()):
+            raise ApplicationArchiveError("review-only document assurance differs")
+    package = document("review.package")
+    material = build_vacancy_review_material(
+        raw_listing_bytes=value("vacancy.capture"),
+        visible_listing_text_bytes=value("vacancy.visible_listing_capture"),
+        expected_raw_listing_sha256=vacancy.vacancy_sha256,
+    )
+    reviewed = SanityReviewPackage(
+        cv_pdf_bytes=value("document.cv.final_pdf"),
+        cover_letter_pdf_bytes=value("document.cover_letter.final_pdf"),
+        intended_vacancy=intended,
+        form_fields=tuple(tuple(row) for row in package["form_fields"]),
+        form_answer_bindings=tuple(
+            tuple(row) for row in package.get("form_answer_bindings", ())
+        ),
+        form_field_authorities=tuple(
+            tuple(row) for row in package.get("form_field_authorities", ())
+        ),
+        form_inventory_sha256=package.get("form_inventory_sha256"),
+        vacancy_requirements=tuple(package["vacancy_requirements"]),
+        approved_evidence_ids=tuple(package["approved_evidence_ids"]),
+        application_source_identity=package["application_source_identity"],
+        vacancy_review_material=material,
+    )
+    if "form_inventory" in package:
+        inventory = package["form_inventory"]
+        if (
+            not isinstance(inventory, dict)
+            or _sha256(_json_bytes(inventory)) != package.get("form_inventory_sha256")
+            or inventory.get("url") != vacancy.source_url
+        ):
+            raise ApplicationArchiveError("review-only form inventory binding differs")
+        if value("review.form_inventory") != _json_bytes(inventory):
+            raise ApplicationArchiveError("review-only form inventory artifact differs")
+        form_state = inventory.get("form_state")
+        inventory_fields = form_state.get("fields") if isinstance(form_state, dict) else None
+        if not isinstance(inventory_fields, list):
+            raise ApplicationArchiveError("review-only form inventory is malformed")
+        observed_ids = {
+            str(row.get("name") or row.get("id") or "")
+            for row in inventory_fields
+            if isinstance(row, dict)
+        }
+        if any(row[0] not in observed_ids for row in reviewed.form_fields):
+            raise ApplicationArchiveError("reviewed form field is absent from inventory")
+    elif reviewed.form_inventory_sha256 is not None:
+        raise ApplicationArchiveError("review-only form inventory is missing")
+    semantic = document("assurance.semantic.receipt")
+    verify_sanity_review_receipt(SanityReviewReceipt.from_document(semantic), reviewed)
+    source = document("document.source_inputs")
+    if source.get("source_id") != reviewed.application_source_identity:
+        raise ApplicationArchiveError("review-only source differs")
+    identities = document("production.identities")
+    for name in ("code_revision", "policy_identity", "configuration_identity", "adapter_identity"):
+        if not isinstance(identities.get(name), str) or not identities[name]:
+            raise ApplicationArchiveError("review-only runtime/source identity is missing")
+    forensic = document("review.ats_passive_forensics")
+    manifest_hash = forensic.pop("manifest_sha256")
+    if manifest_hash != _sha256(canonical_json(forensic).encode()):
+        raise ApplicationArchiveError("review-only forensic manifest differs")
+    if (forensic.get("schema_version") != SCHEMA_VERSION
+            or forensic.get("ats_name") != "greenhouse"
+            or forensic.get("outcome") != "prepared" or forensic.get("failure_class") is not None
+            or forensic.get("diagnostic_only") is not True
+            or forensic.get("release_authority") is not False
+            or forensic.get("submission_authority") is not False
+            or forensic.get("release_manifest_sha256") is not None
+            or forensic.get("application_url") != vacancy.source_url
+            or forensic.get("artifact_set_sha256") != package.get("artifact_set_sha256")):
+        raise ApplicationArchiveError("review-only passive evidence binding differs")
+    runtime = dict(forensic["runtime"])
+    runtime_hash = runtime.pop("runtime_sha256")
+    if runtime_hash != _sha256(canonical_json(runtime).encode()):
+        raise ApplicationArchiveError("review-only runtime fingerprint differs")
+    if not forensic.get("events"):
+        raise ApplicationArchiveError("review-only passive evidence is empty")
+    inventory_seen = screenshot_seen = False
+    for sequence, event in enumerate(forensic["events"], 1):
+        body = dict(event)
+        digest = body.pop("event_sha256")
+        if body.get("sequence") != sequence or digest != _sha256(canonical_json(body).encode()):
+            raise ApplicationArchiveError("review-only passive event differs")
+        payload = event["payload"]
+        if event["kind"] not in EVENT_KINDS:
+            raise ApplicationArchiveError("review-only passive evidence contains mutation")
+        if "method" in payload and payload["method"] != "GET":
+            raise ApplicationArchiveError("review-only passive network evidence must use GET")
+        if event["kind"] == "checkpoint":
+            if payload.get("name") not in {"greenhouse_preflight_inventory", "page_state"}:
+                raise ApplicationArchiveError("review-only passive checkpoint is not admitted")
+            if payload["name"] == "greenhouse_preflight_inventory":
+                details = payload["details"]
+                if (type(details.get("boundary_signal_count")) is not int
+                        or details["boundary_signal_count"] != 0
+                        or details.get("passive_inventory") is not True
+                        or not HEX_64.fullmatch(str(details.get("inventory_sha256", "")))):
+                    raise ApplicationArchiveError("review-only passive inventory is not successful")
+                inventory_seen = True
+        if event["kind"] == "screenshot":
+            if _sha256(value(f"review.screenshot.{sequence}")) != payload["sha256"]:
+                raise ApplicationArchiveError("review-only passive screenshot differs")
+            screenshot_seen = True
+    if not inventory_seen or not screenshot_seen:
+        raise ApplicationArchiveError("review-only passive inventory/screenshot is missing")
+
+
 def _verify_terminal_evidence(
     outcome: str,
     objects: Sequence["ArchivedObject"],
@@ -585,6 +912,9 @@ def _verify_terminal_evidence(
         raise ApplicationArchiveError(
             "terminal archive is missing roles: " + ", ".join(missing)
         )
+    if outcome == "review_only":
+        _verify_review_only_evidence(objects, selected, root=root, vacancy=vacancy)
+        return
     if outcome in SUBMIT_OUTCOMES:
         success_semantics_value = _selected_object_bytes(
             objects, selected, "provider.success_semantics", root=root
@@ -1115,6 +1445,64 @@ class AttemptArchive:
         self.archive = archive
         self.attempt_id = attempt_id
         self.path = archive._attempt_path(attempt_id)
+        self._review_replay = False
+
+    def begin_review_only(self, *, allow_new: bool = False) -> None:
+        """Admit only a pristine queue base or its exact incomplete review intent."""
+        if (self.path / "terminal-manifest.json").exists() or (self.path / "terminal-manifest.json").is_symlink():
+            raise ApplicationArchiveError("terminal review-only attempt cannot resume")
+        if {path.name for path in self.path.iterdir()} - {"events", "terminal-summary.txt"}:
+            raise ApplicationArchiveError("review-only attempt has release or unexpected evidence")
+        events = self._events()
+        intent_positions = [index for index, event in enumerate(events)
+                            if event["event_type"] == "artifact_archived"
+                            and event["payload"].get("role") == "review.intent"]
+        if len(intent_positions) > 1:
+            raise ApplicationArchiveError("review-only intent is ambiguous")
+        if not intent_positions and not allow_new:
+            raise ApplicationArchiveError("incomplete release attempt has no review-only intent")
+        base = events[:intent_positions[0]] if intent_positions else events
+        specifications = (
+            ("vacancy.source_identity", "application/json", {}),
+            ("vacancy.capture", "text/html", {"capture": "complete_raw_response"}),
+            ("vacancy.structured", "application/json", {}),
+            ("vacancy.assessment", "application/json", {}),
+        )
+        vacancy = self.vacancy
+        if (len(base) != 5 or base[0]["payload"] != {
+                "vacancy": vacancy.document(), "created_at": base[0]["occurred_at"]}
+                or any(event["event_type"] != "artifact_archived" for event in base[1:])):
+            raise ApplicationArchiveError("review-only pre-intent history is not the queue-created base")
+        for row, (role, media_type, metadata) in zip(self._objects(base), specifications, strict=True):
+            raw = self.read_artifact(row)
+            if (row.role != role or row.media_type != media_type or row.metadata != metadata
+                    or row.lineage or row.disposition != "approved"):
+                raise ApplicationArchiveError("review-only pre-intent artifacts differ from queue base")
+            if role == "vacancy.capture":
+                valid = row.sha256 == vacancy.vacancy_sha256
+            elif role == "vacancy.source_identity":
+                valid = raw == _json_bytes(vacancy.document())
+            else:
+                document = json.loads(raw)
+                valid = isinstance(document, dict) and raw == _json_bytes(document)
+            if not valid:
+                raise ApplicationArchiveError("review-only queue base content differs")
+        expected_intent = _json_bytes({**REVIEW_ONLY_METADATA, "vacancy": vacancy.document()})
+        if intent_positions:
+            _verify_review_history(self, events, require_terminal=False)
+            for row in self._objects(events):
+                raw = self.read_artifact(row)
+                if row.role == "review.intent" and (
+                    raw != expected_intent or row.media_type != "application/json"
+                    or row.disposition != "approved" or row.lineage or row.metadata
+                ):
+                    raise ApplicationArchiveError("review-only intent differs from the exact attempt")
+            self._review_replay = True
+        else:
+            if (self.path / "terminal-summary.txt").exists():
+                raise ApplicationArchiveError("new review-only attempt contains terminal evidence")
+            self.add_artifact("review.intent", expected_intent,
+                              media_type="application/json", disposition="approved")
 
     def _event_paths(self) -> tuple[Path, ...]:
         directory = self.path / "events"
@@ -1191,6 +1579,8 @@ class AttemptArchive:
         _required_text(event_type, "event type")
         _no_secret_metadata(payload)
         events = self._events() if self._event_paths() else ()
+        if any(event.get("payload", {}).get("role") == "review.intent" for event in events):
+            _review_event_allowed(event_type, payload)
         sequence = len(events) + 1
         previous = str(events[-1]["event_sha256"]) if events else "0" * 64
         unsigned: dict[str, object] = {
@@ -1243,6 +1633,53 @@ class AttemptArchive:
         _no_secret_metadata(clean_metadata)
         _scan_secret_bytes(value, media_type)
         parents = tuple(lineage)
+        if self._review_replay:
+            _review_event_allowed("artifact_archived", {"role": role})
+            events = self._events()
+            existing = [row for row in self._objects(events) if row.role == role]
+            if existing:
+                if role not in REVIEW_REPLAY_APPEND_ONLY_ROLES:
+                    if len(existing) != 1:
+                        raise ApplicationArchiveError("review-only replay evidence is ambiguous")
+                    row = existing[0]
+                    if (self.read_artifact(row) != value or row.media_type != media_type
+                            or row.lineage != parents or row.disposition != disposition
+                            or row.metadata != clean_metadata):
+                        raise ApplicationArchiveError("review-only replay evidence differs")
+                    return row
+                if any(
+                    row.media_type != media_type
+                    or row.lineage != parents
+                    or row.disposition != disposition
+                    or row.metadata != clean_metadata
+                    for row in existing
+                ):
+                    raise ApplicationArchiveError("review-only replay evidence differs")
+                latest = existing[-1]
+                if self.read_artifact(latest) == value:
+                    return latest
+                if any(self.read_artifact(row) == value for row in existing[:-1]):
+                    raise ApplicationArchiveError("review-only replay evidence is stale")
+            if role in REVIEW_REPLAY_APPEND_ONLY_ROLES:
+                semantic_fence = any(
+                    (
+                        event.get("event_type") == "artifact_archived"
+                        and isinstance(event.get("payload"), Mapping)
+                        and event["payload"].get("role") in REVIEW_REPLAY_SEMANTIC_FENCE_ROLES
+                    )
+                    or (
+                        event.get("event_type") == "evidence_recorded"
+                        and isinstance(event.get("payload"), Mapping)
+                        and event["payload"].get("event_kind") == "terminal"
+                    )
+                    for event in events
+                )
+                finalized_files = any(
+                    (self.path / name).exists()
+                    for name in ("terminal-manifest.json", "release-manifest.json", "release-receipt.json")
+                )
+                if semantic_fence or finalized_files:
+                    raise ApplicationArchiveError("review-only replay evidence is past the semantic review fence")
         for parent in parents:
             _digest(parent, "lineage hash")
             _, parent_path = self._object_path(parent)
@@ -1289,6 +1726,116 @@ class AttemptArchive:
             str(event["event_sha256"]),
         )
 
+    def next_evidence_event_id(self, event_kind: str) -> str:
+        """Return the next append-only event ID for this exact attempt."""
+        if event_kind not in EVIDENCE_EVENT_KINDS:
+            raise ApplicationArchiveError("evidence event kind is invalid")
+        count = sum(
+            event.get("event_type") == "evidence_recorded"
+            for event in self._events()
+        )
+        return f"{event_kind}.{count + 1:04d}"
+
+    def record_evidence_event(
+        self,
+        *,
+        event_id: str,
+        event_kind: str,
+        occurred_at: str,
+        result: str,
+        member_sha256s: Mapping[str, str] | None = None,
+        details: Mapping[str, object] | None = None,
+        private_value: bytes | None = None,
+        private_media_type: str = "application/octet-stream",
+    ) -> str:
+        """Append or exactly recover one closed, hash-only application action event."""
+        if not EVIDENCE_EVENT_ID.fullmatch(event_id):
+            raise ApplicationArchiveError("evidence event ID is invalid")
+        if event_kind not in EVIDENCE_EVENT_KINDS:
+            raise ApplicationArchiveError("evidence event kind is invalid")
+        if result not in EVIDENCE_EVENT_RESULTS:
+            raise ApplicationArchiveError("evidence event result is invalid")
+        if not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{6})?Z",
+            occurred_at,
+        ):
+            raise ApplicationArchiveError("evidence event time must be canonical UTC Z")
+        try:
+            parsed = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ApplicationArchiveError("evidence event time is invalid") from exc
+        if parsed.utcoffset() != timedelta(0):
+            raise ApplicationArchiveError("evidence event time must be UTC")
+        clean_details = dict(details or {})
+        if set(clean_details) - EVIDENCE_DETAIL_KEYS:
+            raise ApplicationArchiveError("evidence event detail keys are invalid")
+        _no_secret_metadata(clean_details)
+        members = dict(member_sha256s or {})
+        for label, digest in members.items():
+            if not ROLE.fullmatch(label):
+                raise ApplicationArchiveError("evidence member role is invalid")
+            _digest(digest, "evidence member hash")
+        value_role = f"evidence.private.{event_id}"
+        if private_value is not None:
+            if not isinstance(private_value, bytes):
+                raise TypeError("private evidence requires exact bytes")
+            _scan_secret_bytes(private_value, private_media_type)
+            digest = _sha256(private_value)
+            existing = [
+                row
+                for row in self._objects(self._events())
+                if row.role == value_role
+            ]
+            if existing:
+                if len(existing) != 1 or existing[0].sha256 != digest:
+                    raise ApplicationArchiveError("private evidence event bytes drifted")
+                if _regular_file_bytes(
+                    _safe_archive_path(self.archive.root, existing[0].relative_path)
+                ) != private_value:
+                    raise ApplicationArchiveError("private evidence object differs")
+            else:
+                self.add_artifact(
+                    value_role,
+                    private_value,
+                    media_type=private_media_type,
+                    disposition="observed",
+                    metadata={"privacy_class": "private", "event_id": event_id},
+                    created_at=occurred_at,
+                )
+            members[value_role] = digest
+        object_hashes = {row.sha256 for row in self._objects(self._events())}
+        if not set(members.values()) <= object_hashes:
+            raise ApplicationArchiveError("evidence event cites an unavailable member")
+        payload: dict[str, object] = {
+            "event_id": event_id,
+            "event_kind": event_kind,
+            "result": result,
+            "member_sha256s": dict(sorted(members.items())),
+            "details": clean_details,
+        }
+        prior = [
+            event
+            for event in self._events()
+            if event.get("event_type") == "evidence_recorded"
+            and isinstance(event.get("payload"), Mapping)
+            and event["payload"].get("event_id") == event_id
+        ]
+        if prior:
+            if (
+                len(prior) != 1
+                or prior[0].get("payload") != payload
+                or prior[0].get("occurred_at") != occurred_at
+            ):
+                raise ApplicationArchiveError("evidence event replay differs")
+            return str(prior[0]["event_sha256"])
+        if (self.path / "terminal-manifest.json").exists():
+            raise ApplicationArchiveError("terminal attempt archive is immutable")
+        return str(
+            self._append_event(
+                "evidence_recorded", payload, occurred_at=occurred_at
+            )["event_sha256"]
+        )
+
     def _objects(
         self, events: Iterable[Mapping[str, object]]
     ) -> tuple[ArchivedObject, ...]:
@@ -1321,6 +1868,29 @@ class AttemptArchive:
                 raise ApplicationArchiveError("artifact event is malformed") from exc
         return tuple(rows)
 
+    def read_artifact(self, artifact: ArchivedObject) -> bytes:
+        """Reopen one exact journalled artifact before or after finalisation.
+
+        The caller pins the complete artifact record, including its event identity.
+        This verifies retention, not release approval or source authenticity.
+        """
+        if not isinstance(artifact, ArchivedObject):
+            raise TypeError("archive reads require an exact ArchivedObject record")
+        matches = [
+            row for row in self._objects(self._events())
+            if row.event_sha256 == artifact.event_sha256
+        ]
+        if len(matches) != 1 or matches[0].document() != artifact.document():
+            raise ApplicationArchiveError("artifact differs from its recorded event")
+        row = matches[0]
+        expected_path = f"objects/{row.sha256[:2]}/{row.sha256}"
+        if row.relative_path != expected_path:
+            raise ApplicationArchiveError("artifact content-addressed path differs")
+        raw = _regular_file_bytes(_safe_archive_path(self.archive.root, expected_path))
+        if len(raw) != row.byte_length or _sha256(raw) != row.sha256:
+            raise ApplicationArchiveError("archived artifact bytes differ")
+        return raw
+
     def _validate_selection(
         self,
         objects: Sequence[ArchivedObject],
@@ -1350,6 +1920,8 @@ class AttemptArchive:
         selected: Mapping[str, str],
         finalized_at: str | None = None,
     ) -> ApplicationArchiveReceipt:
+        if any(row.role == "review.intent" for row in self._objects(self._events())):
+            raise ApplicationArchiveError("review-only attempt cannot acquire release authority")
         receipt_path = self.path / "release-receipt.json"
         if receipt_path.exists():
             receipt = _receipt_from_document(
@@ -1450,6 +2022,8 @@ class AttemptArchive:
             return _sha256(_regular_file_bytes(target))
         events = self._events()
         objects = self._objects(events)
+        if outcome == "review_only":
+            _verify_review_history(self, events)
         required = _terminal_required_roles(outcome)
         if outcome in SUBMIT_OUTCOMES:
             if not (self.path / "release-receipt.json").is_file():
@@ -1501,6 +2075,8 @@ class AttemptArchive:
             },
             "finalized_at": timestamp,
         }
+        if outcome == "review_only":
+            manifest.update(REVIEW_ONLY_METADATA)
         _atomic_create(target, _json_bytes(manifest))
         return _sha256(_regular_file_bytes(target))
 
@@ -1716,6 +2292,11 @@ def verify_complete_attempt(
         root=archive.root,
         vacancy=attempt.vacancy,
     )
+    if terminal["outcome"] == "review_only":
+        _verify_review_history(attempt, events)
+        if any(terminal.get(key) != value or type(terminal.get(key)) is not type(value)
+               for key, value in REVIEW_ONLY_METADATA.items()):
+            raise ApplicationArchiveError("review-only terminal metadata differs")
     summary = terminal.get("summary")
     if not isinstance(summary, Mapping):
         raise ApplicationArchiveError("terminal human-readable summary is missing")
@@ -1734,6 +2315,123 @@ def verify_complete_attempt(
         "terminal_manifest_sha256": _sha256(terminal_raw),
         "outcome": terminal["outcome"],
     }
+
+
+def load_complete_attempt_view(
+    attempt_id: str,
+    *,
+    root: str | Path | None,
+    repository_root: str | Path,
+) -> dict[str, object]:
+    """Return a verified, hash-only view without exposing archived private bytes."""
+    archive = ApplicationArchive(root, repository_root=repository_root, create=False)
+    attempt = archive.open_attempt(attempt_id)
+    if (attempt.path / "terminal-manifest.json").is_file() or (
+        attempt.path / "release-receipt.json"
+    ).is_file():
+        verification = verify_complete_attempt(
+            attempt_id, root=archive.root, repository_root=repository_root
+        )
+    else:
+        verification = {
+            "attempt_id": attempt_id,
+            "phase": "open",
+            "verified": True,
+            "release_manifest_sha256": None,
+            "terminal_manifest_sha256": None,
+            "outcome": None,
+        }
+    events = attempt._events()
+    objects = attempt._objects(events)
+    evidence_events = []
+    for event in events:
+        if event.get("event_type") != "evidence_recorded":
+            continue
+        evidence_events.append(
+            {
+                "sequence": event["sequence"],
+                "occurred_at": event["occurred_at"],
+                "event_sha256": event["event_sha256"],
+                "payload": event["payload"],
+            }
+        )
+    object_rows = [
+        {
+            "role": row.role,
+            "sha256": row.sha256,
+            "media_type": row.media_type,
+            "byte_length": row.byte_length,
+            "created_at": row.created_at,
+            "disposition": row.disposition,
+            "metadata_sha256": _sha256(_json_bytes(dict(row.metadata))),
+        }
+        for row in objects
+    ]
+    roles = {row.role for row in objects}
+    kinds = {
+        str(event["payload"]["event_kind"])
+        for event in evidence_events
+        if isinstance(event.get("payload"), Mapping)
+    }
+    gaps = {
+        "form_inventory": not any(role.startswith("form.") for role in roles),
+        "entered_values": "form.answers" not in roles,
+        "documents": not {
+            "document.cv.final_pdf",
+            "document.cover_letter.final_pdf",
+        }.issubset(roles),
+        "action_timeline": not {
+            "field_filled",
+            "file_uploaded",
+            "navigation",
+        }.issubset(kinds),
+        "network_evidence": not any(
+            "network" in role or "http_evidence" in role for role in roles
+        ),
+        "console_errors": "console_error" not in kinds,
+        "terminal_state": verification["phase"] != "terminal",
+    }
+    return {
+        "schema_version": EVIDENCE_VIEW_SCHEMA_VERSION,
+        "attempt_id": attempt_id,
+        "vacancy": attempt.vacancy.document(),
+        "verification": verification,
+        "event_count": len(events),
+        "event_head_sha256": events[-1]["event_sha256"],
+        "evidence_events": evidence_events,
+        "objects": object_rows,
+        "gaps": gaps,
+    }
+
+
+def render_complete_attempt_view(
+    attempt_id: str,
+    *,
+    root: str | Path | None,
+    repository_root: str | Path,
+) -> str:
+    """Render verified machine data without raw values, paths, or document bytes."""
+    view = load_complete_attempt_view(
+        attempt_id, root=root, repository_root=repository_root
+    )
+    vacancy = view["vacancy"]
+    verification = view["verification"]
+    lines = [
+        f"Application attempt: {view['attempt_id']}",
+        f"Vacancy: {vacancy['role_title']} at {vacancy['company_name']}",
+        f"Job key: {vacancy['job_key']}",
+        f"Outcome: {verification['outcome'] or 'not-terminal'}",
+        f"Events: {view['event_count']}",
+        "Evidence objects:",
+    ]
+    for row in view["objects"]:
+        lines.append(
+            f"- {row['role']} {row['sha256']} ({row['byte_length']} bytes)"
+        )
+    lines.append("Evidence gaps:")
+    for name, missing in sorted(view["gaps"].items()):
+        lines.append(f"- {name}: {'MISSING' if missing else 'PRESENT'}")
+    return "\n".join(lines) + "\n"
 
 
 def export_application_packet(
@@ -1895,11 +2593,92 @@ def _parser() -> argparse.ArgumentParser:
     export = commands.add_parser("export")
     export.add_argument("attempt_id")
     export.add_argument("destination")
+    forensic_record = commands.add_parser("forensic-record")
+    forensic_record.add_argument("source_path")
+    forensic_record.add_argument("--root", required=True, dest="forensic_root")
+    forensic_record.add_argument("--recorded-at", required=True)
+    forensic_record.add_argument("--cycle-id", required=True)
+    forensic_record.add_argument("--stage", required=True)
+    forensic_record.add_argument("--issue-code", required=True)
+    forensic_record.add_argument("--summary", required=True)
+    forensic_record.add_argument("--technical-detail", required=True)
+    forensic_record.add_argument("--media-type", default="application/octet-stream")
+    forensic_verify = commands.add_parser("forensic-verify")
+    forensic_verify.add_argument("receiptsha")
+    forensic_verify.add_argument("--root", required=True, dest="forensic_root")
+    forensic_list = commands.add_parser("forensic-list")
+    forensic_list.add_argument("--root", required=True, dest="forensic_root")
     return parser
+
+
+def _forensic_command(arguments: argparse.Namespace) -> int:
+    from career_automation.canary_forensic_evidence import (
+        CanaryForensicEvidenceError,
+        list_canary_forensic_events,
+        record_canary_forensic_event,
+        verify_exact_canary_evidence,
+    )
+
+    try:
+        if arguments.command == "forensic-record":
+            event = record_canary_forensic_event(
+                arguments.source_path,
+                root=arguments.forensic_root,
+                repository_root=arguments.repository_root,
+                recorded_at=arguments.recorded_at,
+                cycle_id=arguments.cycle_id,
+                stage=arguments.stage,
+                issue_code=arguments.issue_code,
+                summary=arguments.summary,
+                technical_detail=arguments.technical_detail,
+                media_type=arguments.media_type,
+            )
+            print(
+                canonical_json(
+                    {
+                        "sequence": event.sequence,
+                        "event_sha256": event.event_sha256,
+                        "evidence_receipt_sha256": event.evidence_receipt_sha256,
+                        "exact_evidence_sha256": event.exact_evidence_sha256,
+                    }
+                )
+            )
+            return 0
+        if arguments.command == "forensic-verify":
+            receipt, _artifact = verify_exact_canary_evidence(
+                arguments.forensic_root,
+                arguments.repository_root,
+                arguments.receiptsha,
+            )
+            print(canonical_json(receipt.document()))
+            return 0
+        events = list_canary_forensic_events(
+            root=arguments.forensic_root,
+            repository_root=arguments.repository_root,
+        )
+        print(
+            canonical_json(
+                [
+                    {
+                        "sequence": event.sequence,
+                        "event_sha256": event.event_sha256,
+                        "evidence_receipt_sha256": event.evidence_receipt_sha256,
+                        "exact_evidence_sha256": event.exact_evidence_sha256,
+                    }
+                    for event in events
+                ]
+            )
+        )
+        return 0
+    except (CanaryForensicEvidenceError, OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    if arguments.command in {"forensic-record", "forensic-verify", "forensic-list"}:
+        return _forensic_command(arguments)
     archive = ApplicationArchive(
         arguments.root,
         repository_root=arguments.repository_root,

@@ -15,6 +15,11 @@ import pytest
 
 import career_automation.linux_network_namespace_witness as witness_module
 import career_automation.network_witnessed_fixture as fixture_module
+from career_automation.ats_fixture import (
+    FIXTURE_INERT_FAVICON_HREF,
+    FixtureVacancy,
+    LocalATSFixture,
+)
 from career_automation.linux_network_namespace_witness import (
     AF_UNIX_PATH_CAPACITY,
     CHROMIUM_RUNTIME_TMP_SUFFIX_BYTES,
@@ -27,6 +32,7 @@ from career_automation.network_witnessed_fixture import (
     LIMITATIONS,
     STRONGEST_CLAIM,
     NetworkWitnessedFixtureObservationReceipt,
+    _install_chromium_request_audit,
     run_network_witnessed_fixture,
 )
 
@@ -42,6 +48,75 @@ ALLOWLIST = {
     "test_jaa10_network_witnessed_fixture.py",
     "test_jaa10_network_witnessed_fixture_negative_controls.py",
 }
+
+
+def test_chromium_request_audit_observes_exact_local_fixture_sequence() -> None:
+    vacancy = FixtureVacancy(
+        "request-audit",
+        "fixture:request-audit",
+        "Request Audit Fixture",
+        "Local Only",
+        "Describe one example.",
+    )
+    with LocalATSFixture(
+        vacancy,
+        nonce=lambda: "fixture-review-nonce-00000001",
+        form_token="fixture-form-token-00000000001",
+    ) as fixture:
+        with fixture_module.sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(
+                service_workers="block",
+                accept_downloads=False,
+            )
+            page = context.new_page()
+            session, audit = _install_chromium_request_audit(context, page)
+            try:
+                page.goto(fixture.application_url, wait_until="networkidle")
+                assert page.locator(
+                    'head link[rel="icon"]'
+                ).get_attribute("href") == FIXTURE_INERT_FAVICON_HREF
+                for label, value in (
+                    ("Full name", "Fixture Candidate"),
+                    ("Email address", "fixture@example.test"),
+                    ("Phone number", "+44 7700 900123"),
+                    ("Current city", "London"),
+                    (
+                        "Describe one example.",
+                        "Bounded local fixture evidence.",
+                    ),
+                ):
+                    page.get_by_label(label).fill(value)
+                page.get_by_label("UK work authorisation").select_option(
+                    "authorised"
+                )
+                upload = {
+                    "name": "fixture.pdf",
+                    "mimeType": "application/pdf",
+                    "buffer": b"%PDF-1.4\n%%EOF\n",
+                }
+                page.get_by_label("CV (PDF)").set_input_files(upload)
+                page.get_by_label("Cover letter (PDF)").set_input_files(upload)
+                page.get_by_role(
+                    "button",
+                    name="Review application",
+                ).click()
+                page.wait_for_load_state("networkidle")
+                page.get_by_test_id("final-submit").click()
+                page.wait_for_load_state("networkidle")
+
+                base = fixture.application_url.rstrip("/")
+                audit.assert_exact(
+                    (
+                        ("GET", base, "Document"),
+                        ("POST", base + "/review", "Document"),
+                        ("POST", base + "/submit", "Document"),
+                    )
+                )
+            finally:
+                session.detach()
+                context.close()
+                browser.close()
 
 
 def _chromium() -> Path:

@@ -7,7 +7,11 @@ import re
 from typing import Mapping, Sequence
 
 from .application_compiler import ApplicationSource
+from .ats_application_authority import (
+    STANDARD_CANDIDATE_AUTHORITIES,
+)
 from .evidence_matching import canonical_json
+from .form_answers import source_form_answers
 from .rendering import ApplicationArtifacts
 
 
@@ -27,15 +31,7 @@ CONTACT_AUTHORITIES = frozenset(
 # These values are deliberately narrow: they answer recurring Greenhouse
 # identity/eligibility controls and choose non-disclosure for demographic
 # surveys.  Vacancy-specific prose remains owned by ApplicationSource.answers.
-STANDARD_FORM_AUTHORITIES: Mapping[str, str] = {
-    "candidate.legal_name_complete": "Yes",
-    "candidate.uk_work_right": "Yes",
-    "candidate.uk_work_status": "EU Settled Status",
-    "candidate.discovery_source": "Greenhouse job board",
-    "candidate.gender_nondisclosure": "I don't wish to answer",
-    "candidate.ethnicity_nondisclosure": "I don't wish to answer",
-    "candidate.disability_nondisclosure": "I don't wish to answer",
-}
+STANDARD_FORM_AUTHORITIES: Mapping[str, str] = STANDARD_CANDIDATE_AUTHORITIES
 
 
 class ProductionFormBindingError(ValueError):
@@ -101,6 +97,7 @@ def approved_form_mapping_bytes(
     *,
     source: ApplicationSource,
     artifacts: ApplicationArtifacts,
+    questions: Mapping[str, tuple[str, str]] | None,
     field_authority_names: Sequence[tuple[str, str]],
     consent_states: Sequence[tuple[str, bool | str]],
 ) -> bytes:
@@ -111,21 +108,37 @@ def approved_form_mapping_bytes(
     if len(set(identities)) != len(identities):
         raise ProductionFormBindingError("provider field identities must be unique")
     approved = approved_authority_values(source, artifacts)
+    source_answers = {
+        question_id: (question, answer)
+        for question_id, question, answer in source_form_answers(source, questions)
+    }
     fields: list[dict[str, object]] = []
     for identity, authority_name in field_rows:
         if not FIELD_IDENTITY.fullmatch(identity):
             raise ProductionFormBindingError("provider field identity is invalid")
         if authority_name not in approved:
             raise ProductionFormBindingError("field authority is not approved")
+        if authority_name == "answers.full":
+            raise ProductionFormBindingError(
+                "form field must bind to one exact source answer question ID"
+            )
         value = approved[authority_name]
-        fields.append(
-            {
-                "field_identity": identity,
-                "authority": authority_name,
-                "value": value,
-                "value_sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
-            }
-        )
+        field: dict[str, object] = {
+            "field_identity": identity,
+            "authority": authority_name,
+            "value": value,
+            "value_sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+        }
+        if authority_name.startswith("answer."):
+            question_id = authority_name[len("answer."):]
+            resolved = source_answers.get(question_id)
+            if resolved is None or resolved[1] != value:
+                raise ProductionFormBindingError(
+                    "field answer differs from the complete source question inventory"
+                )
+            field["question_id"] = question_id
+            field["question"] = resolved[0]
+        fields.append(field)
     consents: list[dict[str, object]] = []
     for identity, expected in consent_rows:
         if not FIELD_IDENTITY.fullmatch(identity):

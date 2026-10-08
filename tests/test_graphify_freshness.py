@@ -58,6 +58,21 @@ def test_gate_rejects_changed_source(tmp_path: Path) -> None:
         MODULE.verify(root)
 
 
+def test_partial_receipt_fails_without_echoing_redacted_source_paths(
+    tmp_path: Path,
+) -> None:
+    root = _fixture(tmp_path)
+    receipt_path = root / MODULE.DEFAULT_RECEIPT
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["freshness_status"] = "PARTIAL"
+    receipt["sources"] = {"private/test-document.pdf": "redacted"}
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    with pytest.raises(MODULE.FreshnessError, match="freshness status is PARTIAL") as error:
+        MODULE.verify(root)
+    assert "private/test-document.pdf" not in str(error.value)
+
+
 def test_gate_rejects_new_tracked_source(tmp_path: Path) -> None:
     root = _fixture(tmp_path)
     (root / "new.py").write_text("VALUE = 3\n", encoding="utf-8")
@@ -71,3 +86,75 @@ def test_gate_rejects_tampered_graph(tmp_path: Path) -> None:
     (root / "graphify-out/graph.json").write_text('{"nodes": [], "edges": []}', encoding="utf-8")
     with pytest.raises(MODULE.FreshnessError, match="output hash mismatch"):
         MODULE.verify(root)
+
+
+def test_write_receipt_binds_current_tracked_tree(tmp_path: Path) -> None:
+    root = _fixture(tmp_path)
+    (root / "source.py").write_text("VALUE = 2\n", encoding="utf-8")
+    receipt = MODULE.write_receipt(root)
+    assert receipt["sources"] == {"source.py": _sha256(root / "source.py")}
+    assert receipt["release_authority"] is False
+    assert MODULE.verify(root) == receipt
+
+
+def test_canonicalize_graph_collapses_duplicates_and_dangling_edges(tmp_path: Path) -> None:
+    root = _fixture(tmp_path)
+    graph_path = root / "graphify-out/graph.json"
+    graph = {
+        "nodes": [
+            {"id": "value", "label": "old"},
+            {"id": "value", "label": "current"},
+            {"id": "target"},
+        ],
+        "links": [
+            {"source": "value", "target": "target", "relation": "old"},
+            {"source": "value", "target": "missing", "relation": "dangling"},
+            {"source": "value", "target": "target", "relation": "current"},
+        ],
+    }
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    assert MODULE.canonicalize_graph(root) == (2, 1)
+    canonical = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert canonical["nodes"][0]["label"] == "current"
+    assert canonical["links"] == [
+        {"source": "value", "target": "target", "relation": "current"}
+    ]
+
+
+def test_canonicalize_graph_restores_source_for_citation_and_disposal_edges(
+    tmp_path: Path,
+) -> None:
+    root = _fixture(tmp_path)
+    graph_path = root / "graphify-out/graph.json"
+    graph = {
+        "nodes": [
+            {"id": "source", "source_file": "docs/source.md"},
+            {"id": "citation-target", "source_file": "src/citation.py"},
+            {"id": "disposal-target", "source_file": "src/disposal.py"},
+            {"id": "use-target", "source_file": "src/use.py"},
+        ],
+        "links": [
+            {"source": "source", "target": "citation-target", "relation": "cites"},
+            {"source": "source", "target": "disposal-target", "relation": "disposes"},
+            {"source": "source", "target": "use-target", "relation": "uses"},
+        ],
+    }
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+    assert MODULE.canonicalize_graph(root) == (4, 3)
+    canonical = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert canonical["links"][:2] == [
+        {
+            "source": "source",
+            "target": "citation-target",
+            "relation": "cites",
+            "source_file": "docs/source.md",
+        },
+        {
+            "source": "source",
+            "target": "disposal-target",
+            "relation": "disposes",
+            "source_file": "docs/source.md",
+        },
+    ]
+    assert "source_file" not in canonical["links"][2]

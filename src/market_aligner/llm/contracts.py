@@ -4,15 +4,42 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Protocol
 
 
 LLM_CONTRACT_VERSION = "market-aligner.llm.v1"
+VACANCY_ELIGIBILITY_FACTS_TASK = "vacancy_eligibility_facts"
+VACANCY_ELIGIBILITY_FACTS_VERSION = "market-aligner.vacancy-eligibility-facts.v1"
+VACANCY_ELIGIBILITY_FIELDS = (
+    "work_jurisdiction",
+    "required_residence",
+    "sponsorship_available",
+    "minimum_years_experience",
+    "contract_type",
+)
+VACANCY_ELIGIBILITY_CONTRACT_TYPES = frozenset(
+    {
+        "apprenticeship",
+        "contract",
+        "freelance",
+        "full_time",
+        "internship",
+        "part_time",
+        "permanent",
+        "temporary",
+    }
+)
 
 
 def _unit(value: float, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a JSON number")
     result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
     if not 0 <= result <= 1:
         raise ValueError(f"{name} must be in [0,1]")
     return result
@@ -46,11 +73,139 @@ class SemanticVacancyExtraction:
     def __post_init__(self) -> None:
         if self.contract_version != LLM_CONTRACT_VERSION:
             raise ValueError("unsupported LLM contract version")
-        if len(self.source_content_sha256) != 64:
+        if not isinstance(self.source_content_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", self.source_content_sha256
+        ):
             raise ValueError("source_content_sha256 must bind extraction to raw evidence")
+        for name in (
+            "title",
+            "company",
+            "location",
+            "description",
+            "contract_type",
+            "seniority",
+            "remote_policy",
+        ):
+            if not isinstance(getattr(self, name), str):
+                raise TypeError(f"{name} must be a string")
+        for name in (
+            "responsibilities",
+            "required_skills",
+            "preferred_skills",
+            "required_qualifications",
+            "preferred_qualifications",
+            "work_authorisation",
+            "unknown_fields",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, tuple) or any(not isinstance(item, str) for item in value):
+                raise TypeError(f"{name} must be a tuple of strings")
+        if (
+            any(
+                len(value) != 2 or value.upper() != value
+                for value in self.work_authorisation
+            )
+            or tuple(sorted(set(self.work_authorisation)))
+            != self.work_authorisation
+        ):
+            raise TypeError(
+                "work_authorisation must be sorted unique uppercase two-letter "
+                "country codes"
+            )
         if not self.title.strip() or not self.description.strip():
             raise ValueError("title and complete description are required")
         _unit(self.extraction_confidence, "extraction_confidence")
+
+
+@dataclass(frozen=True)
+class VacancyEligibilityEvidence:
+    field: str
+    quote: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.field, str) or self.field not in VACANCY_ELIGIBILITY_FIELDS:
+            raise ValueError("eligibility evidence field is not supported")
+        if not isinstance(self.quote, str) or not self.quote.strip():
+            raise ValueError("eligibility evidence quote must be non-empty text")
+        try:
+            self.quote.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("eligibility evidence quote must be valid UTF-8") from exc
+
+
+@dataclass(frozen=True)
+class VacancyEligibilityFacts:
+    source_content_sha256: str
+    work_jurisdiction: str | None
+    required_residence: str | None
+    sponsorship_available: bool | None
+    minimum_years_experience: float | None
+    contract_type: str | None
+    source_evidence: tuple[VacancyEligibilityEvidence, ...]
+    unknown_fields: tuple[str, ...]
+    contract_version: str = LLM_CONTRACT_VERSION
+
+    def __post_init__(self) -> None:
+        if self.contract_version != LLM_CONTRACT_VERSION:
+            raise ValueError("unsupported LLM contract version")
+        if not isinstance(self.source_content_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", self.source_content_sha256
+        ):
+            raise ValueError("source_content_sha256 must bind facts to raw evidence")
+        for name in ("work_jurisdiction", "required_residence"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, str)
+                or re.fullmatch(r"[A-Z]{2}", value, flags=re.ASCII) is None
+            ):
+                raise ValueError(f"{name} must be an uppercase two-letter code or null")
+        if self.sponsorship_available is not None and type(
+            self.sponsorship_available
+        ) is not bool:
+            raise TypeError("sponsorship_available must be boolean or null")
+        years = self.minimum_years_experience
+        if years is not None:
+            if isinstance(years, bool) or not isinstance(years, (int, float)):
+                raise TypeError("minimum_years_experience must be a JSON number or null")
+            try:
+                numeric_years = float(years)
+            except OverflowError as exc:
+                raise ValueError(
+                    "minimum_years_experience must be finite and non-negative"
+                ) from exc
+            if not math.isfinite(numeric_years) or numeric_years < 0:
+                raise ValueError(
+                    "minimum_years_experience must be finite and non-negative"
+                )
+        if self.contract_type is not None:
+            if not isinstance(self.contract_type, str):
+                raise TypeError("contract_type must be text or null")
+            if self.contract_type not in VACANCY_ELIGIBILITY_CONTRACT_TYPES:
+                raise ValueError("contract_type is not an exact supported value")
+        if not isinstance(self.source_evidence, tuple) or any(
+            not isinstance(item, VacancyEligibilityEvidence)
+            for item in self.source_evidence
+        ):
+            raise TypeError("source_evidence must be a tuple of typed evidence")
+        evidence_fields = tuple(item.field for item in self.source_evidence)
+        known_fields = tuple(
+            name for name in VACANCY_ELIGIBILITY_FIELDS if getattr(self, name) is not None
+        )
+        if evidence_fields != tuple(sorted(set(evidence_fields))) or set(
+            evidence_fields
+        ) != set(known_fields):
+            raise ValueError("each known eligibility fact requires one ordered source quote")
+        if not isinstance(self.unknown_fields, tuple) or any(
+            not isinstance(item, str) for item in self.unknown_fields
+        ):
+            raise TypeError("unknown_fields must be a tuple of strings")
+        missing_fields = tuple(
+            name for name in VACANCY_ELIGIBILITY_FIELDS if getattr(self, name) is None
+        )
+        if self.unknown_fields != tuple(sorted(set(self.unknown_fields))) or set(
+            self.unknown_fields
+        ) != set(missing_fields):
+            raise ValueError("unknown_fields must name exactly the unavailable facts")
 
 
 @dataclass(frozen=True)
@@ -61,6 +216,12 @@ class EvidenceMatch:
     rationale: str
 
     def __post_init__(self) -> None:
+        if not isinstance(self.requirement, str) or not isinstance(self.rationale, str):
+            raise TypeError("evidence match requirement and rationale must be strings")
+        if not isinstance(self.evidence_ids, tuple) or any(
+            not isinstance(value, str) for value in self.evidence_ids
+        ):
+            raise TypeError("evidence match IDs must be a tuple of strings")
         if not self.requirement.strip() or not self.rationale.strip():
             raise ValueError("evidence match requires requirement and rationale")
         _unit(self.strength, "strength")
@@ -68,6 +229,24 @@ class EvidenceMatch:
 
 @dataclass(frozen=True)
 class EvidenceAlignment:
+    def __post_init__(self) -> None:
+        if self.contract_version != LLM_CONTRACT_VERSION:
+            raise ValueError("unsupported LLM contract version")
+        for name in ("profile_id", "profile_version", "job_key"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise TypeError(f"alignment {name} must be a non-empty string")
+        if not isinstance(self.matches, tuple) or any(
+            not isinstance(value, EvidenceMatch) for value in self.matches
+        ):
+            raise TypeError("alignment matches must be a tuple of EvidenceMatch")
+        for name in ("missing_requirements", "unknowns"):
+            value = getattr(self, name)
+            if not isinstance(value, tuple) or any(not isinstance(item, str) for item in value):
+                raise TypeError(f"alignment {name} must be a tuple of strings")
+        _unit(self.technical_alignment, "technical_alignment")
+        _unit(self.evidence_match, "evidence_match")
+        _unit(self.confidence, "confidence")
+
     profile_id: str
     profile_version: str
     job_key: str
@@ -132,6 +311,17 @@ class LLMTransportReceipt:
 
 @dataclass(frozen=True)
 class LLMReceipt:
+    def __post_init__(self) -> None:
+        if self.contract_version != LLM_CONTRACT_VERSION:
+            raise ValueError("unsupported LLM contract version")
+        for name in ("receipt_id", "task", "model", "prompt_version", "created_at"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise TypeError(f"LLM receipt {name} must be a non-empty string")
+        for name in ("input_sha256", "output_sha256"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError(f"LLM receipt {name} must be a lowercase SHA-256")
+
     receipt_id: str
     task: str
     model: str
@@ -170,5 +360,9 @@ class LLMReceipt:
 
 class LLMGateway(Protocol):
     def extract_vacancy(self, raw_context: Mapping[str, Any]) -> tuple[SemanticVacancyExtraction, LLMReceipt]: ...
+
+    def extract_vacancy_eligibility(
+        self, raw_context: Mapping[str, Any]
+    ) -> tuple[VacancyEligibilityFacts, LLMReceipt]: ...
 
     def align_evidence(self, context: Mapping[str, Any]) -> tuple[EvidenceAlignment, LLMReceipt]: ...

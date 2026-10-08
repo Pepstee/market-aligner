@@ -72,7 +72,7 @@ class CandidateAuthorityFiles:
     """Exact durable sources from which release authority is recomputed."""
 
     archive_root: Path
-    discovery_path: Path
+    discovery_path: Path | None
     candidate_authority_path: Path
     contact_authority_path: Path
     job_key: str
@@ -202,7 +202,20 @@ def _verify_durable_candidate_authority(
 ) -> dict[str, str]:
     """Re-read and deterministically authenticate every release authority object."""
     archive_root = files.archive_root.resolve(strict=True)
-    discovery_path = _regular_absolute_file(files.discovery_path, "discovery authority")
+    market_pair_supplied = (
+        market_decision_authority is not None
+        and materialization_receipt is not None
+    )
+    if files.discovery_path is None:
+        if not market_pair_supplied:
+            raise ValueError(
+                "market release authority is required without JAA discovery"
+            )
+        discovery_path = None
+    else:
+        discovery_path = _regular_absolute_file(
+            files.discovery_path, "discovery authority"
+        )
     authority_path = _regular_absolute_file(
         files.candidate_authority_path, "candidate authority"
     )
@@ -227,13 +240,14 @@ def _verify_durable_candidate_authority(
         != "jaa.production-candidate-authority.v2"
     ):
         raise ValueError("candidate authority is not canonical production authority")
-    current = build_candidate_authority_document(
-        discovery_path=discovery_path,
-        archive_root=archive_root,
-        repository_root=repository_root,
-    )
-    if current != authority:
-        raise ValueError("candidate authority differs from current durable sources")
+    if discovery_path is not None:
+        current = build_candidate_authority_document(
+            discovery_path=discovery_path,
+            archive_root=archive_root,
+            repository_root=repository_root,
+        )
+        if current != authority:
+            raise ValueError("candidate authority differs from current durable sources")
     if market_decision_authority is not None or materialization_receipt is not None:
         if (
             type(market_decision_authority) is not MarketApplicationDecisionAuthority

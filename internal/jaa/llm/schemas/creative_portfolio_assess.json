@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "portfolio_assess",
+  "description": "Output of llm.assess_portfolio — a rough read of the candidate's portfolio items, feeding the Profiler. This is advisory signal only; the human-calibrated candidate_preferences is produced by the Profiler, not here. Careers are the 10 canonical ids.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["per_field", "detected_skills", "overall_summary"],
+  "properties": {
+    "per_field": {
+      "type": "array",
+      "description": "One entry per career the portfolio shows evidence for.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["career", "evidence_strength", "note"],
+        "properties": {
+          "career": {
+            "type": "string",
+            "enum": [
+              "UX_UI",
+              "Spatial_VMD",
+              "Exhibition",
+              "Brand_Space",
+              "ArchViz",
+              "3D_Generalist",
+              "Environment_Art",
+              "XR_Spatial",
+              "Technical_Artist",
+              "Motion_Graphic"
+            ]
+          },
+          "evidence_strength": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10,
+            "description": "0-10 how strongly the portfolio demonstrates this field."
+          },
+          "note": {
+            "type": "string",
+            "description": "1 sentence: what in the portfolio supports this."
+          }
+        }
+      }
+    },
+    "detected_skills": {
+      "type": "array",
+      "description": "Canonical skill ids the portfolio evidences.",
+      "items": { "type": "string" }
+    },
+    "overall_summary": {
+      "type": "string",
+      "description": "1-2 sentence overall read of where the portfolio is strongest."
+    }
+  }
+}

@@ -633,9 +633,7 @@ def test_route_or_binding_substitution_cannot_reuse_prepared_circuit(
         circuit.consumption_started("8" * 64)
 
 
-def test_cogna_cover_upload_must_equal_assured_cover_pdf(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cogna_cover_upload_must_equal_assured_cover_pdf(tmp_path: Path) -> None:
     cv = tmp_path / "cv.pdf"
     cover = tmp_path / "cover.pdf"
     unrelated = tmp_path / "unrelated.pdf"
@@ -709,9 +707,6 @@ def test_cogna_cover_upload_must_equal_assured_cover_pdf(
         cover_letter_pdf=SimpleNamespace(pdf_sha256=_sha(cover.read_bytes())),
     )
     authority.workable_release_binding = binding
-    monkeypatch.setattr(
-        workable_module, "CandidateReleaseExecutionAuthority", CandidateAuthority
-    )
     with pytest.raises(WorkableSchemaError, match="assured PDFs"):
         WorkableLiveAdapter._assert_package(policy, application, authority)
 

@@ -17,11 +17,6 @@ from career_automation.provider_observation_authority import (
     load_provider_observation_authority,
     verify_provider_observation_authority,
 )
-from career_automation.provider_observation_capture import (
-    exact_committed_source_identity,
-)
-
-
 ROOT = Path(__file__).resolve().parent
 FIXTURE = (
     ROOT / "career_automation" / "fixtures" / "greenhouse-success-test-observation.json"
@@ -137,24 +132,169 @@ def _signed_acceptance(
     }
 
 
-def _clone_authority_repository(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Path:
-    identity = exact_committed_source_identity(ROOT)
-    checkout = tmp_path / "authority-repository"
-    subprocess.run(
+def _run_synthetic_git(
+    repository: Path, *arguments: str
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
             "git",
-            "clone",
-            "--quiet",
-            "--no-hardlinks",
-            str(identity.repository_root),
-            str(checkout),
+            "-C",
+            str(repository),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=JAA Test",
+            "-c",
+            "user.email=jaa-test@example.invalid",
+            *arguments,
         ],
         check=True,
+        capture_output=True,
+        text=True,
     )
-    clone = checkout / identity.source_root.relative_to(identity.repository_root)
-    fixtures = clone / "career_automation" / "fixtures"
+
+
+def _canonical_fixture_bytes(document: dict[str, object]) -> bytes:
+    return (authority_module.canonical_json(document) + "\n").encode("utf-8")
+
+
+def _synthetic_authority_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    repository = tmp_path / "authority-data-repository"
+    repository.mkdir()
+    empty_template = tmp_path / "empty-git-template"
+    empty_template.mkdir()
+    _run_synthetic_git(
+        repository,
+        "init",
+        "--quiet",
+        f"--template={empty_template}",
+    )
+
+    component_root = repository / "internal" / "jaa"
+    component_root.mkdir(parents=True)
+    collector_source = component_root / "collector-witness.txt"
+    collector_source_bytes = b"synthetic data-only collector witness v1\n"
+    collector_source.write_bytes(collector_source_bytes)
+    _run_synthetic_git(
+        repository,
+        "add",
+        "--",
+        "internal/jaa/collector-witness.txt",
+    )
+    _run_synthetic_git(
+        repository, "commit", "--quiet", "-m", "synthetic collector witness"
+    )
+    collector_commit = _run_synthetic_git(
+        repository, "rev-parse", "HEAD"
+    ).stdout.strip()
+
+    fixtures = component_root / "career_automation" / "fixtures"
+    capture_objects = fixtures / "provider-observation-capture-objects"
+    capture_objects.mkdir(parents=True)
+    observation = FIXTURE.read_bytes()
+    observation_document = json.loads(observation)
+    source_url = str(observation_document["request"]["url"])
+    assert source_url == APPLICATION_URL
+    vacancy_id = source_url.rsplit("/jobs/", 1)[1].split("/", 1)[0]
+    assert vacancy_id.isdecimal()
+
+    artifact_specs = {
+        "observation": (
+            "greenhouse-success-test-observation.json",
+            observation,
+        ),
+        "primary_response": (
+            "greenhouse-success-test-primary-response.txt",
+            b"synthetic primary response fixture; no provider request was made.\n",
+        ),
+        "visible_content": (
+            "greenhouse-success-test-visible-content.txt",
+            b"synthetic visible content fixture; no provider page was read.\n",
+        ),
+        "network_events": (
+            "greenhouse-success-test-network-events.json",
+            _canonical_fixture_bytes(
+                {"schema_version": "jaa.provider-observation-network.v1", "events": []}
+            ),
+        ),
+    }
+    artifact_digests: dict[str, str] = {}
+    fixture_artifacts: dict[str, str] = {}
+    for label, (filename, content) in artifact_specs.items():
+        (capture_objects / filename).write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        artifact_digests[label] = digest
+        fixture_artifacts[filename] = digest
+
+    manifest = {
+        "schema_version": "jaa.provider-observation-capture.v1",
+        "capture_mode": "repository_fixture",
+        "provider": "greenhouse",
+        "source_url": source_url,
+        "observed_at": observation_document["observed_at"],
+        "interaction": dict(authority_module._ZERO_INTERACTION),
+        "artifacts": artifact_digests,
+        "collector_identity": "synthetic.data-witness.v1",
+        "collector_source_path": "collector-witness.txt",
+        "collector_source_sha256": hashlib.sha256(collector_source_bytes).hexdigest(),
+        "repository_commit": collector_commit,
+        "vacancy_id": vacancy_id,
+    }
+    manifest_bytes = _canonical_fixture_bytes(manifest)
+    manifest_path = fixtures / "greenhouse-success-test-manifest.json"
+    manifest_path.write_bytes(manifest_bytes)
+
+    policy = {
+        "schema_version": "jaa.trusted-provider-observations.v2",
+        "authorities": [
+            {
+                "attempt_id": None,
+                "authority_id": "synthetic-data-only-greenhouse-witness",
+                "capture_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                "fixture_artifacts": fixture_artifacts,
+                "fixture_manifest": manifest_path.name,
+                "observation_sha256": hashlib.sha256(observation).hexdigest(),
+                "observed_at": observation_document["observed_at"],
+                "scope": "repository_fixture",
+                "source_url": source_url,
+                "vacancy_capture_sha256": None,
+            }
+        ],
+    }
+    policy_path = fixtures / "trusted-greenhouse-success-observations.json"
+    policy_path.write_bytes(_canonical_fixture_bytes(policy))
+
+    additional_paths = [
+        "internal/jaa/career_automation/fixtures/greenhouse-success-test-manifest.json",
+        "internal/jaa/career_automation/fixtures/"
+        "trusted-greenhouse-success-observations.json",
+        *(
+            "internal/jaa/career_automation/fixtures/"
+            "provider-observation-capture-objects/"
+            + filename
+            for filename, _ in artifact_specs.values()
+        ),
+    ]
+    _run_synthetic_git(repository, "add", "--", *additional_paths)
+    _run_synthetic_git(
+        repository, "commit", "--quiet", "-m", "synthetic authority data"
+    )
+
+    expected_paths = {
+        "internal/jaa/collector-witness.txt",
+        *additional_paths,
+    }
+    committed_paths = set(
+        _run_synthetic_git(repository, "ls-files").stdout.splitlines()
+    )
+    assert committed_paths == expected_paths
+    assert all(Path(path).suffix in {".json", ".txt"} for path in committed_paths)
+    assert not any((repository / path).is_symlink() for path in committed_paths)
+
     monkeypatch.setattr(authority_module, "_FIXTURE_ROOT", fixtures)
     monkeypatch.setattr(
         authority_module,
@@ -164,9 +304,31 @@ def _clone_authority_repository(
     monkeypatch.setattr(
         authority_module,
         "_CAPTURE_OBJECT_ROOT",
-        fixtures / "provider-observation-capture-objects",
+        capture_objects,
     )
-    return clone
+    return component_root
+
+
+def _assert_synthetic_authority_is_accepted(
+    repository_root: Path, archive_root: Path
+) -> None:
+    observation = FIXTURE.read_bytes()
+    receipt = verify_provider_observation_authority(
+        observation,
+        source_url=APPLICATION_URL,
+        archive_root=archive_root,
+        repository_root=repository_root,
+    )
+    expected_source_commit = _run_synthetic_git(
+        repository_root.parent.parent, "rev-parse", "HEAD^"
+    ).stdout.strip()
+    assert receipt.scope == "repository_fixture"
+    assert receipt.collector_identity == "synthetic.data-witness.v1"
+    assert receipt.collector_source_path == "collector-witness.txt"
+    assert receipt.collector_repository_commit == expected_source_commit
+    assert receipt.observation_sha256 == hashlib.sha256(observation).hexdigest()
+    assert len(receipt.capture_manifest_sha256) == 64
+    assert len(receipt.trust_policy_sha256) == 64
 
 
 def test_repository_trusted_observation_resolves_collector_and_manifest() -> None:
@@ -271,58 +433,40 @@ def test_runtime_trust_policy_injection_cannot_mint_production_authority(
 def test_dirty_fixture_self_enrollment_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    clone = _clone_authority_repository(tmp_path, monkeypatch)
+    repository = _synthetic_authority_repository(tmp_path, monkeypatch)
+    _assert_synthetic_authority_is_accepted(repository, tmp_path)
     policy_path = authority_module._POLICY_PATH
     policy = json.loads(policy_path.read_bytes())
     policy["authorities"][0]["authority_id"] = "attacker.self-enrolled.v999"
-    policy_path.write_text(
-        json.dumps(policy, sort_keys=True, separators=(",", ":")) + "\n"
-    )
+    policy_path.write_bytes(_canonical_fixture_bytes(policy))
     with pytest.raises(ValueError, match="exact clean HEAD"):
         verify_provider_observation_authority(
             FIXTURE.read_bytes(),
             source_url=APPLICATION_URL,
             archive_root=tmp_path,
-            repository_root=clone,
+            repository_root=repository,
         )
 
 
 def test_committed_policy_cannot_relabel_capture_collector(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    clone = _clone_authority_repository(tmp_path, monkeypatch)
+    repository = _synthetic_authority_repository(tmp_path, monkeypatch)
+    _assert_synthetic_authority_is_accepted(repository, tmp_path)
     policy_path = authority_module._POLICY_PATH
     policy = json.loads(policy_path.read_bytes())
     policy["authorities"][0]["collector_identity"] = "attacker.relabelled.v999"
-    policy_path.write_text(
-        json.dumps(policy, sort_keys=True, separators=(",", ":")) + "\n"
-    )
-    subprocess.run(
-        ["git", "-C", str(clone), "add", str(policy_path)],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(clone),
-            "-c",
-            "user.name=JAA Test",
-            "-c",
-            "user.email=jaa-test@example.invalid",
-            "commit",
-            "--quiet",
-            "-m",
-            "attempt collector relabel",
-        ],
-        check=True,
+    policy_path.write_bytes(_canonical_fixture_bytes(policy))
+    _run_synthetic_git(repository, "add", "--", str(policy_path))
+    _run_synthetic_git(
+        repository, "commit", "--quiet", "-m", "attempt collector relabel"
     )
     with pytest.raises(ValueError, match="must not assert or relabel"):
         verify_provider_observation_authority(
             FIXTURE.read_bytes(),
             source_url=APPLICATION_URL,
             archive_root=tmp_path,
-            repository_root=clone,
+            repository_root=repository,
         )
 
 

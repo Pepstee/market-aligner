@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -33,7 +33,8 @@ from .models import ActorKind, PipelineState, ResearchTask, ScoredJob
 
 
 RESEARCH_LEASE_POLICY = PolicyIdentity(
-    "career.research-lease", "1",
+    "career.research-lease",
+    "1",
     canonical_hash({"rule": "lease queued work; advance only queued jobs"}),
 )
 RESEARCH_COMPLETION_POLICY = PolicyIdentity(
@@ -202,24 +203,46 @@ class CareerDatabase:
         """Store one immutable score snapshot, making identical retries idempotent."""
         if not isinstance(job.payload, dict):
             raise ValueError("score snapshot payload must be a JSON object")
-        if (not isinstance(job.payload_hash, str)
-                or len(job.payload_hash) != 64
-                or any(char not in "0123456789abcdef" for char in job.payload_hash)):
-            raise ValueError("score snapshot payload_hash must be a lowercase SHA-256 digest")
+        if (
+            not isinstance(job.payload_hash, str)
+            or len(job.payload_hash) != 64
+            or any(char not in "0123456789abcdef" for char in job.payload_hash)
+        ):
+            raise ValueError(
+                "score snapshot payload_hash must be a lowercase SHA-256 digest"
+            )
         if canonical_hash(job.payload) != job.payload_hash:
-            raise ValueError("score snapshot payload_hash does not match canonical payload")
+            raise ValueError(
+                "score snapshot payload_hash does not match canonical payload"
+            )
         payload_json = canonical_json(job.payload)
-        event_payload_json, event_key, event_binding_hash = score_snapshot_import_binding(
-            job_key=job.key, board=job.board, job_id=job.job_id, url=job.url,
-            title=job.title, company=job.company, fit=job.fit,
-            opportunity=job.opportunity, final_score=job.final_score,
-            extraction_confidence=job.extraction_confidence,
-            payload_hash=job.payload_hash,
+        event_payload_json, event_key, event_binding_hash = (
+            score_snapshot_import_binding(
+                job_key=job.key,
+                board=job.board,
+                job_id=job.job_id,
+                url=job.url,
+                title=job.title,
+                company=job.company,
+                fit=job.fit,
+                opportunity=job.opportunity,
+                final_score=job.final_score,
+                extraction_confidence=job.extraction_confidence,
+                payload_hash=job.payload_hash,
+            )
         )
         snapshot = (
-            job.board, job.job_id, job.url, job.title, job.company, job.fit,
-            job.opportunity, job.final_score, job.extraction_confidence,
-            payload_json, job.payload_hash,
+            job.board,
+            job.job_id,
+            job.url,
+            job.title,
+            job.company,
+            job.fit,
+            job.opportunity,
+            job.final_score,
+            job.extraction_confidence,
+            payload_json,
+            job.payload_hash,
         )
         with self.transaction(immediate=True) as conn:
             existing = conn.execute(
@@ -241,9 +264,13 @@ class CareerDatabase:
                     (event_key,),
                 ).fetchone()
                 expected_event = (
-                    job.key, "score_snapshot_imported", None,
-                    PipelineState.SCORED.value, ActorKind.DETERMINISTIC.value,
-                    event_payload_json, event_key,
+                    job.key,
+                    "score_snapshot_imported",
+                    None,
+                    PipelineState.SCORED.value,
+                    ActorKind.DETERMINISTIC.value,
+                    event_payload_json,
+                    event_key,
                 )
                 if event is None or tuple(event)[1:] != expected_event:
                     raise IdempotencyConflict(
@@ -255,8 +282,11 @@ class CareerDatabase:
                     (job.key,),
                 ).fetchone()
                 expected_receipt = (
-                    int(event["id"]), job.key, event_payload_json,
-                    event_binding_hash, event_key,
+                    int(event["id"]),
+                    job.key,
+                    event_payload_json,
+                    event_binding_hash,
+                    event_key,
                 )
                 if receipt is None or tuple(receipt) != expected_receipt:
                     raise IdempotencyConflict(
@@ -269,10 +299,19 @@ class CareerDatabase:
                      extraction_confidence,payload_json,payload_hash,state
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    job.key, job.board, job.job_id, job.url, job.title, job.company,
-                    job.fit, job.opportunity, job.final_score, job.extraction_confidence,
+                    job.key,
+                    job.board,
+                    job.job_id,
+                    job.url,
+                    job.title,
+                    job.company,
+                    job.fit,
+                    job.opportunity,
+                    job.final_score,
+                    job.extraction_confidence,
                     payload_json,
-                    job.payload_hash, PipelineState.SCORED.value,
+                    job.payload_hash,
+                    PipelineState.SCORED.value,
                 ),
             )
             event = conn.execute(
@@ -280,8 +319,13 @@ class CareerDatabase:
                      job_key,event_type,from_state,to_state,actor_kind,payload_json,idempotency_key
                    ) VALUES(?,?,?,?,?,?,?)""",
                 (
-                    job.key, "score_snapshot_imported", None, PipelineState.SCORED.value,
-                    ActorKind.DETERMINISTIC.value, event_payload_json, event_key,
+                    job.key,
+                    "score_snapshot_imported",
+                    None,
+                    PipelineState.SCORED.value,
+                    ActorKind.DETERMINISTIC.value,
+                    event_payload_json,
+                    event_key,
                 ),
             )
             conn.execute(
@@ -289,8 +333,11 @@ class CareerDatabase:
                      event_id,job_key,binding_json,binding_hash,idempotency_key
                    ) VALUES(?,?,?,?,?)""",
                 (
-                    event.lastrowid, job.key, event_payload_json,
-                    event_binding_hash, event_key,
+                    event.lastrowid,
+                    job.key,
+                    event_payload_json,
+                    event_binding_hash,
+                    event_key,
                 ),
             )
         return True
@@ -314,14 +361,16 @@ class CareerDatabase:
         decision = "pass" if passed else "reject"
         target = (
             PipelineState.EMPLOYER_RESEARCH_QUEUED.value
-            if passed else PipelineState.OPPORTUNITY_REJECTED.value
+            if passed
+            else PipelineState.OPPORTUNITY_REJECTED.value
         )
         if passed and priority is None:
             raise ValueError("passed opportunity requires research priority")
         policy = PolicyIdentity("career.opportunity-gate", "1", policy_hash)
         with self.transaction(immediate=True) as conn:
             current = conn.execute(
-                "SELECT state,payload_hash FROM pipeline_jobs WHERE job_key=?", (job_key,)
+                "SELECT state,payload_hash FROM pipeline_jobs WHERE job_key=?",
+                (job_key,),
             ).fetchone()
             if current is None:
                 raise KeyError(job_key)
@@ -387,7 +436,9 @@ class CareerDatabase:
             ).fetchall()
         return [ResearchTask(**dict(row)) for row in rows]
 
-    def claim_research(self, worker_id: str, lease_seconds: int = 900) -> ResearchTask | None:
+    def claim_research(
+        self, worker_id: str, lease_seconds: int = 900
+    ) -> ResearchTask | None:
         """Lease the highest-priority research job without double dispatch."""
         now = datetime.now(timezone.utc)
         lease_until = now + timedelta(seconds=max(1, lease_seconds))
@@ -429,7 +480,9 @@ class CareerDatabase:
             task["attempts"] = int(task["attempts"]) + 1
             return ResearchTask(**task)
 
-    def record_research_failure(self, *, job_key: str, worker_id: str, error: str) -> None:
+    def record_research_failure(
+        self, *, job_key: str, worker_id: str, error: str
+    ) -> None:
         """Make a failed lease explicitly retryable without creating a receipt.
 
         The row remains leased to retain the failed attempt's ownership audit.
@@ -454,30 +507,46 @@ class CareerDatabase:
         worker_id: str,
         dossier: dict[str, Any],
         dossier_hash: str,
+        as_of: date | None = None,
     ) -> None:
         """Persist a provenance-validated probabilistic research result."""
         from .employer_research import RawResponseCache, validate_dossier
+
         if dossier.get("job_key") != job_key:
             raise ValueError("dossier job identity does not match the research task")
         if canonical_hash(dossier) != dossier_hash:
             raise ValueError("dossier hash does not match canonical content")
         strict = dossier.get("schema_version") in {
-            "jaa04.dossier.v1", "jaa04.dossier.v2",
-            "jaa04.dossier.v3", "jaa04.dossier.v4",
+            "jaa04.dossier.v1",
+            "jaa04.dossier.v2",
+            "jaa04.dossier.v3",
+            "jaa04.dossier.v4",
         }
         if strict:
             cache_root = dossier.get("raw_cache_root")
             if not isinstance(cache_root, str) or not cache_root:
                 raise ValueError("dossier must identify its raw response cache")
-            validate_dossier(dossier, RawResponseCache(cache_root))
+            validate_dossier(
+                dossier,
+                RawResponseCache(cache_root),
+                as_of=as_of,
+            )
         sources = dossier.get("sources")
         if not isinstance(sources, list) or not sources:
             raise ValueError("employer dossier requires at least one public source")
-        source_ids = {str(source.get("id")) for source in sources if isinstance(source, dict)}
+        source_ids = {
+            str(source.get("id")) for source in sources if isinstance(source, dict)
+        }
         for claim in dossier.get("claims", []):
-            cited = {str(value) for value in claim.get("source_ids", [])} if isinstance(claim, dict) else set()
-            unsupported = (isinstance(claim, dict)
-                           and claim.get("outcome") in {"unknown", "abstained"})
+            cited = (
+                {str(value) for value in claim.get("source_ids", [])}
+                if isinstance(claim, dict)
+                else set()
+            )
+            unsupported = isinstance(claim, dict) and claim.get("outcome") in {
+                "unknown",
+                "abstained",
+            }
             if (not cited and not unsupported) or not cited.issubset(source_ids):
                 raise ValueError("every dossier claim must cite known source IDs")
         model = self._dossier_model(dossier)
@@ -503,16 +572,24 @@ class CareerDatabase:
                     str(queue["lease_until"]).replace("Z", "+00:00")
                 ) >= datetime.now(timezone.utc)
             is_owner = queue is not None and (
-                (queue["status"] == "leased" and queue["lease_owner"] == worker_id
-                 and lease_is_current)
-                or (queue["status"] == "completed" and queue["dossier_worker"] == worker_id)
+                (
+                    queue["status"] == "leased"
+                    and queue["lease_owner"] == worker_id
+                    and lease_is_current
+                )
+                or (
+                    queue["status"] == "completed"
+                    and queue["dossier_worker"] == worker_id
+                )
             )
             if not is_owner:
                 raise RuntimeError("research task is not leased by this worker")
             if queue["status"] == "completed":
                 completed = self._post_research_dossier_in_transaction(conn, job_key)
                 if completed is None:
-                    raise RuntimeError("completed research state is missing its dossier")
+                    raise RuntimeError(
+                        "completed research state is missing its dossier"
+                    )
                 stored_dossier, stored_hash = completed
                 if stored_hash != dossier_hash or stored_dossier != dossier:
                     raise IdempotencyConflict(
@@ -546,7 +623,12 @@ class CareerDatabase:
             conn.execute(
                 """INSERT OR IGNORE INTO employer_dossiers(job_key,dossier_json,dossier_hash,worker_id)
                    VALUES(?,?,?,?)""",
-                (job_key, json.dumps(dossier, ensure_ascii=False, sort_keys=True), dossier_hash, worker_id),
+                (
+                    job_key,
+                    json.dumps(dossier, ensure_ascii=False, sort_keys=True),
+                    dossier_hash,
+                    worker_id,
+                ),
             )
             if strict:
                 for claim in dossier["claims"]:
@@ -557,14 +639,24 @@ class CareerDatabase:
                     conn.execute(
                         """INSERT OR IGNORE INTO employer_intelligence
                            (job_key,claim_id,kind,classification,claim_json) VALUES(?,?,?,?,?)""",
-                        (job_key, claim["id"], claim["kind"], claim["classification"],
-                         json.dumps(claim, ensure_ascii=False, sort_keys=True)),
+                        (
+                            job_key,
+                            claim["id"],
+                            claim["kind"],
+                            claim["classification"],
+                            json.dumps(claim, ensure_ascii=False, sort_keys=True),
+                        ),
                     )
                 for edge in dossier.get("edges", []):
                     conn.execute(
                         """INSERT OR IGNORE INTO employer_intelligence_edges
                            (job_key,from_claim_id,to_claim_id,relation) VALUES(?,?,?,?)""",
-                        (job_key, edge["from_claim_id"], edge["to_claim_id"], edge["relation"]),
+                        (
+                            job_key,
+                            edge["from_claim_id"],
+                            edge["to_claim_id"],
+                            edge["relation"],
+                        ),
                     )
             conn.execute(
                 """UPDATE employer_research_queue SET status='completed',lease_owner=NULL,
@@ -584,14 +676,18 @@ class CareerDatabase:
             return self._post_research_dossier_in_transaction(conn, job_key)
 
     def _post_research_dossier_in_transaction(
-        self, conn: sqlite3.Connection, job_key: str,
+        self,
+        conn: sqlite3.Connection,
+        job_key: str,
     ) -> tuple[dict[str, Any], str] | None:
         """Validate the complete research seam using the caller's transaction."""
         job = conn.execute(
-            "SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,),
+            "SELECT state FROM pipeline_jobs WHERE job_key=?",
+            (job_key,),
         ).fetchone()
         queue = conn.execute(
-            "SELECT status FROM employer_research_queue WHERE job_key=?", (job_key,),
+            "SELECT status FROM employer_research_queue WHERE job_key=?",
+            (job_key,),
         ).fetchone()
         rows = conn.execute(
             "SELECT dossier_json,dossier_hash,worker_id FROM employer_dossiers WHERE job_key=?",
@@ -602,26 +698,38 @@ class CareerDatabase:
                       model_provider,model_id,model_version
                FROM lifecycle_transition_receipts
                WHERE job_key=? AND from_state=? AND to_state=? AND policy_id=?""",
-            (job_key, PipelineState.EMPLOYER_RESEARCHING.value,
-             PipelineState.EMPLOYER_RESEARCHED.value,
-             RESEARCH_COMPLETION_POLICY.policy_id),
+            (
+                job_key,
+                PipelineState.EMPLOYER_RESEARCHING.value,
+                PipelineState.EMPLOYER_RESEARCHED.value,
+                RESEARCH_COMPLETION_POLICY.policy_id,
+            ),
         ).fetchall()
         present = (job is not None, queue is not None, bool(rows))
         if not any(present):
             return None
-        if (not all(present) or len(rows) != 1
-                or len(research_completion_receipts) != 1):
-            raise RuntimeError("post-research dossier state is incomplete or duplicated")
-        if queue["status"] != "completed" or str(job["state"]) not in POST_RESEARCH_STATES:
-            raise RuntimeError("dossier is not in a completed post-research lifecycle state")
+        if not all(present) or len(rows) != 1 or len(research_completion_receipts) != 1:
+            raise RuntimeError(
+                "post-research dossier state is incomplete or duplicated"
+            )
+        if (
+            queue["status"] != "completed"
+            or str(job["state"]) not in POST_RESEARCH_STATES
+        ):
+            raise RuntimeError(
+                "dossier is not in a completed post-research lifecycle state"
+            )
         row = rows[0]
         try:
             dossier = json.loads(row["dossier_json"])
         except (TypeError, json.JSONDecodeError) as exc:
             raise ValueError("completed dossier is not valid JSON") from exc
         dossier_hash = str(row["dossier_hash"])
-        if (not isinstance(dossier, dict) or dossier.get("job_key") != job_key
-                or canonical_hash(dossier) != dossier_hash):
+        if (
+            not isinstance(dossier, dict)
+            or dossier.get("job_key") != job_key
+            or canonical_hash(dossier) != dossier_hash
+        ):
             raise RuntimeError("completed dossier identity or hash is invalid")
         research_proposals = conn.execute(
             """SELECT from_state,to_state,actor_kind,payload_json,idempotency_key
@@ -635,53 +743,67 @@ class CareerDatabase:
         sources = dossier.get("sources")
         if not isinstance(sources, list) or not sources:
             raise RuntimeError("completed dossier source identity is invalid")
-        source_ids = sorted({str(source.get("id")) for source in sources
-                             if isinstance(source, dict)})
-        observation = {"dossier": dossier, "dossier_hash": dossier_hash,
-                       "source_ids": source_ids, "worker_id": str(row["worker_id"])}
+        source_ids = sorted(
+            {str(source.get("id")) for source in sources if isinstance(source, dict)}
+        )
+        observation = {
+            "dossier": dossier,
+            "dossier_hash": dossier_hash,
+            "source_ids": source_ids,
+            "worker_id": str(row["worker_id"]),
+        }
         receipt = research_completion_receipts[0]
         model = self._dossier_model(dossier)
         try:
             proposal = json.loads(research_proposals[0]["payload_json"])
         except (TypeError, json.JSONDecodeError) as exc:
             raise RuntimeError("completed dossier proposal is invalid") from exc
-        expected_model = None if model is None else {
-            "provider": model.provider,
-            "model_id": model.model_id,
-            "version": model.version,
-        }
-        if ((str(receipt["policy_version"]), str(receipt["policy_hash"]))
-                not in RESEARCH_COMPLETION_POLICY_IDENTITIES
-                or canonical_hash(observation) != str(receipt["input_hash"])
-                or canonical_hash(RESEARCH_COMPLETION_OUTPUT)
-                != str(receipt["output_hash"])
-                or str(receipt["idempotency_key"])
-                != f"research-complete:{job_key}:{dossier_hash}"
-                or (
-                    receipt["model_provider"], receipt["model_id"],
-                    receipt["model_version"],
-                ) != (
-                    None if model is None else model.provider,
-                    None if model is None else model.model_id,
-                    None if model is None else model.version,
-                )
-                or not isinstance(proposal, dict)
-                or set(proposal) != {
-                    "proposed_state", "observation", "observation_hash", "model",
-                }
-                or research_proposals[0]["payload_json"] != canonical_json(proposal)
-                or research_proposals[0]["from_state"]
-                != PipelineState.EMPLOYER_RESEARCHING.value
-                or research_proposals[0]["to_state"] is not None
-                or research_proposals[0]["actor_kind"]
-                != ActorKind.PROBABILISTIC.value
-                or proposal.get("proposed_state")
-                != PipelineState.EMPLOYER_RESEARCHED.value
-                or proposal.get("observation") != observation
-                or proposal.get("observation_hash") != canonical_hash(observation)
-                or proposal.get("model") != expected_model
-                or str(research_proposals[0]["idempotency_key"])
-                != f"research-observation:{job_key}:{dossier_hash}"):
+        expected_model = (
+            None
+            if model is None
+            else {
+                "provider": model.provider,
+                "model_id": model.model_id,
+                "version": model.version,
+            }
+        )
+        if (
+            (str(receipt["policy_version"]), str(receipt["policy_hash"]))
+            not in RESEARCH_COMPLETION_POLICY_IDENTITIES
+            or canonical_hash(observation) != str(receipt["input_hash"])
+            or canonical_hash(RESEARCH_COMPLETION_OUTPUT) != str(receipt["output_hash"])
+            or str(receipt["idempotency_key"])
+            != f"research-complete:{job_key}:{dossier_hash}"
+            or (
+                receipt["model_provider"],
+                receipt["model_id"],
+                receipt["model_version"],
+            )
+            != (
+                None if model is None else model.provider,
+                None if model is None else model.model_id,
+                None if model is None else model.version,
+            )
+            or not isinstance(proposal, dict)
+            or set(proposal)
+            != {
+                "proposed_state",
+                "observation",
+                "observation_hash",
+                "model",
+            }
+            or research_proposals[0]["payload_json"] != canonical_json(proposal)
+            or research_proposals[0]["from_state"]
+            != PipelineState.EMPLOYER_RESEARCHING.value
+            or research_proposals[0]["to_state"] is not None
+            or research_proposals[0]["actor_kind"] != ActorKind.PROBABILISTIC.value
+            or proposal.get("proposed_state") != PipelineState.EMPLOYER_RESEARCHED.value
+            or proposal.get("observation") != observation
+            or proposal.get("observation_hash") != canonical_hash(observation)
+            or proposal.get("model") != expected_model
+            or str(research_proposals[0]["idempotency_key"])
+            != f"research-observation:{job_key}:{dossier_hash}"
+        ):
             raise RuntimeError("completed dossier does not match its immutable receipt")
         return dossier, dossier_hash
 
@@ -695,18 +817,22 @@ class CareerDatabase:
         with self.connection() as conn:
             return self._post_research_dossier_in_transaction(conn, job_key)
 
-    def opportunity1_reassessment(self, job_key: str, *,
-                                  expected_dossier_hash: str | None = None) -> dict[str, Any] | None:
+    def opportunity1_reassessment(
+        self, job_key: str, *, expected_dossier_hash: str | None = None
+    ) -> dict[str, Any] | None:
         """Recover and validate the one durable Opportunity-1 decision."""
         completed = self.post_research_dossier(job_key)
         if completed is None:
             return None
         dossier, dossier_hash = completed
         if expected_dossier_hash is not None and dossier_hash != expected_dossier_hash:
-            raise RuntimeError("Opportunity-1 reassessment is bound to a different dossier")
+            raise RuntimeError(
+                "Opportunity-1 reassessment is bound to a different dossier"
+            )
         with self.connection() as conn:
             lifecycle_state = conn.execute(
-                "SELECT state FROM pipeline_jobs WHERE job_key=?", (job_key,),
+                "SELECT state FROM pipeline_jobs WHERE job_key=?",
+                (job_key,),
             ).fetchone()
             rows = conn.execute(
                 """SELECT r.opportunity0_score_bp,r.opportunity1_score_bp,r.decision,
@@ -719,20 +845,29 @@ class CareerDatabase:
                 """SELECT input_hash,output_hash,policy_hash
                    FROM lifecycle_transition_receipts
                    WHERE job_key=? AND from_state=? AND to_state=? AND policy_id=?""",
-                (job_key, PipelineState.EMPLOYER_RESEARCHED.value,
-                 PipelineState.OPPORTUNITY_1_ASSESSED.value,
-                 OPPORTUNITY1_POLICY_ID),
+                (
+                    job_key,
+                    PipelineState.EMPLOYER_RESEARCHED.value,
+                    PipelineState.OPPORTUNITY_1_ASSESSED.value,
+                    OPPORTUNITY1_POLICY_ID,
+                ),
             ).fetchall()
-        if (len(rows) == 0 and len(opportunity1_receipts) == 0
-                and lifecycle_state is not None
-                and str(lifecycle_state["state"])
-                == PipelineState.EMPLOYER_RESEARCHED.value):
+        if (
+            len(rows) == 0
+            and len(opportunity1_receipts) == 0
+            and lifecycle_state is not None
+            and str(lifecycle_state["state"]) == PipelineState.EMPLOYER_RESEARCHED.value
+        ):
             return None
         if len(rows) != 1 or len(opportunity1_receipts) != 1:
-            raise RuntimeError("Opportunity-1 reassessment or receipt is absent or duplicated")
+            raise RuntimeError(
+                "Opportunity-1 reassessment or receipt is absent or duplicated"
+            )
         row = rows[0]
         if str(row["state"]) == PipelineState.EMPLOYER_RESEARCHED.value:
-            raise RuntimeError("Opportunity-1 reassessment exists before lifecycle advancement")
+            raise RuntimeError(
+                "Opportunity-1 reassessment exists before lifecycle advancement"
+            )
         try:
             changes = json.loads(row["changes_json"])
         except (TypeError, json.JSONDecodeError) as exc:
@@ -741,12 +876,20 @@ class CareerDatabase:
             raise ValueError("Opportunity-1 changes must be a list")
         from dataclasses import asdict
         from .opportunity1 import reassess_opportunity1
+
         original = round(float(row["opportunity"]) * 10_000)
         signals = []
-        dossier_claim_ids = {str(claim.get("id")) for claim in dossier.get("claims", [])}
+        dossier_claim_ids = {
+            str(claim.get("id")) for claim in dossier.get("claims", [])
+        }
         for change in changes:
-            if not isinstance(change, dict) or str(change.get("claim_id")) not in dossier_claim_ids:
-                raise RuntimeError("Opportunity-1 change does not match the completed dossier")
+            if (
+                not isinstance(change, dict)
+                or str(change.get("claim_id")) not in dossier_claim_ids
+            ):
+                raise RuntimeError(
+                    "Opportunity-1 change does not match the completed dossier"
+                )
             signals.append(change)
         expected = asdict(reassess_opportunity1(original, signals))
         expected["changes"] = list(expected["changes"])
@@ -756,19 +899,27 @@ class CareerDatabase:
             "signals": changes,
         }
         opportunity1_receipt = opportunity1_receipts[0]
-        if (int(row["opportunity0_score_bp"]) != original
-                or int(row["opportunity1_score_bp"]) != expected["score_bp"]
-                or str(row["decision"]) != expected["decision"]
-                or changes != expected["changes"]
-                or str(row["policy_hash"]) != expected["policy_hash"]
-                or str(opportunity1_receipt["policy_hash"]) != expected["policy_hash"]
-                or str(opportunity1_receipt["input_hash"]) != canonical_hash(expected_inputs)
-                or str(opportunity1_receipt["output_hash"]) != canonical_hash(expected)):
+        if (
+            int(row["opportunity0_score_bp"]) != original
+            or int(row["opportunity1_score_bp"]) != expected["score_bp"]
+            or str(row["decision"]) != expected["decision"]
+            or changes != expected["changes"]
+            or str(row["policy_hash"]) != expected["policy_hash"]
+            or str(opportunity1_receipt["policy_hash"]) != expected["policy_hash"]
+            or str(opportunity1_receipt["input_hash"])
+            != canonical_hash(expected_inputs)
+            or str(opportunity1_receipt["output_hash"]) != canonical_hash(expected)
+        ):
             raise RuntimeError("Opportunity-1 reassessment is inconsistent")
         return {**expected, "dossier_hash": dossier_hash}
 
-    def apply_opportunity1(self, *, job_key: str, signals: list[dict[str, Any]],
-                           expected_dossier_hash: str | None = None) -> dict[str, Any]:
+    def apply_opportunity1(
+        self,
+        *,
+        job_key: str,
+        signals: list[dict[str, Any]],
+        expected_dossier_hash: str | None = None,
+    ) -> dict[str, Any]:
         """Reassess after a completed dossier; exact retries return the durable result."""
         from dataclasses import asdict
         from .opportunity1 import reassess_opportunity1
@@ -779,15 +930,19 @@ class CareerDatabase:
                 raise RuntimeError("Opportunity-1 requires completed employer research")
             dossier, dossier_hash = completed
             row = conn.execute(
-                "SELECT opportunity,state FROM pipeline_jobs WHERE job_key=?", (job_key,),
+                "SELECT opportunity,state FROM pipeline_jobs WHERE job_key=?",
+                (job_key,),
             ).fetchone()
             if row is None:
                 raise RuntimeError("Opportunity-1 requires completed employer research")
-            if (expected_dossier_hash is not None
-                    and dossier_hash != expected_dossier_hash):
+            if (
+                expected_dossier_hash is not None
+                and dossier_hash != expected_dossier_hash
+            ):
                 raise RuntimeError("completed research changed before Opportunity-1")
             dossier_claim_ids = {
-                str(claim.get("id")) for claim in dossier.get("claims", [])
+                str(claim.get("id"))
+                for claim in dossier.get("claims", [])
                 if isinstance(claim, dict) and claim.get("id") is not None
             }
             if any(
@@ -798,13 +953,18 @@ class CareerDatabase:
                 raise ValueError(
                     "Opportunity-1 signals must reference the completed dossier"
                 )
-            result = reassess_opportunity1(round(float(row["opportunity"]) * 10_000), signals)
+            result = reassess_opportunity1(
+                round(float(row["opportunity"]) * 10_000), signals
+            )
             output = asdict(result)
             ordered_signals = list(output["changes"])
             output["changes"] = ordered_signals
             key = f"opportunity-1:{job_key}:{dossier_hash}:{result.policy_hash}"
-            target = (PipelineState.FIT_ASSESSED if result.decision == "pass"
-                      else PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH)
+            target = (
+                PipelineState.FIT_ASSESSED
+                if result.decision == "pass"
+                else PipelineState.OPPORTUNITY_REJECTED_AFTER_RESEARCH
+            )
             current_state = PipelineState(row["state"])
             pending, target_closure = [target], set()
             while pending:
@@ -821,22 +981,35 @@ class CareerDatabase:
             ).fetchone()
             fresh = current_state is PipelineState.EMPLOYER_RESEARCHED
             if (fresh and existing is not None) or (
-                    not fresh and (current_state not in target_closure or existing is None)):
-                raise RuntimeError("Opportunity-1 durable state is incomplete or inconsistent")
+                not fresh and (current_state not in target_closure or existing is None)
+            ):
+                raise RuntimeError(
+                    "Opportunity-1 durable state is incomplete or inconsistent"
+                )
             self.lifecycle.commit_in_transaction(
-                conn, job_key=job_key, to_state=PipelineState.OPPORTUNITY_1_ASSESSED,
+                conn,
+                job_key=job_key,
+                to_state=PipelineState.OPPORTUNITY_1_ASSESSED,
                 policy=PolicyIdentity(
                     OPPORTUNITY1_POLICY_ID,
                     OPPORTUNITY1_POLICY_VERSION,
                     result.policy_hash,
                 ),
-                inputs={"opportunity0_score_bp": result.opportunity0_score_bp,
-                        "dossier_hash": dossier_hash, "signals": ordered_signals},
-                outputs=output, idempotency_key=key,
+                inputs={
+                    "opportunity0_score_bp": result.opportunity0_score_bp,
+                    "dossier_hash": dossier_hash,
+                    "signals": ordered_signals,
+                },
+                outputs=output,
+                idempotency_key=key,
             )
             expected_reassessment = (
-                job_key, result.opportunity0_score_bp, result.score_bp, result.decision,
-                json.dumps(ordered_signals, sort_keys=True), result.policy_hash,
+                job_key,
+                result.opportunity0_score_bp,
+                result.score_bp,
+                result.decision,
+                json.dumps(ordered_signals, sort_keys=True),
+                result.policy_hash,
             )
             if fresh:
                 conn.execute(
@@ -852,13 +1025,16 @@ class CareerDatabase:
                         "Opportunity-1 retry differs from the durable reassessment"
                     )
             self.lifecycle.commit_in_transaction(
-                conn, job_key=job_key, to_state=target,
+                conn,
+                job_key=job_key,
+                to_state=target,
                 policy=PolicyIdentity(
                     OPPORTUNITY1_ROUTING_POLICY_ID,
                     OPPORTUNITY1_POLICY_VERSION,
                     result.policy_hash,
                 ),
-                inputs=output, outputs={"decision": result.decision},
+                inputs=output,
+                outputs={"decision": result.decision},
                 idempotency_key=key + ":route",
             )
             return output
@@ -871,8 +1047,10 @@ class CareerDatabase:
         provider = value.get("provider")
         model_id = value.get("model_id", value.get("id"))
         version = value.get("version")
-        if all(isinstance(item, str) and item.strip()
-               for item in (provider, model_id, version)):
+        if all(
+            isinstance(item, str) and item.strip()
+            for item in (provider, model_id, version)
+        ):
             return ModelIdentity(provider, model_id, version)
         return None
 
@@ -882,11 +1060,17 @@ class CareerDatabase:
                 "SELECT state,COUNT(*) AS n FROM pipeline_jobs GROUP BY state"
             ).fetchall()
             result = {str(row["state"]): int(row["n"]) for row in rows}
-            result["total"] = int(conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0])
-            result["research_queued"] = int(conn.execute(
-                "SELECT COUNT(*) FROM employer_research_queue WHERE status='queued'"
-            ).fetchone()[0])
-            result["research_leased"] = int(conn.execute(
-                "SELECT COUNT(*) FROM employer_research_queue WHERE status='leased'"
-            ).fetchone()[0])
+            result["total"] = int(
+                conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0]
+            )
+            result["research_queued"] = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM employer_research_queue WHERE status='queued'"
+                ).fetchone()[0]
+            )
+            result["research_leased"] = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM employer_research_queue WHERE status='leased'"
+                ).fetchone()[0]
+            )
         return result

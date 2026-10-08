@@ -9,6 +9,7 @@ from cv_generation.constraints import (
     ARTIOM_GUTU_CV_POLICY,
     CVConstraintError,
     validate_generated_cv,
+    validate_pre_editorial_source,
 )
 
 
@@ -87,6 +88,163 @@ def _base_text() -> str:
         "Education\nFirst-Class BSc (Hons) Computer Science, Birmingham Newman "
         f"University, July 2026.\nDissertation: {TITLE}.\n"
     )
+
+
+def _pre_editorial_source(text: str = "This sample device has limited endurance."):
+    cv_text = f"Core Capabilities\n{text}\n"
+    return {
+        "source_id": SOURCE_ID,
+        "cv_text": cv_text,
+        "cv_sha256": hashlib.sha256(cv_text.encode("utf-8")).hexdigest(),
+        "sections": {"Core Capabilities": (text,)},
+    }
+
+
+def test_pre_editorial_source_receipt_preserves_limits_without_style_claims() -> None:
+    receipt = validate_pre_editorial_source(**_pre_editorial_source())
+
+    assert receipt["schema_version"] == "pre-editorial-source-envelope.v1"
+    assert receipt["validation_scope"] == "source_integrity_only"
+    assert receipt["passed"] is True
+    assert receipt["release_authority"] is False
+    assert receipt["final_style_validated"] is False
+    assert "limited endurance" not in receipt
+    assert len(receipt["sections_sha256"]) == 64
+    assert len(receipt["policy_sha256"]) == 64
+    assert len(receipt["receipt_sha256"]) == 64
+
+
+def test_pre_editorial_receipt_is_deterministic_and_binds_section_order() -> None:
+    values = _pre_editorial_source("Café evidence remains qualified.")
+    first = validate_pre_editorial_source(**values)
+    repeated = validate_pre_editorial_source(**values)
+    reordered = validate_pre_editorial_source(
+        source_id=SOURCE_ID,
+        cv_text="First line.\nSecond line.\n",
+        cv_sha256=hashlib.sha256(b"First line.\nSecond line.\n").hexdigest(),
+        sections={"Second": ("Second line.",), "First": ("First line.",)},
+    )
+    ordered = validate_pre_editorial_source(
+        source_id=SOURCE_ID,
+        cv_text="First line.\nSecond line.\n",
+        cv_sha256=hashlib.sha256(b"First line.\nSecond line.\n").hexdigest(),
+        sections={"First": ("First line.",), "Second": ("Second line.",)},
+    )
+
+    assert first == repeated
+    assert reordered["sections_sha256"] != ordered["sections_sha256"]
+    assert reordered["receipt_sha256"] != ordered["receipt_sha256"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"source_id": "A" * 64},
+        {"cv_sha256": "A" * 64},
+        {"cv_sha256": "0" * 64},
+        {"cv_text": ""},
+        {"cv_text": "not utf-8: \ud800"},
+        {"cv_text": "contains\x00nul"},
+    ),
+)
+def test_pre_editorial_source_rejects_invalid_or_mismatched_source(changes) -> None:
+    values = _pre_editorial_source()
+    values.update(changes)
+    with pytest.raises(ValueError, match="^pre-editorial source envelope"):
+        validate_pre_editorial_source(**values)
+
+
+@pytest.mark.parametrize(
+    "sections",
+    (
+        {},
+        {" Core Capabilities": ("Line.",)},
+        {"Core\nCapabilities": ("Line.",)},
+        {"Core Capabilities": []},
+        {"Core Capabilities": ()},
+        {"Core Capabilities": ("Absent line.",)},
+        {"Core Capabilities": ("Line.\nOther.",)},
+    ),
+)
+def test_pre_editorial_source_rejects_malformed_sections(sections) -> None:
+    cv_text = "Core Capabilities\nLine.\n"
+    with pytest.raises(ValueError, match="^pre-editorial source envelope"):
+        validate_pre_editorial_source(
+            source_id=SOURCE_ID,
+            cv_text=cv_text,
+            cv_sha256=hashlib.sha256(cv_text.encode()).hexdigest(),
+            sections=sections,
+        )
+
+
+def test_pre_editorial_source_rejects_surrogates_and_accepts_unicode() -> None:
+    valid = _pre_editorial_source("Café experience is bounded.")
+    assert validate_pre_editorial_source(**valid)["passed"] is True
+
+    values = _pre_editorial_source()
+    values["sections"] = {"Bad\ud800": ("This sample device has limited endurance.",)}
+    with pytest.raises(ValueError, match="^pre-editorial source envelope input is invalid$"):
+        validate_pre_editorial_source(**values)
+
+
+def test_pre_editorial_source_does_not_mutate_sections() -> None:
+    values = _pre_editorial_source()
+    original = {key: tuple(lines) for key, lines in values["sections"].items()}
+
+    validate_pre_editorial_source(**values)
+
+    assert values["sections"] == original
+
+
+def test_pre_editorial_source_rejects_string_container_and_line_subclasses() -> None:
+    class TextSubclass(str):
+        pass
+
+    class DictSubclass(dict):
+        pass
+
+    class TupleSubclass(tuple):
+        pass
+
+    source = _pre_editorial_source()
+    cases = (
+        {**source, "source_id": TextSubclass(SOURCE_ID)},
+        {**source, "cv_text": TextSubclass(source["cv_text"])},
+        {**source, "sections": DictSubclass(source["sections"])},
+        {
+            **source,
+            "sections": {
+                "Core Capabilities": TupleSubclass(source["sections"]["Core Capabilities"])
+            },
+        },
+        {
+            **source,
+            "sections": {
+                TextSubclass("Core Capabilities"): source["sections"]["Core Capabilities"]
+            },
+        },
+        {
+            **source,
+            "sections": {
+                "Core Capabilities": (
+                    TextSubclass(source["sections"]["Core Capabilities"][0]),
+                )
+            },
+        },
+    )
+
+    for values in cases:
+        with pytest.raises(ValueError, match="^pre-editorial source envelope"):
+            validate_pre_editorial_source(**values)
+
+
+def test_pre_editorial_integrity_receipt_does_not_replace_final_cv_gate() -> None:
+    text = "AI-generated"
+    integrity = validate_pre_editorial_source(**_pre_editorial_source(text))
+
+    assert integrity["passed"] is True
+    with pytest.raises(CVConstraintError, match="rejection signals"):
+        _valid(cv_text=_base_text() + "\nAI-generated\n")
 
 
 def test_forbids_day_level_graduation_dates() -> None:

@@ -7,13 +7,13 @@ that a caller must never supply.
 
 from __future__ import annotations
 
-import ctypes
-import errno
 import hashlib
 import json
 import os
 import secrets
+import sqlite3
 import stat
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,12 +23,25 @@ from market_aligner.applications.production_handoff import (
     PRODUCTION_HANDOFF_TRUST_ROOT_ID,
     _git_commit,
 )
+from market_aligner.state.atomic_publish import publish_noreplace
 
 from .current_time import (
     AuthenticatedCurrentTimeWitness,
     installed_production_current_time_witness,
 )
-from .handoff_admission import HandoffAdmissionStore, ProtectedLocalOutbox
+from .handoff_admission import (
+    ADMISSION_KIND_CURRENT_RUNTIME,
+    CURRENT_RUNTIME_AUTHORITY_SCOPE,
+    CURRENT_RUNTIME_ENVIRONMENT,
+    CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+    CURRENT_RUNTIME_TRUST_ROOT_ID,
+    CURRENT_RUNTIME_TRUST_MODE,
+    HandoffAdmissionError,
+    HandoffAdmissionStore,
+    ProtectedLocalOutbox,
+    _parse_current_runtime_handoff,
+)
+from .migrations import verify_current_runtime_admission_schema
 from .market_aligner_handoff import parse_handoff
 from .production_handoff_runner import (
     PRODUCTION_MARKET_DATA_HOME,
@@ -36,7 +49,9 @@ from .production_handoff_runner import (
     PRODUCTION_MARKET_OUTBOX_ROOT,
     PRODUCTION_MARKET_REPOSITORY_ROOT,
     _validate_deployment_roots,
+    installed_current_runtime_handoff_deployment,
     installed_production_handoff_deployment,
+    select_runtime_deployment,
 )
 
 PRODUCTION_ADMISSION_ROOT = (
@@ -45,7 +60,9 @@ PRODUCTION_ADMISSION_ROOT = (
 PRODUCTION_ADMISSION_DATABASE = PRODUCTION_ADMISSION_ROOT / "admissions.sqlite3"
 PRODUCTION_ADMISSION_RECEIPT_ROOT = PRODUCTION_ADMISSION_ROOT / "receipts"
 EXECUTION_SCHEMA = "market-aligner.production-handoff-execution.v2"
+CURRENT_RUNTIME_EXECUTION_SCHEMA = "market-aligner.current-runtime-handoff-execution.v1"
 OPERATION_SCHEMA = "jaa.production-handoff-admission-operation.v1"
+CURRENT_RUNTIME_OPERATION_SCHEMA = "jaa.current-runtime-handoff-admission-operation.v1"
 _MAX_RECEIPT_BYTES = 65536
 _SHA_FIELDS = {
     "employer_dossier_sha256",
@@ -73,10 +90,29 @@ _EXECUTION_KEYS = {
     "submission_authority",
     "trust_root_id",
 }
+_CURRENT_RUNTIME_EXECUTION_KEYS = _EXECUTION_KEYS | {
+    "freshness_provenance",
+    "release_authority",
+}
 
 
 class ProductionHandoffAdmissionError(ValueError):
     """The supplied receipt or installed production authority differs."""
+
+
+def _admission_deployment_for_handoff(handoff) -> _ProductionAdmissionDeployment:
+    return _ProductionAdmissionDeployment(
+        data_home=handoff.data_home,
+        repository_root=handoff.repository_root,
+        outbox_root=handoff.output_root,
+        execution_receipt_root=handoff.output_root / "receipts",
+        admission_root=handoff.data_home / "state" / "jaa-production-admissions",
+        environment=getattr(handoff, "environment", "production"),
+        trust_root_id=getattr(
+            handoff, "trust_root_id", PRODUCTION_HANDOFF_TRUST_ROOT_ID
+        ),
+        freshness_provenance=getattr(handoff, "freshness_provenance", None),
+    )
 
 
 @dataclass(frozen=True)
@@ -86,6 +122,9 @@ class _ProductionAdmissionDeployment:
     outbox_root: Path
     execution_receipt_root: Path
     admission_root: Path
+    environment: str = "production"
+    trust_root_id: str = PRODUCTION_HANDOFF_TRUST_ROOT_ID
+    freshness_provenance: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,9 +140,11 @@ class ProductionHandoffAdmissionReceipt:
     source_record_sha256: str
     producer_commit_sha: str
     environment: str = "production"
+    freshness_provenance: str | None = None
+    trust_root_id: str = PRODUCTION_HANDOFF_TRUST_ROOT_ID
 
     def document(self) -> dict[str, object]:
-        return {
+        document = {
             "application_id": self.application_id,
             "environment": self.environment,
             "execution_receipt_file_sha256": self.execution_receipt_file_sha256,
@@ -114,11 +155,25 @@ class ProductionHandoffAdmissionReceipt:
             "operation_receipt_sha256": self.operation_receipt_sha256,
             "producer_commit_sha": self.producer_commit_sha,
             "release_token_issued": False,
-            "schema_version": "jaa.production-handoff-admission-receipt.v1",
+            "schema_version": (
+                CURRENT_RUNTIME_OPERATION_SCHEMA
+                if self.environment == "current_runtime"
+                else OPERATION_SCHEMA
+            ),
             "source_record_sha256": self.source_record_sha256,
             "submission_authority": False,
             "verification_receipt_sha256": self.verification_receipt_sha256,
         }
+        if self.environment == "current_runtime":
+            document.update(
+                {
+                    "authority_scope": "current_runtime_non_release",
+                    "freshness_provenance": self.freshness_provenance,
+                    "release_authority": False,
+                    "trust_root_id": self.trust_root_id,
+                }
+            )
+        return document
 
 
 def _open_absolute_directory_chain(
@@ -334,7 +389,28 @@ def _open_private_child(parent_descriptor: int, name: str) -> int:
 
 
 def _read_execution_receipt(
-    path: Path, root: Path, *, root_descriptor: int | None = None
+    path: Path,
+    root: Path,
+    *,
+    root_descriptor: int | None = None,
+    current_runtime: bool = False,
+) -> tuple[dict[str, object], bytes]:
+    document, raw = _read_execution_receipt_document(
+        path, root, root_descriptor=root_descriptor
+    )
+    expected_keys = (
+        _CURRENT_RUNTIME_EXECUTION_KEYS if current_runtime else _EXECUTION_KEYS
+    )
+    if set(document) != expected_keys:
+        raise ProductionHandoffAdmissionError("execution receipt schema differs")
+    return document, raw
+
+
+def _read_execution_receipt_document(
+    path: Path,
+    root: Path,
+    *,
+    root_descriptor: int | None = None,
 ) -> tuple[dict[str, object], bytes]:
     try:
         relative = path.relative_to(root)
@@ -385,18 +461,31 @@ def _read_execution_receipt(
         raise ProductionHandoffAdmissionError(
             "execution receipt is invalid JSON"
         ) from exc
-    if type(document) is not dict or set(document) != _EXECUTION_KEYS:
-        raise ProductionHandoffAdmissionError("execution receipt schema differs")
-    if canonical_json_bytes(document) != raw:
+    if type(document) is not dict or canonical_json_bytes(document) != raw:
         raise ProductionHandoffAdmissionError("execution receipt is not canonical JSON")
     return document, raw
 
 
-def _validate_execution_receipt(document: dict[str, object], path: Path) -> None:
+def _validate_execution_receipt(
+    document: dict[str, object], path: Path, *, current_runtime: bool = False
+) -> None:
+    if current_runtime:
+        authority_invalid = (
+            document["schema_version"] != CURRENT_RUNTIME_EXECUTION_SCHEMA
+            or document["environment"] != "current_runtime"
+            or document["trust_root_id"]
+            != "market-aligner-current-runtime-non-release-v1"
+            or document["release_authority"] is not False
+            or document["freshness_provenance"] != "local_system_utc"
+        )
+    else:
+        authority_invalid = (
+            document["schema_version"] != EXECUTION_SCHEMA
+            or document["environment"] != "production"
+            or document["trust_root_id"] != PRODUCTION_HANDOFF_TRUST_ROOT_ID
+        )
     if (
-        document["schema_version"] != EXECUTION_SCHEMA
-        or document["environment"] != "production"
-        or document["trust_root_id"] != PRODUCTION_HANDOFF_TRUST_ROOT_ID
+        authority_invalid
         or document["release_token_issued"] is not False
         or document["submission_authority"] is not False
     ):
@@ -432,6 +521,199 @@ def _validate_execution_receipt(document: dict[str, object], path: Path) -> None
         raise ProductionHandoffAdmissionError(
             "execution receipt bundle identity differs"
         )
+
+
+def _read_current_runtime_admission_index(
+    deployment: _ProductionAdmissionDeployment,
+    *,
+    profile_id: str,
+    profile_version: str,
+) -> tuple[sqlite3.Connection, dict[str, sqlite3.Row]]:
+    expected_root = deployment.data_home / "state" / "jaa-production-admissions"
+    database = expected_root / "admissions.sqlite3"
+    if deployment.admission_root != expected_root:
+        raise ProductionHandoffAdmissionError("current runtime admission root differs")
+    _reject_symlink_ancestry(database)
+    try:
+        before = database.lstat()
+    except OSError as exc:
+        raise ProductionHandoffAdmissionError(
+            "current runtime admission store is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.geteuid()
+        or before.st_nlink != 1
+        or stat.S_IMODE(before.st_mode) != 0o600
+    ):
+        raise ProductionHandoffAdmissionError(
+            "current runtime admission store identity differs"
+        )
+    try:
+        connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        verify_current_runtime_admission_schema(connection)
+        rows = connection.execute(
+            "SELECT * FROM current_runtime_admissions "
+            "WHERE profile_id=? AND profile_version=? ORDER BY application_id",
+            (profile_id, profile_version),
+        ).fetchall()
+        after = database.lstat()
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        try:
+            connection.close()
+        except UnboundLocalError:
+            pass
+        raise ProductionHandoffAdmissionError(
+            "current runtime admission index is invalid"
+        ) from exc
+    if (
+        (before.st_dev, before.st_ino, before.st_uid, before.st_mode, before.st_nlink)
+        != (after.st_dev, after.st_ino, after.st_uid, after.st_mode, after.st_nlink)
+    ):
+        connection.close()
+        raise ProductionHandoffAdmissionError(
+            "current runtime admission store changed while reading"
+        )
+    by_application: dict[str, sqlite3.Row] = {}
+    identity_roots: dict[str, str] = {}
+    for row in rows:
+        application_id = row["application_id"]
+        root_sha256 = row["handoff_root_sha256"]
+        producer_commit = row["producer_commit_sha"]
+        original_bytes = row["original_bytes"]
+        if (
+            row["admission_kind"] != ADMISSION_KIND_CURRENT_RUNTIME
+            or row["environment"] != CURRENT_RUNTIME_ENVIRONMENT
+            or row["authority_scope"] != CURRENT_RUNTIME_AUTHORITY_SCOPE
+            or row["emission_profile"] != "current_runtime_non_release_v1"
+            or row["trust_mode"] != CURRENT_RUNTIME_TRUST_MODE
+            or row["trust_root_id"] != CURRENT_RUNTIME_TRUST_ROOT_ID
+            or row["producer_product"] != "market-aligner"
+            or row["freshness_provenance"] != CURRENT_RUNTIME_FRESHNESS_PROVENANCE
+            or type(row["sealed"]) is not int
+            or row["sealed"] != 1
+            or type(application_id) is not str
+            or len(application_id) != 68
+            or not application_id.startswith("app_")
+            or type(root_sha256) is not str
+            or len(root_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in root_sha256)
+            or type(producer_commit) is not str
+            or len(producer_commit) != 40
+            or any(character not in "0123456789abcdef" for character in producer_commit)
+            or type(original_bytes) is not bytes
+            or hashlib.sha256(original_bytes).hexdigest() != root_sha256
+        ):
+            connection.close()
+            raise ProductionHandoffAdmissionError(
+                "current runtime admission index binding differs"
+            )
+        try:
+            handoff = _parse_current_runtime_handoff(original_bytes)
+        except ValueError as exc:
+            connection.close()
+            raise ProductionHandoffAdmissionError(
+                "current runtime admission index handoff differs"
+            ) from exc
+        payload = handoff.payload
+        identity = handoff.logical_identity_sha256
+        identity_document = canonical_json_bytes(
+            handoff.logical_identity_document
+        ).decode("utf-8")
+        if (
+            handoff.application_id != application_id
+            or handoff.root_sha256 != root_sha256
+            or payload["profile_id"] != profile_id
+            or payload["profile_version"] != profile_version
+            or payload["producer"]["commit_sha"] != producer_commit
+            or row["profile_id"] != profile_id
+            or row["profile_version"] != profile_version
+            or row["job_key"] != payload["job_key"]
+            or row["logical_identity_json"] != identity_document
+            or row["logical_identity_sha256"] != identity
+        ):
+            connection.close()
+            raise ProductionHandoffAdmissionError(
+                "current runtime admission index handoff differs"
+            )
+        if (
+            application_id in by_application
+            or (identity in identity_roots and identity_roots[identity] != root_sha256)
+        ):
+            connection.close()
+            raise ProductionHandoffAdmissionError(
+                "current runtime admission roots are ambiguous"
+            )
+        identity_roots[identity] = root_sha256
+        by_application[application_id] = row
+    return connection, by_application
+
+
+def _producer_commit_is_ancestor(
+    repository_descriptor: int, producer_commit: str, current_commit: str
+) -> bool:
+    for value in (producer_commit, current_commit):
+        if (
+            type(value) is not str
+            or len(value) != 40
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ProductionHandoffAdmissionError("producer commit identity is invalid")
+    if producer_commit == current_commit:
+        return True
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", producer_commit, current_commit],
+            cwd=f"/proc/self/fd/{repository_descriptor}",
+            check=False,
+            capture_output=True,
+            pass_fds=(repository_descriptor,),
+        )
+    except OSError as exc:
+        raise ProductionHandoffAdmissionError(
+            "producer ancestry could not be verified"
+        ) from exc
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise ProductionHandoffAdmissionError(
+        "producer ancestry could not be verified"
+    )
+
+
+def _verify_current_runtime_admission_row(
+    row: sqlite3.Row, *, adapter: ProtectedLocalOutbox
+) -> None:
+    store = HandoffAdmissionStore.__new__(HandoffAdmissionStore)
+    store.context_authenticator = adapter
+    try:
+        store._verify_stored_current_runtime(row)
+    except HandoffAdmissionError as exc:
+        raise ProductionHandoffAdmissionError(
+            "stored current runtime admission differs"
+        ) from exc
+
+
+def _admitted_current_runtime_receipt_row(
+    document: dict[str, object],
+    admitted_rows: dict[str, sqlite3.Row],
+) -> sqlite3.Row | None:
+    if document.get("schema_version") != CURRENT_RUNTIME_EXECUTION_SCHEMA:
+        return None
+    application_id = document.get("application_id")
+    root_sha256 = document.get("handoff_root_sha256")
+    if type(application_id) is not str or type(root_sha256) is not str:
+        return None
+    admitted = admitted_rows.get(application_id)
+    if admitted is None or admitted["handoff_root_sha256"] != root_sha256:
+        return None
+    if document.get("producer_commit_sha") != admitted["producer_commit_sha"]:
+        raise ProductionHandoffAdmissionError(
+            "published producer differs from stored admission"
+        )
+    return admitted
 
 
 def _promotion_receipt_semantic_identity(
@@ -536,31 +818,10 @@ def _create_or_exact(parent_descriptor: int, name: str, value: bytes) -> None:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        libc = ctypes.CDLL(None, use_errno=True)
-        renameat2 = libc.renameat2
-        renameat2.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        renameat2.restype = ctypes.c_int
-        result = renameat2(
-            parent_descriptor,
-            os.fsencode(temporary_name),
-            parent_descriptor,
-            os.fsencode(name),
-            1,
-        )
-        if result != 0:
-            error = ctypes.get_errno()
-            if error != errno.EEXIST:
-                raise OSError(error, os.strerror(error))
-            if not existing_exact():
-                raise ProductionHandoffAdmissionError(
-                    "operation receipt publication raced"
-                )
+        if not publish_noreplace(parent_descriptor, temporary_name, name) and not existing_exact():
+            raise ProductionHandoffAdmissionError(
+                "operation receipt publication raced"
+            )
         os.fsync(parent_descriptor)
     finally:
         try:
@@ -595,25 +856,19 @@ def _prepare_database(parent_descriptor: int) -> None:
         os.close(descriptor)
 
 
-def _run_production_handoff_admission_pinned(
+def _read_published_handoff_pinned(
     *,
     execution_receipt_path: str | Path,
     deployment: _ProductionAdmissionDeployment,
-    witness: AuthenticatedCurrentTimeWitness,
     paths: _PinnedProductionPaths,
     commit_resolver: Callable[[Path, int], str],
-) -> ProductionHandoffAdmissionReceipt:
-    if (
-        deployment.execution_receipt_root != deployment.outbox_root / "receipts"
-        or deployment.admission_root
-        != deployment.data_home / "state" / "jaa-production-admissions"
-    ):
-        raise ProductionHandoffAdmissionError("production deployment roots differ")
-    if (
-        type(witness) is not AuthenticatedCurrentTimeWitness
-        or getattr(witness, "environment", None) != "production"
-    ):
-        raise ProductionHandoffAdmissionError("production current-time witness differs")
+    allow_admitted_current_ancestor: bool = False,
+) -> tuple[dict[str, object], bytes, str, str, ProtectedLocalOutbox, object]:
+    """Validate published bytes under live path pins without creating admission state.
+
+    The caller owns the pins and adapter lifetime. This result is publication
+    evidence only, never release or submission authority.
+    """
     for protected_path in (
         deployment.data_home,
         deployment.outbox_root,
@@ -621,17 +876,33 @@ def _run_production_handoff_admission_pinned(
     ):
         _reject_symlink_ancestry(protected_path)
     receipt_path = Path(execution_receipt_path)
+    current_runtime = deployment.environment == CURRENT_RUNTIME_ENVIRONMENT
+    if deployment.environment not in {"production", CURRENT_RUNTIME_ENVIRONMENT}:
+        raise ProductionHandoffAdmissionError("runtime environment is unsupported")
     document, receipt_bytes = _read_execution_receipt(
         receipt_path,
         deployment.execution_receipt_root,
         root_descriptor=paths.receipts_descriptor,
+        current_runtime=current_runtime,
     )
-    _validate_execution_receipt(document, receipt_path)
+    _validate_execution_receipt(
+        document, receipt_path, current_runtime=current_runtime
+    )
     current_commit = commit_resolver(
         deployment.repository_root, paths.repository_descriptor
     )
     paths.verify_references()
-    if document["producer_commit_sha"] != current_commit:
+    producer_commit = str(document["producer_commit_sha"])
+    producer_matches = producer_commit == current_commit
+    if (
+        not producer_matches
+        and current_runtime
+        and allow_admitted_current_ancestor
+    ):
+        producer_matches = _producer_commit_is_ancestor(
+            paths.repository_descriptor, producer_commit, current_commit
+        )
+    if not producer_matches:
         raise ProductionHandoffAdmissionError(
             "producer commit differs from current clean HEAD"
         )
@@ -642,11 +913,15 @@ def _run_production_handoff_admission_pinned(
         bundle_path,
         repository_root=deployment.repository_root,
         expected_source_record_sha256=source_record,
-        allowed_producer_commits=frozenset({current_commit}),
+        allowed_producer_commits=frozenset({producer_commit}),
         bundle_descriptor=bundle_descriptor,
     )
     paths.register_adapter(adapter)
-    handoff = parse_handoff(adapter.handoff_bytes)
+    handoff = (
+        _parse_current_runtime_handoff(adapter.handoff_bytes)
+        if current_runtime
+        else parse_handoff(adapter.handoff_bytes)
+    )
     try:
         context = json.loads(adapter.context_bytes)
         dossier_entry = adapter._entries["employer_dossier"]
@@ -675,13 +950,92 @@ def _run_production_handoff_admission_pinned(
         or handoff.payload.get("job_key") != document["handoff_job_key"]
         or context.get("environment") != document["environment"]
         or context.get("source_record_sha256") != source_record
-        or context.get("producer_commit_sha") != current_commit
+        or context.get("producer_commit_sha") != producer_commit
         or context.get("trust_root_id") != document["trust_root_id"]
         or context.get("handoff_root_sha256") != document["handoff_root_sha256"]
     ):
         raise ProductionHandoffAdmissionError(
             "execution receipt and authenticated bundle differ"
         )
+    paths.verify_references()
+    return document, receipt_bytes, current_commit, source_record, adapter, handoff
+
+
+def _read_admissible_published_handoff_pinned(
+    *,
+    execution_receipt_path: str | Path,
+    deployment: _ProductionAdmissionDeployment,
+    paths: _PinnedProductionPaths,
+    commit_resolver: Callable[[Path, int], str],
+) -> tuple[dict[str, object], bytes, str, str, ProtectedLocalOutbox, object]:
+    allow_admitted_current_ancestor = (
+        deployment.environment == CURRENT_RUNTIME_ENVIRONMENT
+    )
+    pinned = _read_published_handoff_pinned(
+        execution_receipt_path=execution_receipt_path,
+        deployment=deployment,
+        paths=paths,
+        commit_resolver=commit_resolver,
+        allow_admitted_current_ancestor=allow_admitted_current_ancestor,
+    )
+    document, _, current_commit, _, adapter, handoff = pinned
+    producer_commit_sha = str(document["producer_commit_sha"])
+    if producer_commit_sha != current_commit:
+        connection, admitted_rows = _read_current_runtime_admission_index(
+            deployment,
+            profile_id=handoff.payload["profile_id"],
+            profile_version=handoff.payload["profile_version"],
+        )
+        try:
+            row = _admitted_current_runtime_receipt_row(document, admitted_rows)
+            if row is None:
+                raise ProductionHandoffAdmissionError(
+                    "current-runtime ancestor replay requires a matching stored admission"
+                )
+            _verify_current_runtime_admission_row(row, adapter=adapter)
+        finally:
+            connection.close()
+        paths.verify_references()
+    return pinned
+
+
+def _run_production_handoff_admission_pinned(
+    *,
+    execution_receipt_path: str | Path,
+    deployment: _ProductionAdmissionDeployment,
+    witness: AuthenticatedCurrentTimeWitness | None,
+    paths: _PinnedProductionPaths,
+    commit_resolver: Callable[[Path, int], str],
+) -> ProductionHandoffAdmissionReceipt:
+    if (
+        deployment.execution_receipt_root != deployment.outbox_root / "receipts"
+        or deployment.admission_root
+        != deployment.data_home / "state" / "jaa-production-admissions"
+    ):
+        raise ProductionHandoffAdmissionError("production deployment roots differ")
+    current_runtime = deployment.environment == CURRENT_RUNTIME_ENVIRONMENT
+    if current_runtime:
+        if (
+            witness is not None
+            or deployment.trust_root_id != CURRENT_RUNTIME_TRUST_ROOT_ID
+            or deployment.freshness_provenance != CURRENT_RUNTIME_FRESHNESS_PROVENANCE
+        ):
+            raise ProductionHandoffAdmissionError("current runtime provenance differs")
+    elif (
+        deployment.environment != "production"
+        or type(witness) is not AuthenticatedCurrentTimeWitness
+        or getattr(witness, "environment", None) != "production"
+    ):
+        raise ProductionHandoffAdmissionError("production current-time witness differs")
+    document, receipt_bytes, _current_commit, source_record, adapter, _handoff = (
+        _read_admissible_published_handoff_pinned(
+            execution_receipt_path=execution_receipt_path,
+            deployment=deployment,
+            paths=paths,
+            commit_resolver=commit_resolver,
+        )
+    )
+    producer_commit_sha = str(document["producer_commit_sha"])
     data_descriptor = os.dup(paths.data_descriptor)
     try:
         state_descriptor = _open_private_child(data_descriptor, "state")
@@ -706,13 +1060,31 @@ def _run_production_handoff_admission_pinned(
                     )
                     _prepare_database(admission_descriptor)
                     paths.verify_references()
-                    admission = store.admit_authenticated(
-                        adapter.handoff_bytes, adapter.context_bytes
+                    admission = (
+                        store.admit_current_runtime_nonrelease(
+                            adapter.handoff_bytes, adapter.context_bytes
+                        )
+                        if current_runtime
+                        else store.admit_authenticated(
+                            adapter.handoff_bytes, adapter.context_bytes
+                        )
                     )
                     _prepare_database(admission_descriptor)
                     if (
-                        admission.environment != "production"
-                        or admission.authority_scope != "production"
+                        admission.environment
+                        != (CURRENT_RUNTIME_ENVIRONMENT if current_runtime else "production")
+                        or admission.authority_scope
+                        != (
+                            CURRENT_RUNTIME_AUTHORITY_SCOPE
+                            if current_runtime
+                            else "production"
+                        )
+                        or admission.admission_kind
+                        != (
+                            ADMISSION_KIND_CURRENT_RUNTIME
+                            if current_runtime
+                            else "market_aligner_handoff_v1"
+                        )
                         or admission.application_id != document["application_id"]
                         or admission.job_key != document["handoff_job_key"]
                         or admission.handoff_root_sha256
@@ -724,7 +1096,11 @@ def _run_production_handoff_admission_pinned(
                     operation = "created" if admission.created else "replay"
                     basis = {
                         "application_id": admission.application_id,
-                        "environment": "production",
+                        "environment": (
+                            CURRENT_RUNTIME_ENVIRONMENT
+                            if current_runtime
+                            else "production"
+                        ),
                         "execution_receipt_file_sha256": hashlib.sha256(
                             receipt_bytes
                         ).hexdigest(),
@@ -733,13 +1109,26 @@ def _run_production_handoff_admission_pinned(
                         ],
                         "handoff_root_sha256": admission.handoff_root_sha256,
                         "operation": operation,
-                        "producer_commit_sha": current_commit,
+                        "producer_commit_sha": producer_commit_sha,
                         "release_token_issued": False,
-                        "schema_version": OPERATION_SCHEMA,
+                        "schema_version": (
+                            CURRENT_RUNTIME_OPERATION_SCHEMA
+                            if current_runtime
+                            else OPERATION_SCHEMA
+                        ),
                         "source_record_sha256": source_record,
                         "submission_authority": False,
                         "verification_receipt_sha256": admission.verification_receipt_sha256,
                     }
+                    if current_runtime:
+                        basis.update(
+                            {
+                                "authority_scope": CURRENT_RUNTIME_AUTHORITY_SCOPE,
+                                "freshness_provenance": CURRENT_RUNTIME_FRESHNESS_PROVENANCE,
+                                "release_authority": False,
+                                "trust_root_id": CURRENT_RUNTIME_TRUST_ROOT_ID,
+                            }
+                        )
                     semantic = hashlib.sha256(canonical_json_bytes(basis)).hexdigest()
                     operation_bytes = canonical_json_bytes(
                         {**basis, "semantic_receipt_sha256": semantic}
@@ -767,7 +1156,18 @@ def _run_production_handoff_admission_pinned(
                         ).hexdigest(),
                         handoff_root_sha256=str(admission.handoff_root_sha256),
                         source_record_sha256=source_record,
-                        producer_commit_sha=current_commit,
+                        producer_commit_sha=producer_commit_sha,
+                        environment=(
+                            CURRENT_RUNTIME_ENVIRONMENT
+                            if current_runtime
+                            else "production"
+                        ),
+                        freshness_provenance=(
+                            CURRENT_RUNTIME_FRESHNESS_PROVENANCE
+                            if current_runtime
+                            else None
+                        ),
+                        trust_root_id=deployment.trust_root_id,
                     )
                 finally:
                     os.close(receipts_descriptor)
@@ -783,7 +1183,7 @@ def _run_production_handoff_admission(
     *,
     execution_receipt_path: str | Path,
     deployment: _ProductionAdmissionDeployment,
-    witness: AuthenticatedCurrentTimeWitness,
+    witness: AuthenticatedCurrentTimeWitness | None,
     commit_resolver: Callable[[Path, int], str] = (
         lambda repository, descriptor: _git_commit(
             repository, repository_descriptor=descriptor
@@ -803,23 +1203,265 @@ def _run_production_handoff_admission(
         paths.close()
 
 
-def run_production_handoff_admission(
-    *, execution_receipt_path: str | Path
-) -> ProductionHandoffAdmissionReceipt:
-    """Admit one fixed-root production Market receipt; never release or submit."""
-    handoff = installed_production_handoff_deployment()
-    _validate_deployment_roots(handoff)
-    deployment = _ProductionAdmissionDeployment(
-        data_home=PRODUCTION_MARKET_DATA_HOME,
-        repository_root=PRODUCTION_MARKET_REPOSITORY_ROOT,
-        outbox_root=PRODUCTION_MARKET_OUTBOX_ROOT,
-        execution_receipt_root=PRODUCTION_MARKET_EXECUTION_RECEIPT_ROOT,
-        admission_root=PRODUCTION_ADMISSION_ROOT,
+def _selected_published_handoffs(
+    *,
+    profile_id: str,
+    profile_version: str,
+    candidate_intent_sha256: str,
+    deployment: _ProductionAdmissionDeployment,
+    commit_resolver: Callable[[Path, int], str],
+) -> list[dict[str, object]]:
+    """Inspect one captured receipt listing; never create admissions or release authority."""
+    from market_aligner.assessment.geography import selection_sort_key
+    from market_aligner.profiler.schema import validate_profile_id
+
+    validate_profile_id(profile_id)
+    if type(profile_version) is not str or not profile_version.strip():
+        raise ProductionHandoffAdmissionError("profile version is required")
+    if (
+        type(candidate_intent_sha256) is not str
+        or len(candidate_intent_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in candidate_intent_sha256)
+    ):
+        raise ProductionHandoffAdmissionError("candidate intent identity is invalid")
+    if deployment.execution_receipt_root != deployment.outbox_root / "receipts":
+        raise ProductionHandoffAdmissionError("production receipt root differs")
+    paths = _PinnedProductionPaths(deployment)
+    current_runtime = deployment.environment == CURRENT_RUNTIME_ENVIRONMENT
+    try:
+        admission_connection = None
+        admitted_rows: dict[str, sqlite3.Row] = {}
+        if current_runtime:
+            admission_connection, admitted_rows = _read_current_runtime_admission_index(
+                deployment,
+                profile_id=profile_id,
+                profile_version=profile_version,
+            )
+        rows = []
+        selected_roots: set[tuple[str, str]] = set()
+        for name in sorted(os.listdir(paths.receipts_descriptor)):
+            # Interrupted private publications never become published selections.
+            if name.startswith("."):
+                continue
+            if current_runtime:
+                receipt_path = deployment.execution_receipt_root / name
+                document, _receipt_bytes = _read_execution_receipt_document(
+                    receipt_path,
+                    deployment.execution_receipt_root,
+                    root_descriptor=paths.receipts_descriptor,
+                )
+                application_id = document.get("application_id")
+                root_sha256 = document.get("handoff_root_sha256")
+                admitted = _admitted_current_runtime_receipt_row(
+                    document, admitted_rows
+                )
+                if admitted is None:
+                    continue
+                _validate_execution_receipt(
+                    document, receipt_path, current_runtime=True
+                )
+                if document["producer_commit_sha"] != admitted["producer_commit_sha"]:
+                    raise ProductionHandoffAdmissionError(
+                        "published producer differs from stored admission"
+                    )
+                published = _read_published_handoff_pinned(
+                    execution_receipt_path=receipt_path,
+                    deployment=deployment,
+                    paths=paths,
+                    commit_resolver=commit_resolver,
+                    allow_admitted_current_ancestor=True,
+                )
+                document, _, _, _, adapter, handoff = published
+                if (
+                    handoff.application_id != application_id
+                    or handoff.root_sha256 != root_sha256
+                ):
+                    raise ProductionHandoffAdmissionError(
+                        "published handoff differs from stored admission"
+                    )
+                identity = (application_id, root_sha256)
+                if identity in selected_roots:
+                    raise ProductionHandoffAdmissionError(
+                        "current runtime selection contains ambiguous roots"
+                    )
+                selected_roots.add(identity)
+                _verify_current_runtime_admission_row(
+                    admitted, adapter=adapter
+                )
+                if handoff.emission_profile != "current_runtime_non_release_v1":
+                    raise ProductionHandoffAdmissionError(
+                        "current runtime selection contains a different profile"
+                    )
+            else:
+                document, _, _, _, _, handoff = _read_published_handoff_pinned(
+                    execution_receipt_path=deployment.execution_receipt_root / name,
+                    deployment=deployment,
+                    paths=paths,
+                    commit_resolver=commit_resolver,
+                )
+                if not handoff.strict_profile:
+                    raise ProductionHandoffAdmissionError(
+                        "published handoff is not strict"
+                    )
+            payload = handoff.payload
+            if (
+                payload["profile_id"] != profile_id
+                or payload["profile_version"] != profile_version
+                or payload["candidate_intent_sha256"] != candidate_intent_sha256
+            ):
+                continue
+            selection = payload["selection"]
+            if (
+                selection["decision"] != "selected_for_application"
+                or selection["hard_gate_passed"] is not True
+                or payload["eligibility"]["hard_gate_passed"] is not True
+            ):
+                raise ProductionHandoffAdmissionError("published selection is blocked")
+            assessment = payload["assessment"]
+            row = {
+                "application_id": handoff.application_id,
+                "handoff_root_sha256": handoff.root_sha256,
+                "execution_receipt_sha256": document["semantic_receipt_sha256"],
+                "profile_id": profile_id,
+                "profile_version": profile_version,
+                "candidate_intent_sha256": candidate_intent_sha256,
+                "geography_bucket": selection["geography_bucket"],
+                "geography_rank": selection["geography_priority_rank"],
+                "final_score": assessment["final"] * 100,
+                "opportunity": assessment["opportunity"],
+                "job_key": payload["job_key"],
+                "source_job_key": document["source_job_key"],
+                "vacancy_snapshot_sha256": payload["vacancy"]["vacancy_snapshot_sha256"],
+                "handoff_created_at": payload["created_at"],
+                "release_authority": False,
+                "submission_authority": False,
+            }
+            if row["geography_rank"] is None and current_runtime:
+                if row["geography_bucket"] is not None:
+                    raise ProductionHandoffAdmissionError(
+                        "unknown current geography has a bucket"
+                    )
+            elif row["geography_rank"] is not None:
+                selection_sort_key(
+                    row["geography_rank"],
+                    row["final_score"],
+                    row["opportunity"],
+                    row["job_key"],
+                )
+            rows.append(row)
+        if current_runtime:
+            rows.sort(
+                key=lambda row: (
+                    row["geography_rank"] is None,
+                    0 if row["geography_rank"] is None else row["geography_rank"],
+                    -row["final_score"],
+                    -row["opportunity"],
+                    row["job_key"],
+                    row["application_id"],
+                )
+            )
+        else:
+            rows.sort(
+                key=lambda row: (
+                    *selection_sort_key(
+                        row["geography_rank"],
+                        row["final_score"],
+                        row["opportunity"],
+                        row["job_key"],
+                    ),
+                    row["application_id"],
+                )
+            )
+        paths.verify_references()
+        return rows
+    finally:
+        if "admission_connection" in locals() and admission_connection is not None:
+            admission_connection.close()
+        paths.close()
+
+
+def selected_published_handoffs(
+    profile_id: str,
+    *,
+    profile_version: str,
+    candidate_intent_sha256: str,
+    current_runtime_config_path: str | Path | None = None,
+    current_runtime_config_sha256: str | None = None,
+    current_runtime_private_root: str | Path | None = None,
+) -> list[dict[str, object]]:
+    """List verified installed-deployment selections, without release authority."""
+    config_path = (
+        str(current_runtime_config_path)
+        if isinstance(current_runtime_config_path, Path)
+        else current_runtime_config_path
     )
+    private_root = (
+        str(current_runtime_private_root)
+        if isinstance(current_runtime_private_root, Path)
+        else current_runtime_private_root
+    )
+    _, deployment = select_runtime_deployment(
+        config_path=config_path,
+        config_sha256=current_runtime_config_sha256,
+        private_root=private_root,
+        legacy_loader=installed_production_handoff_deployment,
+        current_loader=lambda **options: installed_current_runtime_handoff_deployment(
+            configuration_path=Path(options["configuration_path"]),
+            configuration_sha256=options["configuration_sha256"],
+            private_root=Path(options["private_root"]),
+        ),
+    )
+    _validate_deployment_roots(deployment)
+    return _selected_published_handoffs(
+        profile_id=profile_id,
+        profile_version=profile_version,
+        candidate_intent_sha256=candidate_intent_sha256,
+        deployment=_admission_deployment_for_handoff(deployment),
+        commit_resolver=lambda repository, descriptor: _git_commit(
+            repository, repository_descriptor=descriptor
+        ),
+    )
+
+
+def run_production_handoff_admission(
+    *,
+    execution_receipt_path: str | Path,
+    current_runtime_config_path: str | Path | None = None,
+    current_runtime_config_sha256: str | None = None,
+    current_runtime_private_root: str | Path | None = None,
+) -> ProductionHandoffAdmissionReceipt:
+    """Admit one explicitly selected Market receipt; never release or submit."""
+    config_path = (
+        str(current_runtime_config_path)
+        if isinstance(current_runtime_config_path, Path)
+        else current_runtime_config_path
+    )
+    private_root = (
+        str(current_runtime_private_root)
+        if isinstance(current_runtime_private_root, Path)
+        else current_runtime_private_root
+    )
+    current_runtime, handoff = select_runtime_deployment(
+        config_path=config_path,
+        config_sha256=current_runtime_config_sha256,
+        private_root=private_root,
+        legacy_loader=installed_production_handoff_deployment,
+        current_loader=lambda **options: installed_current_runtime_handoff_deployment(
+            configuration_path=Path(options["configuration_path"]),
+            configuration_sha256=options["configuration_sha256"],
+            private_root=Path(options["private_root"]),
+        ),
+    )
+    _validate_deployment_roots(handoff)
+    deployment = _admission_deployment_for_handoff(handoff)
     return _run_production_handoff_admission(
         execution_receipt_path=execution_receipt_path,
         deployment=deployment,
-        witness=installed_production_current_time_witness(),
+        witness=(
+            None
+            if current_runtime
+            else installed_production_current_time_witness()
+        ),
     )
 
 
@@ -830,4 +1472,5 @@ __all__ = [
     "ProductionHandoffAdmissionError",
     "ProductionHandoffAdmissionReceipt",
     "run_production_handoff_admission",
+    "selected_published_handoffs",
 ]

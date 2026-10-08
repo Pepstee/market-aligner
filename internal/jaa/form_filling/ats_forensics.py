@@ -583,3 +583,70 @@ def verify_forensic_receipt(root: Path, receipt: ATSForensicReceipt) -> dict[str
     if manifest.get("attempt_id") != receipt.attempt_id:
         raise ValueError("forensic attempt identity differs from receipt")
     return {**manifest, "manifest_sha256": claimed}
+
+
+def load_forensic_receipt(
+    root: Path,
+    *,
+    attempt_id: str,
+    application_id: str,
+    application_url: str,
+    ats_name: str,
+    runtime_sha256: str,
+    artifact_set_sha256: str | None = None,
+    release_manifest_sha256: str | None = None,
+) -> ATSForensicReceipt:
+    """Load one stored attempt only when it matches the exact caller binding.
+
+    The stored manifest is reverified through the canonical offline verifier
+    (event chain, screenshot objects, authority flags) before any binding is
+    compared, so replay cannot surface tampered or foreign evidence.
+    """
+
+    if SAFE_IDENTIFIER.fullmatch(attempt_id) is None:
+        raise ValueError("forensic attempt ID is invalid")
+    if not isinstance(runtime_sha256, str):
+        raise ValueError("forensic runtime hash is required")
+    _require_digest(runtime_sha256, "runtime hash")
+    unresolved = Path(root)
+    if not unresolved.is_dir():
+        raise KeyError(attempt_id)
+    root = unresolved.resolve(strict=True)
+    if not root.is_dir():
+        raise KeyError(attempt_id)
+    candidate = root / "manifests" / f"{attempt_id}.json"
+    if not candidate.is_file():
+        raise KeyError(attempt_id)
+    path = candidate.resolve(strict=True)
+    if not path.is_relative_to(root / "manifests"):
+        raise ValueError("forensic manifest path escapes its evidence root")
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    events = manifest.get("events")
+    receipt = ATSForensicReceipt(
+        attempt_id=str(manifest.get("attempt_id") or ""),
+        manifest_sha256=str(manifest.get("manifest_sha256") or ""),
+        manifest_path=str(path.relative_to(root)),
+        outcome=str(manifest.get("outcome") or ""),
+        event_count=len(events) if isinstance(events, list) else 0,
+    )
+    verified = verify_forensic_receipt(root, receipt)
+    bindings = {
+        "attempt_id": attempt_id,
+        "application_id": application_id,
+        "application_url": sanitize_url(application_url),
+        "ats_name": ats_name,
+        "artifact_set_sha256": artifact_set_sha256,
+        "release_manifest_sha256": release_manifest_sha256,
+    }
+    for name, expected in bindings.items():
+        if verified.get(name) != expected:
+            raise ValueError(f"forensic binding differs: {name}")
+    stored_runtime = verified.get("runtime")
+    stored_runtime_sha256 = (
+        stored_runtime.get("runtime_sha256")
+        if isinstance(stored_runtime, dict)
+        else None
+    )
+    if stored_runtime_sha256 != runtime_sha256:
+        raise ValueError("forensic binding differs: runtime_sha256")
+    return receipt

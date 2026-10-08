@@ -20,6 +20,7 @@ Uses only a tiny synthetic fixture — no scraper, llm, or profiler needed.
 from __future__ import annotations
 
 import math
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -321,6 +322,7 @@ def test_extract_ignores_diagnostics_and_skips_malformed_raw_cache(
     )
     messages: list[str] = []
     ctx = SimpleNamespace(
+        cfg={},
         paths=SimpleNamespace(
             raw_cache=raw_cache,
             processing_job_urls=selection,
@@ -334,6 +336,67 @@ def test_extract_ignores_diagnostics_and_skips_malformed_raw_cache(
     assert [record.key for record in records] == ["greenhouse:123"]
     assert len(messages) == 1
     assert "skip malformed raw cache file" in messages[0]
+
+
+def test_extract_retains_multiple_cache_formats_without_bypassing_selection(tmp_dir: Path):
+    from dataclasses import asdict
+
+    first = tmp_dir / "first"
+    second = tmp_dir / "second"
+    first.mkdir()
+    second.mkdir()
+    rows = [RawPosting("fixture", str(i), f"https://example.test/{i}",
+                       "2026-09-14T00:00:00Z", raw_text=f"Role {i}")
+            for i in range(3)]
+    (first / "a.json").write_text(json.dumps(asdict(rows[0]), indent=2))
+    (second / "a.json").write_text(json.dumps([asdict(r) for r in rows], indent=2))
+    write_jsonl(second / "b.json", rows)
+    selection = tmp_dir / "selected.jsonl"
+    messages = []
+    ctx = SimpleNamespace(
+        cfg={"io": {"raw_cache_roots": ["first", "second"]}},
+        paths=SimpleNamespace(root=tmp_dir, raw_cache=tmp_dir / "absent",
+                              processing_job_urls=None, job_urls=selection),
+        log=messages.append,
+    )
+    assert [r.key for r in pipeline_run._iter_raw_postings(ctx)] == [r.key for r in rows]
+    write_jsonl(selection, [JobUrl("fixture", "1", "https://example.test/1")])
+    assert [r.key for r in pipeline_run._iter_raw_postings(ctx)] == ["fixture:1"]
+    write_jsonl(selection, [])
+    assert list(pipeline_run._iter_raw_postings(ctx)) == []
+    assert messages == []
+
+
+def test_discovery_cap_stops_consumption_and_preserves_existing_rows(tmp_dir: Path, monkeypatch):
+    consumed = []
+
+    class Adapter:
+        def discover(self, terms, *, live):
+            assert live is False
+            for index in range(5):
+                consumed.append(index)
+                yield JobUrl("fixture", str(index), f"https://example.test/{index}")
+
+    monkeypatch.setattr(pipeline_run, "_try_scraper", lambda: lambda *a, **k: Adapter())
+    destination = tmp_dir / "discovered.jsonl"
+    ctx = SimpleNamespace(
+        cfg={"boards": {"enabled": ["fixture", "second"], "mode": "fixture", "max_jobs_total": 2}},
+        paths=SimpleNamespace(job_urls=destination), force=True, log=lambda message: None,
+    )
+    pipeline_run.stage_discover(ctx)
+    assert consumed == [0, 1]
+    assert len(list(pipeline_run.read_jsonl(destination, JobUrl))) == 2
+    consumed.clear()
+    pipeline_run.stage_discover(ctx)
+    assert consumed == []
+    ctx.cfg["boards"]["max_jobs_total"] = 0
+    pipeline_run.stage_discover(ctx)
+    assert len(list(pipeline_run.read_jsonl(destination, JobUrl))) == 5
+    ctx.cfg["boards"]["max_jobs_total"] = 1
+    consumed.clear()
+    pipeline_run.stage_discover(ctx)
+    assert consumed == []
+    assert len(list(pipeline_run.read_jsonl(destination, JobUrl))) == 5
 
 
 # --------------------------------------------------------------------------- #
@@ -392,3 +455,109 @@ except ImportError:  # pragma: no cover - pytest not installed
 
 if __name__ == "__main__":
     raise SystemExit(_run_standalone())
+
+
+def test_creative_mode_preserves_confidence_tools_and_entry_only_ranking():
+    from contracts import CandidatePreferenceProfile, FieldProfile
+    profile = CandidatePreferenceProfile(fields={"UX_UI": FieldProfile(8, 8, .25)})
+    params = scoring.ScoringParams.from_config({
+        "scoring": {"mode": "creative", "fit_weights": {"skill_alignment": 1, "software_match": 1}},
+        "candidate": {"tools": [" FIGMA "]},
+    })
+    row = JobRow("fixture", "entry", "https://example.test/entry", mapped_career="UX_UI",
+                 entry_level=True, required_software=["Figma", "Blender"], visualization=8,
+                 spatial_relevance=7, freelance_potential=6)
+    subs = scoring.fit_subscores(row, profile, params.candidate_tools, mode=params.mode)
+    assert subs["skill_alignment"] == .2
+    assert subs["software_match"] == .5
+    assert _equal(scoring.fit_score(row, profile, params), math.sqrt(.2 * .5))
+    entry = scoring.score_row(row, profile, params)
+    senior = JobRow("fixture", "senior", "https://example.test/senior", mapped_career="UX_UI", entry_level=False)
+    assert scoring.score_row(senior, profile, params).final == 0
+    scored = [entry, ScoredRow(senior, fit=1, opportunity=1, final=0)]
+    field = scoring.aggregate_fields(scored, entry_level_only=True)[0]
+    assert field.median_top_fit == entry.fit
+    assert _equal(field.field_score, entry.fit * math.log(2))
+
+
+def test_creative_reports_keep_all_jobs_but_exclude_ineligible_recommendations(tmp_dir: Path):
+    from openpyxl import load_workbook
+    entry = JobRow("fixture", "entry", "https://example.test/entry", mapped_career="UX_UI",
+                   entry_level=True, job_title="Eligible role", required_software=["figma", "figma"],
+                   visualization=8, spatial_relevance=7, freelance_potential=6)
+    senior = JobRow("fixture", "senior", "https://example.test/senior", mapped_career="UX_UI",
+                    entry_level=False, required_software=["senior-tool"], technical_alignment=10)
+    rows = [ScoredRow(entry, .8, .8, 80), ScoredRow(senior, 1, 1, 99)]
+    paths = reporter.write_reports(rows, tmp_dir / "creative", make_plot=False, entry_level_only=True)
+    wb = load_workbook(paths.requirements_xlsx, read_only=True)
+    values = list(wb.active.values)
+    assert values[0] == ("skill", "frequency", "pct_of_postings", "top_fields")
+    assert values[1:] == [("figma", 1, 100, "UX_UI(1)")]
+    wb.close()
+    wb = load_workbook(paths.jobs_xlsx, read_only=True)
+    jobs = list(wb["jobs"].values)
+    assert len(jobs) == 3
+    assert all(key in jobs[0] for key in ("visualization", "spatial_relevance", "freelance_potential", "site_intensity"))
+    wb.close()
+    shortlist = paths.shortlist_md.read_text()
+    assert "Eligible role" in shortlist
+    assert "https://example.test/senior" not in shortlist
+    assert {r["skill"] for r in reporter.skill_frequency(rows)} == {"figma", "senior-tool"}
+
+
+def test_extraction_interruption_preserves_prefix_and_resumes_only_missing(tmp_dir: Path, monkeypatch):
+    import types
+    import pytest
+    raw = tmp_dir / "raw"
+    raw.mkdir()
+    for index in range(2):
+        write_jsonl(raw / f"{index}.json", [RawPosting("fixture", str(index),
+                    f"https://example.test/{index}", "2026-09-14T00:00:00Z", raw_text="Synthetic role")])
+    calls = []
+    interrupt = [True]
+    def extract(record, profile, **options):
+        calls.append(record["job_id"])
+        if record["job_id"] == "1" and interrupt[0]:
+            raise KeyboardInterrupt("synthetic interruption")
+        return {"job_title": "Role", "mapped_career": "UX_UI", "required_software": ["Tool A"]}
+    monkeypatch.setattr(pipeline_run, "_try_llm", lambda: (extract, lambda *a, **kw: {}))
+    client = types.ModuleType("llm.client")
+    client.make_backend = lambda cfg: types.SimpleNamespace(name="synthetic")
+    client.LLMClient = lambda **kw: types.SimpleNamespace(**kw)
+    caps = types.ModuleType("llm.capabilities")
+    caps.set_client = lambda client: None
+    caps.normalise_skill = lambda term, *a, **kw: term.lower().replace(" ", "_")
+    monkeypatch.setitem(sys.modules, "llm.client", client)
+    monkeypatch.setitem(sys.modules, "llm.capabilities", caps)
+    ctx = pipeline_run.RunContext(
+        cfg={"scoring": {"mode": "creative"}, "boards": {"mode": "fixture"}},
+        paths=pipeline_run.Paths.build(tmp_dir, {"io": {"raw_cache": "raw", "jobs": "jobs.jsonl"}}),
+        log=lambda message: None,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        pipeline_run.stage_extract(ctx)
+    first = list(pipeline_run.read_jsonl(ctx.paths.jobs, JobRow))
+    assert [r.key for r in first] == ["fixture:0"]
+    assert first[0].required_software == ["tool_a"]
+    calls.clear()
+    interrupt[0] = False
+    assert pipeline_run.stage_extract(ctx) == ctx.paths.jobs
+    assert calls == ["1"]
+    assert [r.key for r in pipeline_run.read_jsonl(ctx.paths.jobs, JobRow)] == ["fixture:0", "fixture:1"]
+
+
+def test_legacy_job_row_positional_fields_keep_their_meaning():
+    from contracts import to_dict, from_dict
+    row = JobRow(
+        "fixture", "legacy", "https://example.invalid/job", None, None,
+        "Engineer", "Example employer", "UX_UI", True, ["python"],
+        True, 2.0,
+        location="Synthetic city", responsibilities=["Build samples"],
+        technical_alignment=7.0,
+    )
+    assert row.mapped_career == "UX_UI"
+    assert row.entry_level is True
+    assert row.required_software == ["python"]
+    assert row.remote_flag is True and row.site_intensity == 2.0
+    assert row.location == "Synthetic city"
+    assert from_dict(JobRow, to_dict(row)) == row

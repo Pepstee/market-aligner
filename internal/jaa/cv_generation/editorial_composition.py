@@ -15,7 +15,9 @@ non-authoritative receipts.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
+import math
 import os
 import re
 import secrets
@@ -38,6 +40,7 @@ COMPOSITION_RECEIPT_SCHEMA = "jaa.cv-editorial-composition-receipt.v1"
 COVER_LETTER_COMPOSITION_RECEIPT_SCHEMA = "jaa.cover-letter-editorial-composition-receipt.v3"
 EDITORIAL_PROVIDER_IDENTITY = "openai-codex-cli"
 _EDITORIAL_STAGES = frozenset({"resume_writer", "humanizer", "cover_letter_writer", "cover_letter_humanizer"})
+_COVER_LETTER_STAGES = frozenset({"cover_letter_writer", "cover_letter_humanizer"})
 
 _ENV_ALLOWLIST = frozenset(
     {
@@ -93,6 +96,7 @@ _ALLOWED_CODEX_EVENTS = frozenset(
 _ALLOWED_CODEX_ITEMS = frozenset({"agent_message", "reasoning"})
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_JSON_SURROGATE = re.compile("[\ud800-\udfff]")
 _MONTH_YEAR = re.compile(
     r"^(?:January|February|March|April|May|June|July|August|September|"
     r"October|November|December) 20\d{2}$"
@@ -197,6 +201,166 @@ _CATEGORY_BY_HEADING = {
     "Education": frozenset({"education", "credential"}),
     "Certifications": frozenset({"credential"}),
 }
+_CURRENT_SECTION_CATEGORIES = {
+    "Skills": frozenset({"skill"}),
+    "Highlights": frozenset({"highlight"}),
+    "Results": frozenset({"result"}),
+    "Outcomes": frozenset({"outcome"}),
+}
+
+
+def _checked_editorial_section_policy(current_runtime: object) -> dict[str, frozenset[str]]:
+    if type(current_runtime) is not bool:
+        raise ValueError("invalid editorial section policy")
+    policy = dict(_CATEGORY_BY_HEADING)
+    if current_runtime:
+        policy.update(_CURRENT_SECTION_CATEGORIES)
+    return policy
+
+
+def editorial_section_policy(*, current_runtime: bool = False) -> dict[str, frozenset[str]]:
+    return _checked_editorial_section_policy(current_runtime)
+
+
+def category_for_source_heading(
+    heading: str, *, current_runtime: bool = False
+) -> str:
+    policy = _checked_editorial_section_policy(current_runtime)
+    if type(heading) is not str or heading not in policy:
+        raise ValueError("invalid editorial section policy")
+    return {
+        "Professional Summary": "summary",
+        "Core Capabilities": "capability_domain",
+        "Projects": "project",
+        "Experience": "experience",
+        "Education": "education",
+        "Certifications": "credential",
+        "Skills": "skill",
+        "Highlights": "highlight",
+        "Results": "result",
+        "Outcomes": "outcome",
+    }[heading]
+
+
+CV_CLAIM_ASSIGNMENT_INSTRUCTIONS = (
+    "Assign every required claim ID exactly once globally, in its sole assigned section heading per the policy map; never repeat an approved claim in another section.",
+    "Copy claim facts verbatim into the assigned section only; invent nothing, omit no required claim, and do not add a second copy in a summary or any other section.",
+)
+
+
+def build_cv_claim_assignment_contract(
+    claims: object,
+    categories_by_heading: object,
+    primary_category_by_heading: object,
+) -> dict[str, object]:
+    def checked_string(value: object) -> str:
+        if type(value) is not str or not value or value != value.strip():
+            raise ValueError("invalid CV claim assignment")
+        return value
+
+    if (
+        type(claims) not in (list, tuple)
+        or not claims
+        or type(categories_by_heading) is not dict
+        or not categories_by_heading
+        or type(primary_category_by_heading) is not dict
+        or primary_category_by_heading.keys() != categories_by_heading.keys()
+    ):
+        raise ValueError("invalid CV claim assignment")
+
+    normalized_claims: list[tuple[str, str]] = []
+    seen_claim_ids: set[str] = set()
+    for claim in claims:
+        if type(claim) is not dict or set(claim) != {"claim_id", "category"}:
+            raise ValueError("invalid CV claim assignment")
+        claim_id = checked_string(claim["claim_id"])
+        category = checked_string(claim["category"])
+        if claim_id in seen_claim_ids:
+            raise ValueError("invalid CV claim assignment")
+        seen_claim_ids.add(claim_id)
+        normalized_claims.append((claim_id, category))
+
+    for heading, categories in categories_by_heading.items():
+        checked_string(heading)
+        if type(categories) is not frozenset or not categories:
+            raise ValueError("invalid CV claim assignment")
+        for category in categories:
+            checked_string(category)
+
+    heading_by_primary_category: dict[str, str] = {}
+    for heading, primary_category in primary_category_by_heading.items():
+        heading = checked_string(heading)
+        primary_category = checked_string(primary_category)
+        if (
+            primary_category not in categories_by_heading[heading]
+            or primary_category in heading_by_primary_category
+        ):
+            raise ValueError("invalid CV claim assignment")
+        heading_by_primary_category[primary_category] = heading
+
+    claim_section_policy: dict[str, list[str]] = {}
+    for claim_id, category in normalized_claims:
+        primary_heading = heading_by_primary_category.get(category)
+        if primary_heading is None:
+            raise ValueError("invalid CV claim assignment")
+        claim_section_policy[claim_id] = [primary_heading]
+
+    return {
+        "claim_section_policy": claim_section_policy,
+        "required_claim_ids": [claim_id for claim_id, _ in normalized_claims],
+    }
+
+
+def validate_editorial_layout(
+    headings: object, *, current_runtime: bool = False
+) -> None:
+    if type(headings) not in (list, tuple) or not headings:
+        raise ValueError("invalid editorial section policy")
+    if any(type(heading) is not str for heading in headings):
+        raise ValueError("invalid editorial section policy")
+    if len(set(headings)) != len(headings):
+        raise ValueError("invalid editorial section policy")
+    policy = _checked_editorial_section_policy(current_runtime)
+    if any(heading not in policy for heading in headings):
+        raise ValueError("invalid editorial section policy")
+    if not current_runtime and (
+        headings[0] != "Professional Summary"
+        or "Core Capabilities" not in headings
+    ):
+        raise ValueError("invalid editorial section policy")
+
+
+def editorial_layout_response_schema(
+    schema: object, *, current_runtime: bool = False
+) -> dict[str, object]:
+    if type(current_runtime) is not bool or type(schema) is not dict:
+        raise ValueError("invalid editorial section policy")
+    try:
+        props = schema["properties"]
+        sections = props["sections"]
+        items = sections["items"]
+        item_props = items["properties"]
+        heading = item_props["heading"]
+        enum = heading["enum"]
+        min_items = sections["minItems"]
+    except (KeyError, TypeError):
+        raise ValueError("invalid editorial section policy") from None
+    if any(
+        type(node) is not dict
+        for node in (props, sections, items, item_props, heading)
+    ):
+        raise ValueError("invalid editorial section policy")
+    if type(enum) is not list or type(min_items) is not int or min_items < 1:
+        raise ValueError("invalid editorial section policy")
+    result = copy.deepcopy(schema)
+    if current_runtime:
+        result["properties"]["sections"]["minItems"] = 1
+        result["properties"]["sections"]["items"]["properties"]["heading"][
+            "enum"
+        ] = sorted(_checked_editorial_section_policy(True))
+    return result
+
+
 _DRAFT_RESPONSE_SCHEMA: Mapping[str, object] = {
     "type": "object",
     "additionalProperties": False,
@@ -295,6 +459,120 @@ class EditorialCompositionError(ValueError):
     """An editorial draft is not admissible against candidate authority."""
 
 
+_COVER_CLAIM_SECTIONS = ("Opening", "Evidence Match", "Company Fit")
+_COVER_CLAIM_ROW_KEYS = frozenset({"claim_id", "fact_kind", "section_heading"})
+
+
+def _cover_claim_policy_string(value: object) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError("invalid cover claim policy")
+    return value
+
+
+def cover_claim_section_policy(
+    *, current_runtime: bool = False
+) -> dict[str, frozenset[str]]:
+    if type(current_runtime) is not bool:
+        raise ValueError("invalid cover claim policy")
+    if current_runtime:
+        sections = frozenset(_COVER_CLAIM_SECTIONS)
+        return {"candidate": frozenset(sections), "employer": frozenset(sections)}
+    return {
+        "candidate": frozenset({"Evidence Match"}),
+        "employer": frozenset({"Opening", "Company Fit"}),
+    }
+
+
+def cover_claim_requirements(
+    rows: object, *, current_runtime: bool = False
+) -> dict[str, object]:
+    policy = cover_claim_section_policy(current_runtime=current_runtime)
+    if type(rows) not in (list, tuple) or not rows:
+        raise ValueError("invalid cover claim policy")
+    seen: set[str] = set()
+    counts = dict.fromkeys(_COVER_CLAIM_SECTIONS, 0)
+    has_candidate = False
+    for row in rows:
+        if (
+            type(row) is not dict
+            or any(type(key) is not str for key in row)
+            or frozenset(row) != _COVER_CLAIM_ROW_KEYS
+        ):
+            raise ValueError("invalid cover claim policy")
+        kind = _cover_claim_policy_string(row["fact_kind"])
+        heading = _cover_claim_policy_string(row["section_heading"])
+        claim_id = _cover_claim_policy_string(row["claim_id"])
+        if kind not in policy or heading not in policy[kind] or claim_id in seen:
+            raise ValueError("invalid cover claim policy")
+        seen.add(claim_id)
+        counts[heading] += 1
+        has_candidate = has_candidate or kind == "candidate"
+    if current_runtime and not has_candidate:
+        raise ValueError("invalid cover claim policy")
+    if not current_runtime:
+        return {
+            "section_min_facts": dict.fromkeys(_COVER_CLAIM_SECTIONS, 1),
+            "require_employer_hook": True,
+            "require_company_fit_employer": True,
+            "require_all_bound_claims": False,
+        }
+    return {
+        "section_min_facts": dict.fromkeys(_COVER_CLAIM_SECTIONS, 0),
+        "require_employer_hook": False,
+        "require_company_fit_employer": False,
+        "require_all_bound_claims": False,
+    }
+
+
+def _build_cover_runtime_contract(
+    rows: Sequence[Mapping[str, str]], *, current_runtime: bool
+) -> dict[str, object]:
+    requirements = cover_claim_requirements(rows, current_runtime=current_runtime)
+    if not current_runtime:
+        return {}
+    claim_section_policy = {
+        row["claim_id"]: [row["section_heading"]] for row in rows
+    }
+    available_claim_ids = [row["claim_id"] for row in rows]
+    return {
+        "claim_section_policy": claim_section_policy,
+        "available_claim_ids": available_claim_ids,
+        "section_min_facts": dict(requirements["section_min_facts"]),
+        "writer_instructions": [
+            "Return only one canonical JSON object matching the response schema.",
+            "Write a specific UK cover letter under one page using the four supplied sections.",
+            "Keep each approved claim ID and source meaning; paraphrase candidate claims only when every qualification and limitation remains explicit.",
+            "Employer-kind claims must be copied exactly, character for character, from their bound approved source text; do not paraphrase, merge, or rewrite them.",
+            "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
+            "Select relevant, supported claims. Omit an unsuitable claim as a whole; never remove a material limitation or qualifier from a retained positive claim.",
+            "Omit whole claims that narrate internal governance, audit, review, approval, or evidence provenance; disclose how this letter or the accompanying CV was produced (including prompts, models, drafting tools, or AI/human authorship); apologize, admit weakness, or use defensive framing; or are irrelevant to the target role. Genuine AI/LLM technical experience in a bound claim may remain when relevant and supported. Preserve every material caveat, qualifier, limitation, and negation in retained candidate claims; employer facts remain exact.",
+            "Place each selected claim ID exactly once, only in its claim_section_policy section; do not require an employer claim in Opening or Company Fit.",
+            "In Opening, emit separate atoms in this order: the exact supplied salutation as source_kind 'connective' with claim_id null; the exact role/company sentence in rhetorical_catalog['Opening'] as a separate 'connective' with claim_id null; then only zero or more approved_claim atoms assigned to Opening, each retaining its bound claim_id. Do not combine, omit, reorder, or relabel these atoms.",
+            "Evidence Match and Company Fit contain only facts assigned to that section; an unbound section has an empty atoms list.",
+            "Close carries only the required CTA, sign-off, and candidate signature.",
+            "Use first person for candidate statements rather than describing the candidate as a third party; include the supplied sign-off and candidate signature only once.",
+            "Use only the supplied rhetorical catalog and add no claims or meta-signposts.",
+            "Add no work-rights text, AI disclosure, unsupported tool claim, or internal process commentary.",
+            "Use at most 500 words and 3500 characters; add no em or en dash.",
+        ],
+        "humanizer_instructions": [
+            "Return only one canonical JSON object matching the response schema.",
+            "Preserve every selected approved_claim atom exactly, with its claim ID and assigned section; do not paraphrase factual spans.",
+            "Preserve all four section records, including empty middle sections.",
+            "Preserve the two separate Opening connective atoms in order, with null claim IDs and exact text; do not combine or remove them.",
+            "Edit other connective atoms only by selecting another supplied typed rhetorical atom for that section.",
+            "Preserve the exact salutation, sign-off, signature, and required CTA.",
+            "Do not add generic signposts or an Opening employer hook; follow the supplied claim assignments.",
+            "Use no em dash, en dash, disclosure, internal commentary, or new fact.",
+        ],
+    }
+
+
 def _required(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise EditorialCompositionError(f"{label} is absent or malformed")
@@ -312,18 +590,112 @@ def _text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+_EDITORIAL_CITY_ERROR = "editorial city binding differs"
+
+
+def validate_editorial_city(
+    value: object, *, allow_missing_city: bool = False
+) -> str | None:
+    if type(allow_missing_city) is not bool:
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+    if value is None and allow_missing_city:
+        return None
+    if type(value) is not str or not value or value != value.strip():
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+    return value
+
+
+def validate_editorial_city_pair(
+    authority_city: object,
+    draft_city: object,
+    *,
+    allow_missing_city: bool = False,
+) -> None:
+    authority = validate_editorial_city(
+        authority_city, allow_missing_city=allow_missing_city
+    )
+    draft = validate_editorial_city(draft_city, allow_missing_city=allow_missing_city)
+    if authority != draft:
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+
+
+def editorial_city_response_schema(
+    base_schema: Mapping[str, object],
+    *,
+    authority_city: object,
+    allow_missing_city: bool = False,
+) -> dict[str, object]:
+    validate_editorial_city(authority_city, allow_missing_city=allow_missing_city)
+    if type(base_schema) is not dict:
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+    properties = base_schema.get("properties")
+    if type(properties) is not dict or type(properties.get("candidate_city")) is not dict:
+        raise EditorialCompositionError(_EDITORIAL_CITY_ERROR)
+    schema = copy.deepcopy(base_schema)
+    if allow_missing_city and authority_city is None:
+        schema["properties"]["candidate_city"] = {"type": "null"}
+    return schema
+
+
+def effective_editorial_city_mode(
+    stage: object, allow_missing_city: object = False
+) -> bool:
+    if (
+        type(stage) is not str
+        or stage not in _EDITORIAL_STAGES
+        or type(allow_missing_city) is not bool
+    ):
+        raise EditorialCompositionError("invalid editorial city mode")
+    if stage in _COVER_LETTER_STAGES:
+        return False
+    return allow_missing_city
+
+
+def editorial_city_transport_extensions(
+    stage: object,
+    allow_missing_city: object,
+    response_schema: object,
+    *,
+    schema_hasher,
+    city_schema_adapter,
+) -> dict[str, object]:
+    if not effective_editorial_city_mode(stage, allow_missing_city):
+        return {}
+    if type(response_schema) is not dict:
+        raise EditorialCompositionError("invalid editorial city mode")
+    adapted_schema = city_schema_adapter(
+        copy.deepcopy(response_schema),
+        authority_city=None,
+        allow_missing_city=True,
+    )
+    return {
+        "allow_missing_city": True,
+        "null_city_response_schema_sha256": schema_hasher(adapted_schema),
+    }
+
+
 @dataclass(frozen=True)
 class CandidateEditorialAuthority:
     candidate_name: str
-    candidate_city: str
+    candidate_city: str | None
     graduation_month_year: str | None
     dissertation_title: str | None
     source_sha256: str
     require_dissertation: bool = False
+    allow_missing_city: bool = False
+    current_runtime: bool = False
 
     def __post_init__(self) -> None:
         _required(self.candidate_name, "candidate name")
-        _required(self.candidate_city, "candidate city")
+        validate_editorial_city(
+            self.candidate_city, allow_missing_city=self.allow_missing_city
+        )
+        if type(self.current_runtime) is not bool or type(self.allow_missing_city) is not bool:
+            raise EditorialCompositionError("editorial runtime mode is invalid")
+        if self.allow_missing_city and not self.current_runtime:
+            raise EditorialCompositionError("editorial runtime mode is invalid")
         _digest(self.source_sha256, "candidate authority source hash")
         if self.graduation_month_year is not None and not _MONTH_YEAR.fullmatch(
             self.graduation_month_year
@@ -346,6 +718,14 @@ class CandidateEditorialAuthority:
             "graduation_month_year": self.graduation_month_year,
             "require_dissertation": self.require_dissertation,
             "source_sha256": self.source_sha256,
+            **(
+                {
+                    "current_runtime_pre_review": True,
+                    "allow_missing_city": self.allow_missing_city,
+                }
+                if self.current_runtime
+                else {}
+            ),
         }
 
 
@@ -369,13 +749,17 @@ class ApprovedCVClaim:
             raise EditorialCompositionError("approved claim lacks evidence identities")
         if len(set(self.evidence_ids)) != len(self.evidence_ids):
             raise EditorialCompositionError("approved claim repeats evidence identities")
-        if self.category not in {
+        if type(self.category) is not str or self.category not in {
             "summary",
             "capability_domain",
             "project",
             "experience",
             "education",
             "credential",
+            "skill",
+            "highlight",
+            "result",
+            "outcome",
         }:
             raise EditorialCompositionError("approved claim category is unsupported")
 
@@ -411,8 +795,19 @@ class CVEditorialRequest:
         claim_ids = tuple(claim.claim_id for claim in self.approved_claims)
         if len(set(claim_ids)) != len(claim_ids):
             raise EditorialCompositionError("editorial request repeats claim identities")
+        allowed_categories = {
+            category
+            for categories in editorial_section_policy(
+                current_runtime=self.authority.current_runtime
+            ).values()
+            for category in categories
+        }
         for claim in self.approved_claims:
             claim.__post_init__()
+            if claim.category not in allowed_categories:
+                raise EditorialCompositionError(
+                    "approved claim category is unsupported for editorial runtime"
+                )
         _digest(self.request_sha256, "editorial request hash")
         if self.request_sha256 != content_hash(self.document(include_identity=False)):
             raise EditorialCompositionError("editorial request identity is invalid")
@@ -488,7 +883,10 @@ class CVSection:
     atoms: tuple[EditorialAtom, ...]
 
     def __post_init__(self) -> None:
-        if self.heading not in _ALLOWED_HEADINGS:
+        if (
+            type(self.heading) is not str
+            or self.heading not in _checked_editorial_section_policy(True)
+        ):
             raise EditorialCompositionError("CV section heading is unsupported")
         if not self.atoms:
             raise EditorialCompositionError("CV section cannot be empty")
@@ -505,27 +903,33 @@ class CVSection:
 @dataclass(frozen=True)
 class CVEditorialDraft:
     candidate_name: str
-    candidate_city: str
+    candidate_city: str | None
     sections: tuple[CVSection, ...]
     draft_sha256: str
     schema_version: str = DRAFT_SCHEMA
+    allow_missing_city: bool = False
+    current_runtime: bool = False
 
     def __post_init__(self) -> None:
         if self.schema_version != DRAFT_SCHEMA:
             raise EditorialCompositionError("editorial draft schema is unsupported")
         _required(self.candidate_name, "draft candidate name")
-        _required(self.candidate_city, "draft candidate city")
+        validate_editorial_city(
+            self.candidate_city, allow_missing_city=self.allow_missing_city
+        )
+        if type(self.current_runtime) is not bool:
+            raise EditorialCompositionError("editorial runtime mode is invalid")
         if not self.sections:
             raise EditorialCompositionError("editorial draft has no sections")
         for section in self.sections:
             section.__post_init__()
         headings = tuple(section.heading for section in self.sections)
-        if headings[0] != "Professional Summary":
-            raise EditorialCompositionError("Professional Summary must be first")
-        if "Core Capabilities" not in headings:
-            raise EditorialCompositionError("Core Capabilities section is required")
-        if len(set(headings)) != len(headings):
-            raise EditorialCompositionError("editorial draft repeats a section")
+        try:
+            validate_editorial_layout(
+                headings, current_runtime=self.current_runtime
+            )
+        except ValueError as exc:
+            raise EditorialCompositionError("editorial draft layout is invalid") from exc
         _digest(self.draft_sha256, "editorial draft hash")
         if self.draft_sha256 != content_hash(self.document(include_identity=False)):
             raise EditorialCompositionError("editorial draft identity is invalid")
@@ -545,9 +949,12 @@ class CVEditorialDraft:
 def build_editorial_draft(
     *,
     candidate_name: str,
-    candidate_city: str,
+    candidate_city: str | None,
     sections: Sequence[CVSection],
+    allow_missing_city: bool = False,
+    current_runtime: bool = False,
 ) -> CVEditorialDraft:
+    validate_editorial_city(candidate_city, allow_missing_city=allow_missing_city)
     values = {
         "candidate_city": candidate_city,
         "candidate_name": candidate_name,
@@ -559,6 +966,8 @@ def build_editorial_draft(
         candidate_city=candidate_city,
         sections=tuple(sections),
         draft_sha256=content_hash(values),
+        allow_missing_city=allow_missing_city,
+        current_runtime=current_runtime,
     )
 
 
@@ -572,6 +981,20 @@ def _validate_connective(text: str) -> None:
 def _cover_letter_rhetorical_catalog(
     request: CoverLetterEditorialRequest,
 ) -> Mapping[str, tuple[str, ...]]:
+    if request.authority.current_runtime:
+        return {
+            "Opening": (
+                COVER_LETTER_SALUTATION,
+                f"I am applying for the {request.role_title} role at {request.company_name}.",
+            ),
+            "Evidence Match": (),
+            "Company Fit": (),
+            "Close": (
+                "Thank you for considering my application.",
+                COVER_LETTER_SIGN_OFF,
+                request.authority.candidate_name,
+            ),
+        }
     return {
         "Opening": (
             COVER_LETTER_SALUTATION,
@@ -649,7 +1072,7 @@ def _validate_document_authorship(
 
 def _outward_text(draft: CVEditorialDraft) -> str:
     return "\n".join(
-        (draft.candidate_name, draft.candidate_city)
+        tuple(value for value in (draft.candidate_name, draft.candidate_city) if value is not None)
         + tuple(
             value
             for section in draft.sections
@@ -661,20 +1084,57 @@ def _outward_text(draft: CVEditorialDraft) -> str:
 def validate_editorial_draft(
     request: CVEditorialRequest,
     draft: CVEditorialDraft,
+    *,
+    current_runtime: bool | None = None,
 ) -> None:
     """Reject invented, altered or candidate-prohibited editorial content."""
 
     request.__post_init__()
     draft.__post_init__()
+    request_current_runtime = request.authority.current_runtime
+    if current_runtime is None:
+        current_runtime = request_current_runtime
+    if (
+        type(current_runtime) is not bool
+        or request_current_runtime is not current_runtime
+        or draft.current_runtime is not current_runtime
+    ):
+        raise EditorialCompositionError("editorial runtime mode differs from authority")
     authority = request.authority
     if draft.candidate_name != authority.candidate_name:
         raise EditorialCompositionError("draft candidate differs from authority")
-    if draft.candidate_city != authority.candidate_city:
-        raise EditorialCompositionError("draft location differs from authority")
+    try:
+        validate_editorial_city_pair(
+            authority.candidate_city,
+            draft.candidate_city,
+            allow_missing_city=authority.allow_missing_city,
+        )
+    except EditorialCompositionError:
+        if draft.candidate_city != authority.candidate_city:
+            raise EditorialCompositionError(
+                "draft location differs from authority"
+            ) from None
+        raise
 
     approved: Mapping[str, ApprovedCVClaim] = {
         claim.claim_id: claim for claim in request.approved_claims
     }
+    section_policy = editorial_section_policy(current_runtime=current_runtime)
+    current_assignment = None
+    if current_runtime:
+        current_assignment = build_cv_claim_assignment_contract(
+            [
+                {"claim_id": claim.claim_id, "category": claim.category}
+                for claim in request.approved_claims
+            ],
+            section_policy,
+            {
+                heading: category_for_source_heading(
+                    heading, current_runtime=True
+                )
+                for heading in section_policy
+            },
+        )
     used_claims: list[str] = []
     for section in draft.sections:
         section_claim_count = 0
@@ -690,18 +1150,26 @@ def validate_editorial_draft(
             claim = approved.get(atom.claim_id or "")
             if claim is None:
                 raise EditorialCompositionError("editorial draft cites an unknown claim")
-            if atom.text != claim.text:
+            if atom.text != claim.text and not current_runtime:
                 raise EditorialCompositionError("editorial draft changed an approved claim")
             _validate_document_authorship(
                 atom.text,
                 document_kind="CV",
                 authority_context=claim.category,
             )
-            if claim.category not in _CATEGORY_BY_HEADING[section.heading]:
+            if claim.category not in section_policy[section.heading]:
                 raise EditorialCompositionError(
                     "approved claim is in the wrong CV section: "
                     f"claim_id={claim.claim_id}, category={claim.category}, "
                     f"heading={section.heading}"
+                )
+            if (
+                current_assignment is not None
+                and current_assignment["claim_section_policy"][claim.claim_id]
+                != [section.heading]
+            ):
+                raise EditorialCompositionError(
+                    "current approved claim is outside its assigned CV section"
                 )
             if section.heading == "Core Capabilities" and _FORMAT_OR_DATASTORE.search(
                 atom.text
@@ -715,6 +1183,8 @@ def validate_editorial_draft(
             raise EditorialCompositionError("CV sections require approved factual claims")
     if len(set(used_claims)) != len(used_claims):
         raise EditorialCompositionError("editorial draft repeats an approved claim")
+    if current_runtime and not used_claims:
+        raise EditorialCompositionError("current CV must retain supported candidate facts")
 
     outward = _outward_text(draft)
     _validate_global_outward_policy(outward, document_kind="CV")
@@ -793,10 +1263,7 @@ class ApprovedCoverLetterClaim:
             raise EditorialCompositionError("cover-letter claim lacks evidence identities")
         if len(set(self.evidence_ids)) != len(self.evidence_ids):
             raise EditorialCompositionError("cover-letter claim repeats evidence identities")
-        expected = {
-            "candidate": {"Evidence Match"},
-            "employer": {"Opening", "Company Fit"},
-        }
+        expected = cover_claim_section_policy(current_runtime=True)
         if (
             self.fact_kind not in expected
             or self.section_heading not in expected[self.fact_kind]
@@ -839,6 +1306,20 @@ class CoverLetterEditorialRequest:
         identifiers = tuple(claim.claim_id for claim in self.approved_claims)
         if len(set(identifiers)) != len(identifiers):
             raise EditorialCompositionError("cover-letter request repeats claim identities")
+        try:
+            cover_claim_requirements(
+                [
+                    {
+                        "claim_id": claim.claim_id,
+                        "fact_kind": claim.fact_kind,
+                        "section_heading": claim.section_heading,
+                    }
+                    for claim in self.approved_claims
+                ],
+                current_runtime=self.authority.current_runtime,
+            )
+        except ValueError:
+            raise EditorialCompositionError("cover-letter claim policy is invalid") from None
         _digest(self.request_sha256, "cover-letter request hash")
         if self.request_sha256 != content_hash(self.document(include_identity=False)):
             raise EditorialCompositionError("cover-letter request identity is invalid")
@@ -889,17 +1370,29 @@ def build_cover_letter_editorial_request(
 class CoverLetterSection:
     heading: str
     atoms: tuple[EditorialAtom, ...]
+    current_runtime: bool = False
 
     def __post_init__(self) -> None:
-        if self.heading not in {"Opening", "Evidence Match", "Company Fit", "Close"}:
+        if (
+            self.heading not in {"Opening", "Evidence Match", "Company Fit", "Close"}
+            or type(self.current_runtime) is not bool
+        ):
             raise EditorialCompositionError("cover-letter section heading is unsupported")
-        if not self.atoms:
+        if not self.atoms and not (
+            self.current_runtime and self.heading in {"Evidence Match", "Company Fit"}
+        ):
             raise EditorialCompositionError("cover-letter section cannot be empty")
         for atom in self.atoms:
             atom.__post_init__()
 
     def document(self) -> dict[str, object]:
-        return {"atoms": [atom.document() for atom in self.atoms], "heading": self.heading}
+        value: dict[str, object] = {
+            "atoms": [atom.document() for atom in self.atoms],
+            "heading": self.heading,
+        }
+        if self.current_runtime:
+            value["current_runtime"] = True
+        return value
 
 
 @dataclass(frozen=True)
@@ -908,10 +1401,13 @@ class CoverLetterEditorialDraft:
     sections: tuple[CoverLetterSection, ...]
     draft_sha256: str
     schema_version: str = COVER_LETTER_DRAFT_SCHEMA
+    current_runtime: bool = False
 
     def __post_init__(self) -> None:
         if self.schema_version != COVER_LETTER_DRAFT_SCHEMA:
             raise EditorialCompositionError("cover-letter draft schema is unsupported")
+        if type(self.current_runtime) is not bool:
+            raise EditorialCompositionError("cover-letter runtime mode is invalid")
         _required(self.candidate_name, "cover-letter candidate name")
         if tuple(section.heading for section in self.sections) != (
             "Opening", "Evidence Match", "Company Fit", "Close"
@@ -919,6 +1415,8 @@ class CoverLetterEditorialDraft:
             raise EditorialCompositionError("cover-letter sections are not canonical")
         for section in self.sections:
             section.__post_init__()
+            if section.current_runtime is not self.current_runtime:
+                raise EditorialCompositionError("cover-letter section runtime mode differs")
         _digest(self.draft_sha256, "cover-letter draft hash")
         if self.draft_sha256 != content_hash(self.document(include_identity=False)):
             raise EditorialCompositionError("cover-letter draft identity is invalid")
@@ -931,21 +1429,33 @@ class CoverLetterEditorialDraft:
         }
         if include_identity:
             value["draft_sha256"] = self.draft_sha256
+        if self.current_runtime:
+            value["current_runtime"] = True
         return value
 
 
 def build_cover_letter_editorial_draft(
-    *, candidate_name: str, sections: Sequence[CoverLetterSection]
+    *,
+    candidate_name: str,
+    sections: Sequence[CoverLetterSection],
+    current_runtime: bool = False,
 ) -> CoverLetterEditorialDraft:
     values = {
         "candidate_name": candidate_name,
         "schema_version": COVER_LETTER_DRAFT_SCHEMA,
         "sections": [section.document() for section in sections],
     }
+    if type(current_runtime) is not bool or any(
+        section.current_runtime is not current_runtime for section in sections
+    ):
+        raise EditorialCompositionError("cover-letter section runtime mode differs")
+    if current_runtime:
+        values["current_runtime"] = True
     return CoverLetterEditorialDraft(
         candidate_name=candidate_name,
         sections=tuple(sections),
         draft_sha256=content_hash(values),
+        current_runtime=current_runtime,
     )
 
 
@@ -956,6 +1466,8 @@ def validate_cover_letter_editorial_draft(
     """Reject unsupported, generic, or authority-changing cover-letter content."""
     request.__post_init__()
     draft.__post_init__()
+    if draft.current_runtime is not request.authority.current_runtime:
+        raise EditorialCompositionError("cover-letter runtime mode differs from authority")
     if draft.candidate_name != request.authority.candidate_name:
         raise EditorialCompositionError("cover-letter candidate differs from authority")
     outward = "\n".join(
@@ -970,13 +1482,25 @@ def validate_cover_letter_editorial_draft(
             "cover letter exceeds the deterministic UK one-page proxy"
         )
 
+    requirements = cover_claim_requirements(
+        [
+            {
+                "claim_id": claim.claim_id,
+                "fact_kind": claim.fact_kind,
+                "section_heading": claim.section_heading,
+            }
+            for claim in request.approved_claims
+        ],
+        current_runtime=request.authority.current_runtime,
+    )
+    section_min_facts = requirements["section_min_facts"]
     rhetorical_catalog = _cover_letter_rhetorical_catalog(request)
     opening = draft.sections[0]
     required_salutation = EditorialAtom(
         "connective", COVER_LETTER_SALUTATION, None
     )
     if (
-        len(opening.atoms) < 3
+        len(opening.atoms) < 2 + section_min_facts["Opening"]
         or opening.atoms[0] != required_salutation
         or opening.atoms[1].source_kind != "connective"
         or opening.atoms[1].text not in rhetorical_catalog["Opening"][1:]
@@ -989,11 +1513,32 @@ def validate_cover_letter_editorial_draft(
         section = next(
             value for value in draft.sections if value.heading == section_heading
         )
+        if request.authority.current_runtime and not section.atoms:
+            continue
         if (
-            len(section.atoms) < 2
-            or section.atoms[0].source_kind != "connective"
-            or section.atoms[0].text not in rhetorical_catalog[section_heading]
-            or any(atom.source_kind != "approved_claim" for atom in section.atoms[1:])
+            (
+                not request.authority.current_runtime
+                and len(section.atoms) < 1 + section_min_facts[section_heading]
+            )
+            or (
+                request.authority.current_runtime
+                and len(section.atoms) < section_min_facts[section_heading]
+            )
+            or (
+                not request.authority.current_runtime
+                and (
+                    section.atoms[0].source_kind != "connective"
+                    or section.atoms[0].text not in rhetorical_catalog[section_heading]
+                )
+            )
+            or any(
+                atom.source_kind != "approved_claim"
+                for atom in (
+                    section.atoms
+                    if request.authority.current_runtime
+                    else section.atoms[1:]
+                )
+            )
         ):
             raise EditorialCompositionError(
                 f"cover letter lacks typed rhetoric in {section_heading}"
@@ -1030,7 +1575,12 @@ def validate_cover_letter_editorial_draft(
                     )
                 continue
             claim = approved.get(atom.claim_id or "")
-            if claim is None or atom.text != claim.text:
+            if claim is None:
+                raise EditorialCompositionError("cover-letter draft changed or invented a claim")
+            if atom.text != claim.text and (
+                not request.authority.current_runtime
+                or claim.fact_kind == "employer"
+            ):
                 raise EditorialCompositionError("cover-letter draft changed or invented a claim")
             _validate_document_authorship(
                 atom.text,
@@ -1043,22 +1593,31 @@ def validate_cover_letter_editorial_draft(
             factual_span_seen = True
     if len(set(used)) != len(used):
         raise EditorialCompositionError("cover-letter draft repeats an approved claim")
+    if requirements["require_all_bound_claims"] and set(used) != set(approved):
+        raise EditorialCompositionError("cover-letter draft omits an approved claim")
     used_claims = [approved[value] for value in used]
     evidence_claims = [
         claim for claim in used_claims if claim.section_heading == "Evidence Match"
     ]
-    if not evidence_claims or any(
-        claim.fact_kind != "candidate" for claim in evidence_claims
+    if request.authority.current_runtime:
+        if not any(claim.fact_kind == "candidate" for claim in used_claims):
+            raise EditorialCompositionError("cover letter lacks candidate evidence")
+    elif not requirements["require_all_bound_claims"] and (
+        not evidence_claims
+        or any(claim.fact_kind != "candidate" for claim in evidence_claims)
     ):
         raise EditorialCompositionError("cover letter lacks candidate evidence")
     opening_claims = [
         claim for claim in used_claims if claim.section_heading == "Opening"
     ]
-    if not opening_claims or not any(
-        claim.fact_kind == "employer"
-        and request.company_name.casefold() in claim.text.casefold()
-        and request.role_title.casefold() in claim.text.casefold()
-        for claim in opening_claims
+    if requirements["require_employer_hook"] and (
+        not opening_claims
+        or not any(
+            claim.fact_kind == "employer"
+            and request.company_name.casefold() in claim.text.casefold()
+            and request.role_title.casefold() in claim.text.casefold()
+            for claim in opening_claims
+        )
     ):
         raise EditorialCompositionError(
             "cover-letter opening lacks exact company and role hook evidence"
@@ -1066,8 +1625,11 @@ def validate_cover_letter_editorial_draft(
     company_fit_claims = [
         claim for claim in used_claims if claim.section_heading == "Company Fit"
     ]
-    if not company_fit_claims or any(
-        claim.fact_kind != "employer" for claim in company_fit_claims
+    if requirements["require_company_fit_employer"] and (
+        not company_fit_claims
+        or any(
+            claim.fact_kind != "employer" for claim in company_fit_claims
+        )
     ):
         raise EditorialCompositionError("cover letter lacks employer evidence in Company Fit")
 
@@ -1729,8 +2291,9 @@ class DetachedCodexEditorialAdapter:
         process_environment: Mapping[str, str] | None = None,
         timeout_seconds: float = 120.0,
         codex_binary_fd: int | None = None,
+        allow_missing_city: bool = False,
     ) -> None:
-        if stage not in _EDITORIAL_STAGES:
+        if type(stage) is not str or stage not in _EDITORIAL_STAGES:
             raise EditorialCompositionError("editorial Codex adapter stage is invalid")
         if environment not in {"production", "synthetic"}:
             raise EditorialCompositionError("editorial Codex environment is invalid")
@@ -1738,6 +2301,9 @@ class DetachedCodexEditorialAdapter:
         self.model = _required(model, "editorial Codex model")
         self.codex_binary = _required(codex_binary, "editorial Codex binary")
         self.environment = environment
+        self.allow_missing_city = effective_editorial_city_mode(
+            stage, allow_missing_city
+        )
         self.process_environment = dict(
             os.environ if process_environment is None else process_environment
         )
@@ -1772,32 +2338,112 @@ class DetachedCodexEditorialAdapter:
                 }
             )
         scrubbed = _scrubbed_codex_environment(self.process_environment)
-        self.transport_identity = content_hash(
-            {
-                "binary_sha256": self.executable_sha256,
-                "cli_contract_sha256": self.cli_contract_sha256,
-                "cwd_policy": "fresh-request-material-only",
-                "disabled_features": list(_DISABLED_CODEX_FEATURES),
-                "environment_names": sorted(scrubbed),
-                "ignore_project_rules": True,
-                "model": self.model,
-                "network_tools_enabled": False,
-                "project_doc_max_bytes": 0,
-                "provider": self.provider,
-                "response_schema_sha256": content_hash(self._response_schema),
-                "sandbox": "read-only",
-                "single_attempt": True,
-                "stage": self.stage,
-                "timeout_seconds": self.timeout_seconds,
-                "output_path_policy": "fresh-response-directory-only",
-            }
+        transport_identity = {
+            "binary_sha256": self.executable_sha256,
+            "cli_contract_sha256": self.cli_contract_sha256,
+            "cwd_policy": "fresh-request-material-only",
+            "disabled_features": list(_DISABLED_CODEX_FEATURES),
+            "environment_names": sorted(scrubbed),
+            "ignore_project_rules": True,
+            "model": self.model,
+            "network_tools_enabled": False,
+            "project_doc_max_bytes": 0,
+            "provider": self.provider,
+            "response_schema_sha256": content_hash(self._response_schema),
+            "sandbox": "read-only",
+            "single_attempt": True,
+            "stage": self.stage,
+            "timeout_seconds": self.timeout_seconds,
+            "output_path_policy": "fresh-response-directory-only",
+        }
+        transport_identity.update(
+            editorial_city_transport_extensions(
+                self.stage,
+                self.allow_missing_city,
+                dict(self._response_schema),
+                schema_hasher=content_hash,
+                city_schema_adapter=editorial_city_response_schema,
+            )
         )
+        self.transport_identity = content_hash(transport_identity)
 
     @property
     def _response_schema(self) -> Mapping[str, object]:
         return (
             _COVER_LETTER_RESPONSE_SCHEMA
             if self.stage.startswith("cover_letter_") else _DRAFT_RESPONSE_SCHEMA
+        )
+
+    def _request_editorial_mode(
+        self, request_bytes: bytes
+    ) -> tuple[object, bool, bool] | None:
+        if self.stage.startswith("cover_letter_"):
+            return None
+        try:
+            payload = json.loads(request_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise EditorialCompositionError("editorial request mode is invalid") from None
+        if not isinstance(payload, dict) or "editorial_request" not in payload:
+            raise EditorialCompositionError("editorial request mode is invalid")
+        try:
+            authority = payload["editorial_request"]["authority"]
+            city = authority["candidate_city"]
+            current_runtime = authority.get("current_runtime_pre_review", False)
+            requested_allow_missing_city = authority.get("allow_missing_city", False)
+            if (
+                type(current_runtime) is not bool
+                or type(requested_allow_missing_city) is not bool
+            ):
+                raise TypeError
+            allow_missing = (
+                self.allow_missing_city
+                and current_runtime
+                and requested_allow_missing_city
+            )
+        except (AttributeError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise EditorialCompositionError("editorial request city mode is invalid") from exc
+        validate_editorial_city(city, allow_missing_city=allow_missing)
+        return city, allow_missing, current_runtime
+
+    def _request_cover_letter_current_runtime(self, request_bytes: bytes) -> bool:
+        try:
+            payload = json.loads(request_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise EditorialCompositionError("editorial request mode is invalid") from None
+        if (
+            not isinstance(payload, dict)
+            or request_bytes != canonical_json(payload).encode("utf-8")
+        ):
+            raise EditorialCompositionError("editorial request mode is invalid")
+        try:
+            authority = payload["editorial_request"]["authority"]
+            current_runtime = authority.get("current_runtime_pre_review", False)
+            if type(current_runtime) is not bool:
+                raise TypeError
+        except (AttributeError, KeyError, TypeError):
+            raise EditorialCompositionError("editorial request mode is invalid") from None
+        return current_runtime
+
+    def _response_schema_for_request(self, request_bytes: bytes) -> Mapping[str, object]:
+        if self.stage.startswith("cover_letter_"):
+            current_runtime = self._request_cover_letter_current_runtime(request_bytes)
+            schema = json.loads(canonical_json(self._response_schema))
+            if current_runtime:
+                schema["properties"]["sections"]["items"]["properties"]["atoms"][
+                    "minItems"
+                ] = 0
+            return schema
+        editorial_mode = self._request_editorial_mode(request_bytes)
+        if editorial_mode is None:
+            return self._response_schema
+        city, allow_missing, current_runtime = editorial_mode
+        schema = editorial_layout_response_schema(
+            dict(self._response_schema), current_runtime=current_runtime
+        )
+        return editorial_city_response_schema(
+            schema,
+            authority_city=city,
+            allow_missing_city=allow_missing,
         )
 
     def available(self) -> bool:
@@ -1838,6 +2484,12 @@ class DetachedCodexEditorialAdapter:
                 "editorial Codex executable changed after configuration"
             )
         env = _scrubbed_codex_environment(self.process_environment)
+        response_schema = self._response_schema_for_request(request_bytes)
+        current_cover_runtime = (
+            self._request_cover_letter_current_runtime(request_bytes)
+            if self.stage.startswith("cover_letter_")
+            else False
+        )
         with tempfile.TemporaryDirectory(
             prefix=f"jaa-{self.stage}-request-"
         ) as request_dir, tempfile.TemporaryDirectory(
@@ -1849,7 +2501,7 @@ class DetachedCodexEditorialAdapter:
             output_path = Path(response_dir) / "last-message.json"
             request_path.write_bytes(request_bytes)
             schema_path.write_text(
-                canonical_json(self._response_schema), encoding="utf-8"
+                canonical_json(response_schema), encoding="utf-8"
             )
             executable = (
                 f"/proc/self/fd/{self.codex_binary_fd}"
@@ -1911,7 +2563,7 @@ class DetachedCodexEditorialAdapter:
                     f"{diagnostic[:4000]}"
                 )
             _validate_codex_jsonl(completed.stdout or "")
-            expected_schema_bytes = canonical_json(self._response_schema).encode()
+            expected_schema_bytes = canonical_json(response_schema).encode()
             if (
                 request_path.read_bytes() != request_bytes
                 or schema_path.read_bytes() != expected_schema_bytes
@@ -1934,10 +2586,21 @@ class DetachedCodexEditorialAdapter:
             response_bytes = output_path.read_bytes()
             if self.stage.startswith("cover_letter_"):
                 _cover_letter_draft_from_response(
-                    response_bytes, require_transport_shape=True
+                    response_bytes,
+                    require_transport_shape=True,
+                    current_runtime=current_cover_runtime,
                 )
             else:
-                _draft_from_response(response_bytes, require_transport_shape=True)
+                editorial_mode = self._request_editorial_mode(request_bytes)
+                if editorial_mode is None:
+                    raise EditorialCompositionError("editorial request mode is invalid")
+                _, allow_missing_city, current_runtime = editorial_mode
+                _draft_from_response(
+                    response_bytes,
+                    require_transport_shape=True,
+                    allow_missing_city=allow_missing_city,
+                    current_runtime=current_runtime,
+                )
         return EditorialBackendResult(
             response_bytes=response_bytes,
             invocation_id=invocation_id,
@@ -1995,12 +2658,23 @@ def _draft_from_response(
     value: bytes,
     *,
     require_transport_shape: bool = False,
+    allow_missing_city: bool = False,
+    current_runtime: bool = False,
 ) -> CVEditorialDraft:
-    try:
-        document = json.loads(value)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise EditorialCompositionError("editorial backend returned invalid JSON") from exc
-    if not isinstance(document, dict) or value != canonical_json(document).encode():
+    if type(current_runtime) is not bool:
+        raise EditorialCompositionError("editorial backend returned invalid JSON")
+    if current_runtime:
+        document = _parse_strict_editorial_response(value, backend="editorial")
+    else:
+        try:
+            document = json.loads(value)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise EditorialCompositionError(
+                "editorial backend returned invalid JSON"
+            ) from exc
+    if not isinstance(document, dict) or (
+        not current_runtime and value != canonical_json(document).encode()
+    ):
         raise EditorialCompositionError("editorial backend response is not canonical JSON")
     transport_keys = {
         "candidate_city",
@@ -2032,11 +2706,13 @@ def _draft_from_response(
             }:
                 raise EditorialCompositionError("editorial backend atom schema differs")
             rows.append(EditorialAtom(**atom))
-        sections.append(CVSection(str(section["heading"]), tuple(rows)))
+        sections.append(CVSection(section["heading"], tuple(rows)))
     draft = build_editorial_draft(
         candidate_name=document["candidate_name"],
         candidate_city=document["candidate_city"],
         sections=tuple(sections),
+        allow_missing_city=allow_missing_city,
+        current_runtime=current_runtime,
     )
     if document["schema_version"] != DRAFT_SCHEMA:
         raise EditorialCompositionError("editorial backend draft schema differs")
@@ -2045,18 +2721,81 @@ def _draft_from_response(
     return draft
 
 
+def _parse_strict_editorial_response(
+    value: bytes, *, backend: str
+) -> dict[str, object]:
+    if (
+        type(value) is not bytes
+        or type(backend) is not str
+        or backend not in {"editorial", "cover-letter"}
+    ):
+        raise EditorialCompositionError(f"{backend} backend returned invalid JSON")
+
+    def unique_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        document: dict[str, object] = {}
+        for key, item in pairs:
+            if key in document:
+                raise ValueError("duplicate JSON object key")
+            document[key] = item
+        return document
+
+    def reject_nonfinite_constant(value: str) -> object:
+        raise ValueError("non-finite JSON number")
+
+    def parse_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("non-finite JSON number")
+        return parsed
+
+    def reject_surrogates(value: object) -> None:
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, str):
+                if _JSON_SURROGATE.search(item):
+                    raise ValueError("invalid Unicode scalar")
+            elif isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+
+    try:
+        text = value.decode("utf-8", "strict")
+        if value.startswith(b"\xef\xbb\xbf") or text.startswith("\ufeff"):
+            raise ValueError("UTF-8 BOM is not allowed")
+        document = json.loads(
+            text,
+            object_pairs_hook=unique_object_pairs,
+            parse_constant=reject_nonfinite_constant,
+            parse_float=parse_finite_float,
+        )
+        reject_surrogates(document)
+    except (UnicodeDecodeError, ValueError):
+        raise EditorialCompositionError(
+            f"{backend} backend returned invalid JSON"
+        ) from None
+    if not isinstance(document, dict):
+        raise EditorialCompositionError(
+            f"{backend} backend draft schema differs"
+        )
+    return document
+
+
 def _cover_letter_draft_from_response(
     value: bytes,
     *,
     require_transport_shape: bool = False,
+    current_runtime: bool = False,
 ) -> CoverLetterEditorialDraft:
-    try:
-        document = json.loads(value)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise EditorialCompositionError(
-            "cover-letter backend returned invalid JSON"
-        ) from exc
-    if not isinstance(document, dict) or value != canonical_json(document).encode():
+    if type(value) is not bytes or type(current_runtime) is not bool:
+        raise EditorialCompositionError("cover-letter backend returned invalid JSON")
+    document = _parse_strict_editorial_response(value, backend="cover-letter")
+    if (
+        not current_runtime
+        and value != canonical_json(document).encode("utf-8")
+    ):
         raise EditorialCompositionError(
             "cover-letter backend response is not canonical JSON"
         )
@@ -2086,9 +2825,17 @@ def _cover_letter_draft_from_response(
                     "cover-letter backend atom schema differs"
                 )
             atoms.append(EditorialAtom(**atom))
-        sections.append(CoverLetterSection(str(section["heading"]), tuple(atoms)))
+        sections.append(
+            CoverLetterSection(
+                str(section["heading"]),
+                tuple(atoms),
+                current_runtime=current_runtime,
+            )
+        )
     draft = build_cover_letter_editorial_draft(
-        candidate_name=document["candidate_name"], sections=sections
+        candidate_name=document["candidate_name"],
+        sections=sections,
+        current_runtime=current_runtime,
     )
     if document["schema_version"] != COVER_LETTER_DRAFT_SCHEMA:
         raise EditorialCompositionError("cover-letter backend draft schema differs")
@@ -2110,7 +2857,10 @@ def run_editorial_composition_runtime(
 ]:
     """Invoke isolated writer then Humanizer adapters and validate exact output."""
 
+    if type(request) is not CVEditorialRequest:
+        raise EditorialCompositionError("CV runtime requires an exact CV request")
     request.__post_init__()
+    current_runtime = request.authority.current_runtime
     runtime.__post_init__()
     if runtime.environment == "production":
         # Local import keeps the compiler/factory independent of this runtime while
@@ -2136,31 +2886,78 @@ def run_editorial_composition_runtime(
             ) from exc
     if runtime.writer.available() is not True or runtime.humanizer.available() is not True:
         raise EditorialCompositionError("editorial runtime adapter is unavailable")
-    writer_request = canonical_json(
-        {
-            "claim_section_policy": {
-                claim.claim_id: sorted(
-                    heading
-                    for heading, categories in _CATEGORY_BY_HEADING.items()
-                    if claim.category in categories
-                )
+    section_policy = editorial_section_policy(current_runtime=current_runtime)
+    current_assignment = None
+    if current_runtime:
+        current_assignment = build_cv_claim_assignment_contract(
+            [
+                {"claim_id": claim.claim_id, "category": claim.category}
                 for claim in request.approved_claims
-            },
-            "editorial_request": request.document(),
-            "instructions": [
-                "Return only one canonical JSON object matching the supplied response schema.",
-                "Use approved_claim atoms verbatim; never paraphrase, split, or invent facts.",
-                "Place every approved_claim atom only in a section listed for its claim ID in claim_section_policy.",
-                "Omit connective atoms or select them only from the supplied finite rhetorical catalog.",
-                "Do not add Curriculum Vitae/CV labels, work-rights text, or unsupported capabilities.",
-                "Do not add AI-authorship disclosure or em/en dashes, including inside approved facts.",
-                "Keep formats and datastores out of Core Capabilities.",
             ],
+            section_policy,
+            {
+                heading: category_for_source_heading(
+                    heading, current_runtime=True
+                )
+                for heading in section_policy
+            },
+        )
+        claim_section_policy = current_assignment["claim_section_policy"]
+    else:
+        claim_section_policy = {
+            claim.claim_id: sorted(
+                heading
+                for heading, categories in section_policy.items()
+                if claim.category in categories
+            )
+            for claim in request.approved_claims
+        }
+    shared_instructions = [
+        "Never split a claim, invent facts, or remove a material limitation from a retained positive claim.",
+        "Place every approved_claim atom only in a section listed for its claim ID in claim_section_policy.",
+        "Omit connective atoms or select them only from the supplied finite rhetorical catalog.",
+        "Do not add Curriculum Vitae/CV labels, work-rights text, or unsupported capabilities.",
+        "Do not add AI-authorship disclosure or em/en dashes, including inside approved facts.",
+        "Keep formats and datastores out of Core Capabilities.",
+    ]
+    if current_runtime:
+        instructions = [
+            "Return only one canonical JSON object matching the supplied response schema.",
+            "Select relevant, useful, supported approved claims as whole claims and retain each selected claim ID.",
+            "Rephrase a selected candidate claim professionally, preserving its supported meaning, quantities, dates, qualifiers and negation; never strengthen a limited statement.",
+            "In Education, never emit day-level dates. For a graduation date, use only the exact graduation_month_year supplied in candidate authority; if it is absent, omit the graduation date rather than infer or invent one. If another Education claim cannot be retained without a day-level date while preserving its supported meaning, omit that whole claim rather than removing only the date or a limitation. This Education-specific rule overrides the general instruction to preserve dates.",
+            "Omit an unsuitable claim as a whole rather than removing its material caveat.",
+            "Omit whole claims that narrate internal governance, audit, review or approval; explain evidence origin or provenance; disclose how this document was produced (including prompts, models, drafting tools, or AI/human authorship); apologize, admit weakness, or use defensive framing; or are irrelevant to the target role. Do not omit genuine AI/LLM technical experience or project work solely because it involves AI; retain it when relevant and supported. Preserve every material caveat, qualifier, limitation, and negation in any claim you keep.",
+            *shared_instructions,
+            "Do not add internal process commentary or meta-signposts to employer-facing text.",
+        ]
+    else:
+        instructions = [
+            "Return only one canonical JSON object matching the supplied response schema.",
+            "Use approved_claim atoms verbatim; never paraphrase, split, or invent facts.",
+            "Place every approved_claim atom only in a section listed for its claim ID in claim_section_policy.",
+            "Omit connective atoms or select them only from the supplied finite rhetorical catalog.",
+            "Do not add Curriculum Vitae/CV labels, work-rights text, or unsupported capabilities.",
+            "Do not add AI-authorship disclosure or em/en dashes, including inside approved facts.",
+            "Keep formats and datastores out of Core Capabilities.",
+        ]
+    writer_request_document: dict[str, object] = {
+        "claim_section_policy": claim_section_policy,
+    }
+    if current_assignment is not None:
+        writer_request_document["available_claim_ids"] = current_assignment[
+            "required_claim_ids"
+        ]
+    writer_request_document.update(
+        {
+            "editorial_request": request.document(),
+            "instructions": instructions,
             "rhetorical_catalog": sorted(_CV_RHETORICAL_CONNECTIVES),
             "schema_version": "jaa.cv-writer-runtime-request.v3",
             "stage": "resume_writer",
         }
-    ).encode()
+    )
+    writer_request = canonical_json(writer_request_document).encode()
     writer_invocation = secrets.token_hex(32)
     writer_session = runtime.writer.open_fresh_session(
         invocation_id=writer_invocation
@@ -2178,8 +2975,14 @@ def run_editorial_composition_runtime(
         or writer_result.request_sha256 != hashlib.sha256(writer_request).hexdigest()
     ):
         raise EditorialCompositionError("writer result differs from configured adapter")
-    writer_draft = _draft_from_response(writer_result.response_bytes)
-    validate_editorial_draft(request, writer_draft)
+    writer_draft = _draft_from_response(
+        writer_result.response_bytes,
+        allow_missing_city=request.authority.allow_missing_city,
+        current_runtime=current_runtime,
+    )
+    validate_editorial_draft(
+        request, writer_draft, current_runtime=current_runtime
+    )
 
     humanizer_request_sha = humanizer_request_sha256(request, writer_draft)
     humanizer_request = canonical_json(
@@ -2222,7 +3025,11 @@ def run_editorial_composition_runtime(
         != hashlib.sha256(humanizer_request).hexdigest()
     ):
         raise EditorialCompositionError("Humanizer result differs from configured adapter")
-    final_draft = _draft_from_response(humanizer_result.response_bytes)
+    final_draft = _draft_from_response(
+        humanizer_result.response_bytes,
+        allow_missing_city=request.authority.allow_missing_city,
+        current_runtime=current_runtime,
+    )
     writer_evidence = EditorialStageEvidence(
         stage="resume_writer",
         environment=runtime.environment,
@@ -2271,6 +3078,10 @@ def run_cover_letter_composition_runtime(
     EditorialStageEvidence,
 ]:
     """Invoke detached one-shot cover-letter writer and Humanizer sessions."""
+    if type(request) is not CoverLetterEditorialRequest:
+        raise EditorialCompositionError(
+            "cover-letter runtime requires an exact cover-letter request"
+        )
     request.__post_init__()
     runtime.__post_init__()
     if runtime.document_kind != "cover_letter":
@@ -2298,27 +3109,44 @@ def run_cover_letter_composition_runtime(
     if runtime.writer.available() is not True or runtime.humanizer.available() is not True:
         raise EditorialCompositionError("cover-letter runtime adapter is unavailable")
     rhetorical_catalog = _cover_letter_rhetorical_catalog(request)
-    writer_request = canonical_json(
+    cover_rows = [
         {
-            "editorial_request": request.document(),
-            "instructions": [
-                "Return only one canonical JSON object matching the response schema.",
-                "Write a specific UK cover letter under one page using the four supplied sections.",
-                "Use approved_claim atoms verbatim and never invent or paraphrase facts.",
-                "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
-                "After the salutation, Opening must contain an approved employer claim naming the company and role.",
-                "Use the strongest supported candidate evidence and only the supplied typed rhetorical atoms.",
-                "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim.",
-                "Use at most 500 words and 3500 characters; add no em or en dash.",
-            ],
-            "rhetorical_catalog": {
-                heading: list(values)
-                for heading, values in rhetorical_catalog.items()
-            },
-            "schema_version": "jaa.cover-letter-writer-runtime-request.v3",
-            "stage": "cover_letter_writer",
+            "claim_id": claim.claim_id,
+            "fact_kind": claim.fact_kind,
+            "section_heading": claim.section_heading,
         }
-    ).encode()
+        for claim in request.approved_claims
+    ]
+    runtime_contract = _build_cover_runtime_contract(
+        cover_rows, current_runtime=request.authority.current_runtime
+    )
+    writer_payload = {
+        "editorial_request": request.document(),
+        "instructions": [
+            "Return only one canonical JSON object matching the response schema.",
+            "Write a specific UK cover letter under one page using the four supplied sections.",
+            "Use approved_claim atoms verbatim and never invent or paraphrase facts.",
+            "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
+            "After the salutation, Opening must contain an approved employer claim naming the company and role.",
+            "Use the strongest supported candidate evidence and only the supplied typed rhetorical atoms.",
+            "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim.",
+            "Use at most 500 words and 3500 characters; add no em or en dash.",
+        ],
+        "rhetorical_catalog": {
+            heading: list(values)
+            for heading, values in rhetorical_catalog.items()
+        },
+        "schema_version": "jaa.cover-letter-writer-runtime-request.v3",
+        "stage": "cover_letter_writer",
+    }
+    if runtime_contract:
+        writer_payload["instructions"] = runtime_contract["writer_instructions"]
+        writer_payload["claim_section_policy"] = runtime_contract[
+            "claim_section_policy"
+        ]
+        writer_payload["available_claim_ids"] = runtime_contract["available_claim_ids"]
+        writer_payload["section_min_facts"] = runtime_contract["section_min_facts"]
+    writer_request = canonical_json(writer_payload).encode()
     writer_invocation = secrets.token_hex(32)
     writer_session = runtime.writer.open_fresh_session(invocation_id=writer_invocation)
     if writer_session is runtime.writer or writer_session.invocation_id != writer_invocation:
@@ -2338,30 +3166,42 @@ def run_cover_letter_composition_runtime(
         raise EditorialCompositionError(
             "cover-letter writer result differs from configured adapter"
         )
-    writer_draft = _cover_letter_draft_from_response(writer_result.response_bytes)
+    writer_draft = _cover_letter_draft_from_response(
+        writer_result.response_bytes,
+        current_runtime=request.authority.current_runtime,
+    )
     validate_cover_letter_editorial_draft(request, writer_draft)
 
     humanizer_request_sha = cover_letter_humanizer_request_sha256(request, writer_draft)
-    humanizer_request = canonical_json(
-        {
-            "editorial_request": request.document(),
-            "humanizer_request_sha256": humanizer_request_sha,
-            "instructions": [
-                "Return only one canonical JSON object matching the response schema.",
-                "Preserve every approved_claim atom and all four sections exactly.",
-                "Edit connective atoms only by selecting another supplied typed rhetorical atom for that section.",
-                "Preserve the exact salutation, sign-off, signature and opening employer hook.",
-                "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact.",
-            ],
-            "schema_version": "jaa.cover-letter-humanizer-runtime-request.v3",
-            "stage": "cover_letter_humanizer",
-            "rhetorical_catalog": {
-                heading: list(values)
-                for heading, values in rhetorical_catalog.items()
-            },
-            "writer_draft": writer_draft.document(),
-        }
-    ).encode()
+    humanizer_payload = {
+        "editorial_request": request.document(),
+        "humanizer_request_sha256": humanizer_request_sha,
+        "instructions": [
+            "Return only one canonical JSON object matching the response schema.",
+            "Preserve every approved_claim atom and all four sections exactly.",
+            "Edit connective atoms only by selecting another supplied typed rhetorical atom for that section.",
+            "Preserve the exact salutation, sign-off, signature and opening employer hook.",
+            "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact.",
+        ],
+        "schema_version": "jaa.cover-letter-humanizer-runtime-request.v3",
+        "stage": "cover_letter_humanizer",
+        "rhetorical_catalog": {
+            heading: list(values)
+            for heading, values in rhetorical_catalog.items()
+        },
+        "writer_draft": writer_draft.document(),
+    }
+    if runtime_contract:
+        humanizer_payload["instructions"] = runtime_contract[
+            "humanizer_instructions"
+        ]
+        humanizer_payload["claim_section_policy"] = runtime_contract[
+            "claim_section_policy"
+        ]
+        humanizer_payload["available_claim_ids"] = runtime_contract[
+            "available_claim_ids"
+        ]
+    humanizer_request = canonical_json(humanizer_payload).encode()
     humanizer_invocation = secrets.token_hex(32)
     humanizer_session = runtime.humanizer.open_fresh_session(
         invocation_id=humanizer_invocation
@@ -2387,7 +3227,10 @@ def run_cover_letter_composition_runtime(
         raise EditorialCompositionError(
             "cover-letter Humanizer result differs from configured adapter"
         )
-    final_draft = _cover_letter_draft_from_response(humanizer_result.response_bytes)
+    final_draft = _cover_letter_draft_from_response(
+        humanizer_result.response_bytes,
+        current_runtime=request.authority.current_runtime,
+    )
     writer_evidence = EditorialStageEvidence(
         stage="cover_letter_writer",
         environment=runtime.environment,

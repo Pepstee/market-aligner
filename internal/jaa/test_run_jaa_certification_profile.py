@@ -54,6 +54,12 @@ def _patch_profile(
     )
 
 
+def _repository_python_launcher(repository_root: Path) -> Path:
+    venv_directory = repository_root / ".venv"
+    venv_directory.symlink_to(Path(sys.prefix), target_is_directory=True)
+    return venv_directory / "bin" / "python"
+
+
 def test_execute_records_passed_test_and_binds_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -61,17 +67,20 @@ def test_execute_records_passed_test_and_binds_receipt(
     test_file.write_text("def test_pass():\n    assert True\n", encoding="utf-8")
     document = _fake_document([test_file.name])
     _patch_profile(monkeypatch, document)
+    python_executable = _repository_python_launcher(tmp_path)
 
     bundle, all_passed = runner.execute(
         repository_root=tmp_path,
         evidence_config=tmp_path / "unused.json",
         output_directory=tmp_path / "run",
-        python_executable=Path(sys.executable).resolve(),
+        python_executable=python_executable,
         timeout_seconds=30,
     )
 
     assert all_passed is True
     assert bundle["runs"][0]["status"] == "passed"
+    assert bundle["runs"][0]["command"][0] == str(python_executable)
+    assert bundle["python_runtime"]["launcher"] == str(python_executable)
     assert bundle["execution_receipt"] is not None
     assert bundle["claims"]["product_certified"] is False
     persisted = json.loads((tmp_path / "run" / "run-bundle.json").read_text())
@@ -89,18 +98,25 @@ def test_execute_records_failure_without_execution_receipt(
     test_file.write_text("def test_fail():\n    assert False\n", encoding="utf-8")
     document = _fake_document([test_file.name])
     _patch_profile(monkeypatch, document)
+    python_executable = _repository_python_launcher(tmp_path)
 
     bundle, all_passed = runner.execute(
         repository_root=tmp_path,
         evidence_config=tmp_path / "unused.json",
         output_directory=tmp_path / "run",
-        python_executable=Path(sys.executable).resolve(),
+        python_executable=python_executable,
         timeout_seconds=30,
     )
 
     assert all_passed is False
     assert bundle["runs"][0]["status"] == "failed"
     assert bundle["execution_receipt"] is None
+    run = bundle["runs"][0]
+    stdout = (tmp_path / "run" / run["stdout"]["path"]).read_text(encoding="utf-8")
+    stderr = (tmp_path / "run" / run["stderr"]["path"]).read_text(encoding="utf-8")
+    assert "test_fail.py" in stdout
+    assert "assert False" in stdout
+    assert stderr == ""
 
 
 def test_executable_rejects_arbitrary_symlink(tmp_path: Path) -> None:

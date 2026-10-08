@@ -37,6 +37,7 @@ Run from the repo root:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -53,7 +54,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import contracts  # noqa: E402
 from contracts import (  # noqa: E402
-    JobUrl, RawPosting, JobRow, ScoredRow, CandidateFitProfile,
+    JobUrl, RawPosting, JobRow, ScoredRow, CandidateFitProfile, CandidatePreferenceProfile,
     read_jsonl, write_jsonl, to_dict, from_dict,
 )
 import scoring  # noqa: E402
@@ -138,6 +139,8 @@ def _profile_block(cfg: dict[str, Any]) -> dict[str, Any]:
     Prefer the profiler's generated, privacy-screened projection.  The compact
     config block remains a fallback so the skeleton can still run by itself.
     """
+    if ((cfg or {}).get("scoring") or {}).get("mode") == "creative":
+        return dict((cfg or {}).get("candidate_preferences", {}) or {})
     configured = os.environ.get("CANDIDATE_PROFILE_PATH") or str(
         ((cfg or {}).get("io", {}) or {}).get(
             "candidate_profile", "profiler/data/candidate_profile.yaml"
@@ -211,14 +214,19 @@ def stage_discover(ctx: RunContext) -> Optional[Path]:
     boards = list(boards_cfg.get("enabled", []) or [])
     terms = list(ctx.cfg.get("search_terms", []) or [])
     rate = float(boards_cfg.get("rate_limit_seconds", 0) or 0)
+    cap = int(boards_cfg.get("max_jobs_total", 0) or 0)
+    if cap < 0:
+        raise ValueError("max_jobs_total must be non-negative")
     # boards.mode: "live" (default — real HTTP) or "fixture" (offline test data).
     live = str(boards_cfg.get("mode", "live")).lower() != "fixture"
-    ctx.log(f"[discover] mode={'live' if live else 'fixture'} boards={boards} cap=none")
+    ctx.log(f"[discover] mode={'live' if live else 'fixture'} boards={boards} cap={cap or 'none'}")
 
     existing = list(read_jsonl(out, JobUrl)) if out.exists() else []
     seen: set[str] = {row.key for row in existing}
     urls: list[JobUrl] = list(existing)
     for board in boards:
+        if cap and len(urls) >= cap:
+            break
         try:
             adapter = load_adapter(board, config=(ctx.cfg.get(board) or {}))
         except Exception as e:  # noqa: BLE001 - a missing board adapter shouldn't kill the run
@@ -230,6 +238,8 @@ def stage_discover(ctx: RunContext) -> Optional[Path]:
                     continue
                 seen.add(ju.key)
                 urls.append(ju)
+                if cap and len(urls) >= cap:
+                    break
         except Exception as e:  # noqa: BLE001 — a mid-crawl blip must not kill the run
             ctx.log(f"[discover] board '{board}' failed mid-crawl: {e} — "
                     f"keeping the {len(urls)} urls collected so far")
@@ -298,9 +308,12 @@ def stage_fetch(ctx: RunContext) -> Optional[Path]:
 # Stage 3 — extract  (llm: C2 → C3 jobs.jsonl, structured + rated)
 # --------------------------------------------------------------------------- #
 def _iter_raw_postings(ctx: RunContext):
-    base = ctx.paths.raw_cache
-    if not base.exists():
-        return
+    configured = (ctx.cfg.get("io") or {}).get("raw_cache_roots") or []
+    if not isinstance(configured, list) or any(
+        not isinstance(path, str) or not path.strip() for path in configured
+    ):
+        raise ValueError("raw_cache_roots must be a list of non-empty paths")
+    bases = [ctx.paths.root / path for path in configured] or [ctx.paths.raw_cache]
     selection = ctx.paths.processing_job_urls or ctx.paths.job_urls
     if ctx.paths.processing_job_urls is not None and not selection.exists():
         raise RuntimeError(
@@ -309,20 +322,32 @@ def _iter_raw_postings(ctx: RunContext):
         )
     allowed = {
         rec.key for rec in read_jsonl(selection, JobUrl)
-    } if selection.exists() else set()
-    for f in sorted(base.rglob("*.json")):
-        if "_scrapling_failures" in f.parts:
-            continue
-        try:
-            records = list(read_jsonl(f, RawPosting))
-        except (OSError, ValueError) as error:
-            ctx.log(
-                f"[extract] skip malformed raw cache file {f}: "
-                f"{type(error).__name__}: {error}"
-            )
-            continue
-        for rec in records:
-            if not allowed or rec.key in allowed:
+    } if selection.exists() else None
+    seen: set[str] = set()
+    for base in bases:
+        for f in sorted(base.rglob("*.json")):
+            if "_scrapling_failures" in f.parts:
+                continue
+            try:
+                try:
+                    payload = json.loads(f.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    records = list(read_jsonl(f, RawPosting))
+                else:
+                    items = payload if isinstance(payload, list) else [payload]
+                    if any(not isinstance(item, dict) for item in items):
+                        raise ValueError("raw cache must contain posting objects")
+                    records = [from_dict(RawPosting, item) for item in items]
+            except (OSError, ValueError, TypeError) as error:
+                ctx.log(
+                    f"[extract] skip malformed raw cache file {f}: "
+                    f"{type(error).__name__}: {error}"
+                )
+                continue
+            for rec in records:
+                if rec.key in seen or (allowed is not None and rec.key not in allowed):
+                    continue
+                seen.add(rec.key)
                 yield rec
 
 
@@ -415,12 +440,14 @@ def stage_extract(ctx: RunContext) -> Optional[Path]:
             # Sol sees the complete career-relevant dossier for every vacancy,
             # including extraction fields that require personal judgement
             # (why_it_fits and skills_to_learn).
-            extracted = extract_job(to_dict(rp), profile_block)
+            mode = (ctx.cfg.get("scoring") or {}).get("mode", "evidence")
+            options = {"mode": "creative"} if mode == "creative" else {}
+            extracted = extract_job(to_dict(rp), profile_block, **options)
             extracted["required_software"] = _canon_list(extracted.get("required_software"))
             extracted["required_skills"] = _canon_list(extracted.get("required_skills"))
             extracted["preferred_skills"] = _canon_list(extracted.get("preferred_skills"))
             extracted["skills_to_learn"] = _canon_list(extracted.get("skills_to_learn"))
-            ratings = rate_axes(extracted, profile_block)
+            ratings = rate_axes(extracted, profile_block, **options)
         except Exception as e:  # noqa: BLE001 — per-row fault tolerance
             failed += 1
             ctx.log(f"[extract] FAILED {rp.key} ({idx}/{len(todo)}): {e}")
@@ -473,7 +500,9 @@ def stage_score(ctx: RunContext) -> Optional[Path]:
             **tracks,
             "blind_spots": list(profile_context.get("blind_spots") or []),
         }
-    profile = CandidateFitProfile.from_config(profile_cfg)
+    profile = (CandidatePreferenceProfile.from_config(profile_cfg)
+               if (ctx.cfg.get("scoring") or {}).get("mode") == "creative"
+               else CandidateFitProfile.from_config(profile_cfg))
     params = scoring.ScoringParams.from_config(ctx.cfg)
     scored = scoring.score_rows(rows, profile, params)
     n = write_jsonl(out, scored_to_records(scored))
@@ -529,7 +558,10 @@ def stage_report(ctx: RunContext) -> Optional[Path]:
     if not scored:
         ctx.log("[report] no C4 scored rows — run score first, or pass a scored --fixture (skipping)")
         return None
-    paths = reporter.write_reports(scored, output_dir=ctx.paths.outputs)
+    paths = reporter.write_reports(
+        scored, output_dir=ctx.paths.outputs,
+        entry_level_only=(ctx.cfg.get("scoring") or {}).get("mode") == "creative",
+    )
     ctx.log(f"[report] wrote {paths.jobs_xlsx}")
     ctx.log(f"[report] wrote {paths.requirements_xlsx}")
     ctx.log(f"[report] wrote {paths.shortlist_md}")

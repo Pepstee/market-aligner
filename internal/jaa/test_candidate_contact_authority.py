@@ -15,12 +15,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import career_automation.candidate_contact_authority as contact_module
 from career_automation.candidate_contact_authority import (
     ATTESTATION,
+    CurrentContactProvenance,
     REGISTRY_ATTESTATION,
     REGISTRY_ENV,
     REGISTRY_SCHEMA_VERSION,
     SCHEMA_VERSION,
     CandidateContactResourceLease,
     load_candidate_contact_authority,
+    resolve_native_contact,
 )
 from career_automation.evidence_matching import canonical_json
 from career_automation.production_form_binding import approved_authority_values
@@ -389,3 +391,148 @@ def test_independent_version_two_cannot_skip_registry_history(tmp_path: Path) ->
             repository_root=ROOT,
             verified_at=datetime(2026, 8, 6, 12, tzinfo=timezone.utc),
         )
+
+
+def test_resolve_native_contact_revalidates_current_provenance_without_legacy_load() -> None:
+    source = object()
+    validated = []
+    loaded = []
+
+    def validate(provenance):
+        validated.append(provenance)
+        return None
+
+    result = resolve_native_contact(
+        current_runtime=True,
+        provenance=source,
+        signed_path=None,
+        current_type=object,
+        validate_current=validate,
+        load_legacy=lambda path: loaded.append(path),
+    )
+
+    assert result is source
+    assert validated == [source]
+    assert loaded == []
+
+
+@pytest.mark.parametrize("invalid_flag", (0, 1, "true", None))
+def test_resolve_native_contact_requires_exact_mode_boolean(invalid_flag) -> None:
+    with pytest.raises(TypeError, match="exactly bool"):
+        resolve_native_contact(
+            current_runtime=invalid_flag,
+            provenance=None,
+            signed_path="signed.json",
+            current_type=object,
+            validate_current=lambda _value: None,
+            load_legacy=lambda path: path,
+        )
+
+
+def test_resolve_native_contact_current_refuses_signed_path_before_validation() -> None:
+    calls = []
+    with pytest.raises(ValueError, match="signed contact path"):
+        resolve_native_contact(
+            current_runtime=True,
+            provenance=object(),
+            signed_path="legacy-authority.json",
+            current_type=object,
+            validate_current=lambda value: calls.append(value),
+            load_legacy=lambda path: calls.append(path),
+        )
+    assert calls == []
+
+
+def test_resolve_native_contact_current_rejects_provenance_subclasses() -> None:
+    class Provenance:
+        pass
+
+    class DerivedProvenance(Provenance):
+        pass
+
+    calls = []
+    with pytest.raises(ValueError, match="exact typed"):
+        resolve_native_contact(
+            current_runtime=True,
+            provenance=DerivedProvenance(),
+            signed_path=None,
+            current_type=Provenance,
+            validate_current=lambda value: calls.append(value),
+            load_legacy=lambda path: calls.append(path),
+        )
+    assert calls == []
+
+
+def test_resolve_native_contact_current_propagates_validation_error_without_retry() -> None:
+    class ValidationError(Exception):
+        pass
+
+    class Provenance:
+        pass
+
+    failure = ValidationError("current contact invalid")
+    calls = []
+
+    def validate(_value):
+        calls.append("validate")
+        raise failure
+
+    with pytest.raises(ValidationError) as caught:
+        resolve_native_contact(
+            current_runtime=True,
+            provenance=Provenance(),
+            signed_path=None,
+            current_type=Provenance,
+            validate_current=validate,
+            load_legacy=lambda path: calls.append(path),
+        )
+    assert caught.value is failure
+    assert calls == ["validate"]
+
+
+def test_resolve_native_contact_current_refuses_non_none_validation_result() -> None:
+    class Provenance:
+        pass
+
+    calls = []
+    with pytest.raises(ValueError, match="did not return None"):
+        resolve_native_contact(
+            current_runtime=True,
+            provenance=Provenance(),
+            signed_path=None,
+            current_type=Provenance,
+            validate_current=lambda _value: False,
+            load_legacy=lambda path: calls.append(path),
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize("path", ("signed-contact.json", Path("signed-contact.json")))
+def test_resolve_native_contact_legacy_preserves_signed_loader_and_path(path) -> None:
+    calls = []
+    validator_calls = []
+    result = resolve_native_contact(
+        current_runtime=False,
+        provenance=None,
+        signed_path=path,
+        current_type=CurrentContactProvenance,
+        validate_current=lambda value: validator_calls.append(value),
+        load_legacy=lambda value: calls.append(value) or "legacy-contact",
+    )
+    assert result == "legacy-contact"
+    assert calls == [path]
+    assert validator_calls == []
+
+
+def test_resolve_native_contact_legacy_refuses_current_provenance() -> None:
+    calls = []
+    with pytest.raises(ValueError, match="current contact provenance"):
+        resolve_native_contact(
+            current_runtime=False,
+            provenance=object(),
+            signed_path="signed-contact.json",
+            current_type=CurrentContactProvenance,
+            validate_current=lambda value: calls.append(value),
+            load_legacy=lambda path: calls.append(path),
+        )
+    assert calls == []

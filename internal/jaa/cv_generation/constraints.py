@@ -278,6 +278,207 @@ class CandidateSourcePolicyReceipt:
         }
 
 
+_PRE_EDITORIAL_SOURCE_POLICY = {
+    "schema_version": "pre-editorial-source-integrity-policy.v1",
+    "validation_scope": "source_integrity_only",
+    "requirements": {
+        "source_id": "exact-lowercase-ascii-sha256",
+        "cv_text": ["exact-str", "nonempty", "utf8", "no-nul", "sha256-matches"],
+        "sections": {
+            "container": "exact-nonempty-dict",
+            "heading": "exact-trimmed-utf8-str-without-nul-cr-lf",
+            "lines": "exact-nonempty-tuple-of-nonempty-utf8-strings-without-nul-cr-lf",
+            "line_occurrence": "verbatim-in-cv-text",
+        },
+        "preserve_source_content": True,
+    },
+    "rewrites": False,
+    "final_style_validation": False,
+    "release_authority": False,
+}
+
+
+def _pre_editorial_canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+@dataclass(frozen=True)
+class PreEditorialSourceEnvelopeReceipt:
+    source_id: str
+    cv_sha256: str
+    sections_sha256: str
+    policy_sha256: str
+    receipt_sha256: str
+    schema_version: str = "pre-editorial-source-envelope.v1"
+    validation_scope: str = "source_integrity_only"
+    passed: bool = True
+    release_authority: bool = False
+    final_style_validated: bool = False
+
+    @classmethod
+    def from_document(cls, value: object) -> "PreEditorialSourceEnvelopeReceipt":
+        expected_keys = {
+            "schema_version",
+            "validation_scope",
+            "source_id",
+            "cv_sha256",
+            "sections_sha256",
+            "policy_sha256",
+            "passed",
+            "release_authority",
+            "final_style_validated",
+            "receipt_sha256",
+        }
+        if (
+            type(value) is not dict
+            or any(type(key) is not str for key in value)
+            or set(value) != expected_keys
+        ):
+            raise ValueError("pre-editorial source envelope is invalid")
+        return cls(
+            schema_version=value["schema_version"],
+            validation_scope=value["validation_scope"],
+            source_id=value["source_id"],
+            cv_sha256=value["cv_sha256"],
+            sections_sha256=value["sections_sha256"],
+            policy_sha256=value["policy_sha256"],
+            passed=value["passed"],
+            release_authority=value["release_authority"],
+            final_style_validated=value["final_style_validated"],
+            receipt_sha256=value["receipt_sha256"],
+        )
+
+    def __post_init__(self) -> None:
+        hashes = (
+            self.source_id,
+            self.cv_sha256,
+            self.sections_sha256,
+            self.policy_sha256,
+            self.receipt_sha256,
+        )
+        if (
+            any(type(value) is not str or not _SHA256.fullmatch(value) for value in hashes)
+            or type(self.schema_version) is not str
+            or self.schema_version != "pre-editorial-source-envelope.v1"
+            or type(self.validation_scope) is not str
+            or self.validation_scope != "source_integrity_only"
+            or self.passed is not True
+            or self.release_authority is not False
+            or self.final_style_validated is not False
+        ):
+            raise ValueError("pre-editorial source envelope is invalid")
+        expected_policy_sha256 = _digest(
+            _pre_editorial_canonical_json(_PRE_EDITORIAL_SOURCE_POLICY).encode("utf-8")
+        )
+        if self.policy_sha256 != expected_policy_sha256:
+            raise ValueError("pre-editorial source envelope policy is invalid")
+        if self.receipt_sha256 != _digest(
+            _pre_editorial_canonical_json(self.document(include_identity=False)).encode("utf-8")
+        ):
+            raise ValueError("pre-editorial source envelope identity is invalid")
+
+    def document(self, *, include_identity: bool = True) -> dict[str, object]:
+        value: dict[str, object] = {
+            "schema_version": self.schema_version,
+            "validation_scope": self.validation_scope,
+            "source_id": self.source_id,
+            "cv_sha256": self.cv_sha256,
+            "sections_sha256": self.sections_sha256,
+            "policy_sha256": self.policy_sha256,
+            "passed": True,
+            "release_authority": False,
+            "final_style_validated": False,
+        }
+        if include_identity:
+            value["receipt_sha256"] = self.receipt_sha256
+        return value
+
+
+def validate_pre_editorial_source(
+    *,
+    source_id: str,
+    cv_text: str,
+    cv_sha256: str,
+    sections: dict[str, tuple[str, ...]],
+) -> dict[str, object]:
+    """Bind exact source sections without asserting final presentation quality."""
+    invalid = "pre-editorial source envelope input is invalid"
+    if (
+        type(source_id) is not str
+        or not _SHA256.fullmatch(source_id)
+        or type(cv_sha256) is not str
+        or not _SHA256.fullmatch(cv_sha256)
+        or type(cv_text) is not str
+        or not cv_text.strip()
+        or "\x00" in cv_text
+    ):
+        raise ValueError(invalid)
+    try:
+        cv_bytes = cv_text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(invalid) from None
+    if _digest(cv_bytes) != cv_sha256:
+        raise ValueError("pre-editorial source envelope hash mismatch")
+    if type(sections) is not dict or not sections:
+        raise ValueError(invalid)
+    section_rows: list[list[object]] = []
+    for heading, lines in sections.items():
+        if (
+            type(heading) is not str
+            or not heading
+            or heading != heading.strip()
+            or any(character in heading for character in "\x00\r\n")
+            or type(lines) is not tuple
+            or not lines
+        ):
+            raise ValueError(invalid)
+        try:
+            heading.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError(invalid) from None
+        checked_lines: list[str] = []
+        for line in lines:
+            if (
+                type(line) is not str
+                or not line.strip()
+                or any(character in line for character in "\x00\r\n")
+                or line not in cv_text
+            ):
+                raise ValueError(invalid)
+            try:
+                line.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError(invalid) from None
+            checked_lines.append(line)
+        section_rows.append([heading, checked_lines])
+    policy_sha256 = _digest(
+        _pre_editorial_canonical_json(_PRE_EDITORIAL_SOURCE_POLICY).encode("utf-8")
+    )
+    body: dict[str, object] = {
+        "schema_version": "pre-editorial-source-envelope.v1",
+        "validation_scope": "source_integrity_only",
+        "source_id": source_id,
+        "cv_sha256": cv_sha256,
+        "sections_sha256": _digest(
+            _pre_editorial_canonical_json(section_rows).encode("utf-8")
+        ),
+        "policy_sha256": policy_sha256,
+        "passed": True,
+        "release_authority": False,
+        "final_style_validated": False,
+    }
+    body["receipt_sha256"] = _digest(
+        _pre_editorial_canonical_json(body).encode("utf-8")
+    )
+    return body
+
+
 @dataclass(frozen=True)
 class CVPopplerQualityReceipt:
     """Immutable evidence that Poppler parsed and rendered the retained PDF."""
@@ -483,21 +684,43 @@ def _section_text(
     return "\n".join(sections.get(heading, ()))
 
 
+def _capability_line_has_valid_tool_usage(text: str) -> bool:
+    tool_count = len(_TOOL_TOKEN.findall(text))
+    bridged = re.search(r"\b(?:using|with|through|across|via)\b", text, re.I)
+    inventory_shape = len(re.findall(r"[,|;/]", text)) >= 2 or ":" in text
+    return not (
+        (tool_count >= 2 and not _CAPABILITY_LANGUAGE.search(text))
+        or (tool_count >= 3 and inventory_shape and not bridged)
+    )
+
+
+def capability_line_eligible(text: str) -> bool:
+    return (
+        not _FORMAT_INVENTORY.search(text)
+        and bool(_CAPABILITY_LANGUAGE.search(text))
+        and _capability_line_has_valid_tool_usage(text)
+    )
+
+
 def validate_generated_cv(
     *,
     source_id: str,
     candidate_name: str,
-    candidate_city: str,
+    candidate_city: str | None,
     cv_text: str,
     cv_sha256: str,
     sections: Mapping[str, Sequence[str]],
     rendered_pages: Iterable[Sequence[str]],
     policy: CVPolicy | None = None,
     target_role_title: str | None = None,
+    section_policy: Mapping[str, frozenset[str]] | None = None,
     _source_policy_only: bool = False,
+    allow_missing_city: bool = False,
 ) -> CVConstraintReceipt | CandidateSourcePolicyReceipt:
     """Fail closed on forbidden CV content and candidate-specific invariants."""
     selected = policy or policy_for_candidate(candidate_name)
+    if allow_missing_city and not _source_policy_only:
+        raise CVConstraintError("missing candidate city is allowed only for source policy")
     if not _SHA256.fullmatch(source_id) or not _SHA256.fullmatch(cv_sha256):
         raise CVConstraintError("CV generation identities must be SHA-256")
     if _digest(cv_text.encode()) != cv_sha256:
@@ -518,14 +741,37 @@ def validate_generated_cv(
     if _GENERIC_FILLER.search(_section_text(sections, "Professional Summary")):
         raise CVConstraintError("generic professional-summary filler is forbidden")
 
+    if section_policy is None:
+        allowed_headings = _STANDARD_HEADINGS
+    else:
+        if (
+            not _source_policy_only
+            or type(section_policy) is not dict
+            or not section_policy
+            or any(
+                type(heading) is not str
+                or not heading
+                or type(categories) is not frozenset
+                or not categories
+                or any(type(category) is not str or not category for category in categories)
+                for heading, categories in section_policy.items()
+            )
+        ):
+            raise CVConstraintError("source policy section map is invalid")
+        allowed_headings = tuple(section_policy)
+
     headings = tuple(sections)
     if not headings or headings[0] != "Professional Summary":
         raise CVConstraintError("CV hierarchy must start with Professional Summary")
-    if any(heading not in _STANDARD_HEADINGS for heading in headings):
+    if any(heading not in allowed_headings for heading in headings):
         raise CVConstraintError("CV uses a non-standard ATS section heading")
-    if "Core Capabilities" not in headings:
+    if section_policy is None and "Core Capabilities" not in headings:
         raise CVConstraintError("capability-led skills are required")
-    if "Projects" in headings and headings.index("Core Capabilities") > headings.index("Projects"):
+    if (
+        "Projects" in headings
+        and "Core Capabilities" in headings
+        and headings.index("Core Capabilities") > headings.index("Projects")
+    ):
         raise CVConstraintError("Core Capabilities must precede Projects")
 
     if target_role_title is not None:
@@ -552,12 +798,7 @@ def validate_generated_cv(
                 "formats, interchange syntax and storage engines cannot be listed as skills"
             )
         for line in sections.get(heading, ()):
-            tool_count = len(_TOOL_TOKEN.findall(line))
-            bridged = re.search(r"\b(?:using|with|through|across|via)\b", line, re.I)
-            inventory_shape = len(re.findall(r"[,|;/]", line)) >= 2 or ":" in line
-            if tool_count >= 2 and not _CAPABILITY_LANGUAGE.search(line) or (
-                tool_count >= 3 and inventory_shape and not bridged
-            ):
+            if not _capability_line_has_valid_tool_usage(line):
                 raise CVConstraintError(
                     "tools and platforms must support a capability, not replace one"
                 )
@@ -576,10 +817,14 @@ def validate_generated_cv(
     if selected.candidate_name is not None:
         if candidate_name != selected.candidate_name:
             raise CVConstraintError("candidate-specific policy has the wrong candidate")
-        if candidate_city != selected.required_city:
-            raise CVConstraintError("CV location differs from candidate authority")
-        if selected.required_city not in cv_text:
-            raise CVConstraintError("required CV location is absent")
+        if candidate_city is None:
+            if not allow_missing_city:
+                raise CVConstraintError("candidate city is required by the CV policy")
+        else:
+            if candidate_city != selected.required_city:
+                raise CVConstraintError("CV location differs from candidate authority")
+            if selected.required_city not in cv_text:
+                raise CVConstraintError("required CV location is absent")
         if selected.required_graduation not in education:
             raise CVConstraintError("required month-and-year graduation is absent")
         if selected.required_dissertation_title not in education:

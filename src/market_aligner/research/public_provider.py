@@ -59,6 +59,95 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def derive_selector_rows(
+    prior_bytes: bytes, current_bytes: bytes, selectors: list[str]
+) -> list[dict[str, str]]:
+    message = "selector value anchor is invalid"
+    if type(prior_bytes) is not bytes or type(current_bytes) is not bytes:
+        raise ValueError(message)
+    if type(selectors) is not list or any(type(value) is not str for value in selectors):
+        raise ValueError(message)
+    try:
+        prior_document = json.loads(prior_bytes)
+        current_document = json.loads(current_bytes)
+        if (
+            type(prior_document) is not dict
+            or type(current_document) is not dict
+            or _canonical_bytes(prior_document) != prior_bytes
+            or _canonical_bytes(current_document) != current_bytes
+        ):
+            raise ValueError
+
+        def string_values(value: object, path: tuple[object, ...] = ()):
+            if type(value) is str:
+                yield path, value
+            elif type(value) is dict:
+                for key, child in value.items():
+                    yield from string_values(child, path + (key,))
+            elif type(value) is list:
+                for index, child in enumerate(value):
+                    yield from string_values(child, path + (index,))
+
+        prior_values = tuple(string_values(prior_document))
+        current_values = dict(string_values(current_document))
+        seen: set[str] = set()
+        rows: list[dict[str, str]] = []
+        for selector in selectors:
+            match = _BYTE_SELECTOR.fullmatch(selector)
+            if match is None or selector in seen:
+                raise ValueError
+            seen.add(selector)
+            start, end = int(match.group(1)), int(match.group(2))
+            if not 0 <= start < end <= len(prior_bytes):
+                raise ValueError
+            selected = prior_bytes[start:end]
+            if not selected.decode("utf-8"):
+                raise ValueError
+
+            anchors: list[tuple[tuple[object, ...], str, int]] = []
+            for path, value in prior_values:
+                token = json.dumps(
+                    value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+                if prior_bytes.count(token) != 1:
+                    continue
+                token_start = prior_bytes.find(token)
+                if (
+                    start >= token_start + 1
+                    and end <= token_start + len(token) - 1
+                ):
+                    anchors.append((path, value, token_start))
+            if len(anchors) != 1:
+                raise ValueError
+
+            path, value, old_token_start = anchors[0]
+            if current_values.get(path) != value or path not in current_values:
+                raise ValueError
+            current_token = json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+            if current_bytes.count(current_token) != 1:
+                raise ValueError
+            current_token_start = current_bytes.find(current_token)
+            relative_start = start - old_token_start
+            relative_end = end - old_token_start
+            new_start = current_token_start + relative_start
+            new_end = current_token_start + relative_end
+            if (
+                new_start < current_token_start + 1
+                or new_end > current_token_start + len(current_token) - 1
+                or current_bytes[new_start:new_end] != selected
+            ):
+                raise ValueError
+            rows.append({
+                "prior_selector": selector,
+                "reviewed_current_selector": f"bytes:{new_start}-{new_end}",
+            })
+        return rows
+    except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError):
+        raise ValueError(message) from None
+
+
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -405,6 +494,188 @@ class FetchedPublicSource:
     redirect_chain: tuple[str, ...] = ()
     source_kind: str = "public_web"
     authority_source_content_sha256: str | None = None
+
+
+_INITIAL_SOURCE_MAX_BYTES = 4 * 1024 * 1024
+_INITIAL_ENVELOPE_KEYS = frozenset(
+    {
+        "authority_source_content_sha256",
+        "fetched_at",
+        "job_key",
+        "raw_json",
+        "raw_text",
+        "schema_version",
+        "url",
+    }
+)
+
+
+def extract_initial_claim_spans(body: bytes, text: str) -> tuple[tuple[str, int, int], ...]:
+    if type(body) is not bytes or type(text) is not str:
+        raise PublicResearchError("initial_research_input_invalid")
+    found: list[tuple[str, int, int]] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        for raw in re.split(r"(?<=[.!?])\s+", line):
+            candidate = raw.strip()
+            if not 40 <= len(candidate) <= 1200:
+                continue
+            if not candidate.endswith((".", "!", "?")):
+                continue
+            if not any(character.isalpha() for character in candidate):
+                continue
+            if candidate in seen:
+                continue
+            encoded = candidate.encode("utf-8")
+            start = body.find(encoded)
+            if start < 0:
+                continue
+            seen.add(candidate)
+            found.append((candidate, start, start + len(encoded)))
+            if len(found) == 3:
+                return tuple(found)
+    if not found:
+        raise PublicResearchError("initial_research_no_verbatim_support")
+    return tuple(found)
+
+
+def build_initial_plan(
+    task: ResearchTask, source: FetchedPublicSource
+) -> PublicResearchPlan:
+    """Build a deterministic initial plan from exact canonical vacancy bytes."""
+    try:
+        for field in ("profile_id", "job_key", "company", "title", "url"):
+            value = getattr(task, field)
+            if not isinstance(value, str) or not value or value.strip() != value:
+                raise ValueError
+        for field in (
+            "source_content_sha256",
+            "vacancy_snapshot_sha256",
+            "promotion_receipt_sha256",
+        ):
+            value = getattr(task, field)
+            if not isinstance(value, str) or not _SHA256.fullmatch(value):
+                raise ValueError
+        if (
+            getattr(task, "refresh_event_id", None) is not None
+            or getattr(task, "refresh_bridge_sha256", None) is not None
+        ):
+            raise ValueError
+        if (
+            type(source.body) is not bytes
+            or not 1 <= len(source.body) <= _INITIAL_SOURCE_MAX_BYTES
+            or source.source_kind != "canonical_vacancy"
+            or type(source.status) is not int
+            or source.status != 200
+            or source.requested_url != task.url
+            or source.final_url != task.url
+            or source.authority_source_content_sha256 != task.source_content_sha256
+        ):
+            raise ValueError
+        _safe_public_url(task.url)
+
+        def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+
+        def reject_nonfinite(_value: str) -> object:
+            raise ValueError
+
+        envelope = json.loads(
+            source.body.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_nonfinite,
+        )
+        if not isinstance(envelope, dict) or set(envelope) != _INITIAL_ENVELOPE_KEYS:
+            raise ValueError
+        if (
+            envelope["schema_version"]
+            != "market-aligner.canonical-collector-vacancy.v1"
+            or envelope["authority_source_content_sha256"]
+            != task.source_content_sha256
+            or envelope["job_key"] != task.job_key
+            or envelope["url"] != task.url
+        ):
+            raise ValueError
+        fetched_at = envelope["fetched_at"]
+        if (
+            not isinstance(fetched_at, str)
+            or "T" not in fetched_at
+            or not fetched_at.endswith(("Z", "+00:00"))
+        ):
+            raise ValueError
+        parsed_time = datetime.fromisoformat(
+            fetched_at[:-1] + "+00:00" if fetched_at.endswith("Z") else fetched_at
+        )
+        if (
+            parsed_time.tzinfo is None
+            or parsed_time.utcoffset() is None
+            or parsed_time.utcoffset().total_seconds() != 0
+        ):
+            raise ValueError
+        raw_text = envelope["raw_text"]
+        raw_json = envelope["raw_json"]
+        if raw_text is not None and type(raw_text) is not str:
+            raise ValueError
+        if raw_json is not None and not isinstance(raw_json, dict):
+            raise ValueError
+        selected_text = raw_text if type(raw_text) is str and raw_text.strip() else None
+        if selected_text is None and isinstance(raw_json, dict):
+            content_text = raw_json.get("content_text")
+            if type(content_text) is str and content_text.strip():
+                selected_text = content_text
+        if selected_text is None:
+            raise PublicResearchError("initial_research_no_verbatim_support")
+
+        claims: list[PlannedClaim] = []
+        for segment, start, end in extract_initial_claim_spans(source.body, selected_text):
+            citation_id = "canonical_vacancy"
+            claims.append(
+                PlannedClaim(
+                    claim=segment,
+                    citation_ids=(citation_id,),
+                    confidence=1.0,
+                    supports=(
+                        PlannedSupport(
+                            citation_id=citation_id,
+                            selector=f"bytes:{start}-{end}",
+                            excerpt=segment,
+                        ),
+                    ),
+                )
+            )
+
+        return PublicResearchPlan(
+            profile_id=task.profile_id,
+            job_key=task.job_key,
+            company=task.company,
+            role=task.title,
+            citations=(
+                PlannedCitation(
+                    citation_id="canonical_vacancy",
+                    url=task.url,
+                    title="Canonical collector vacancy",
+                    expected_content_sha256=_sha256(source.body),
+                    expected_final_url=task.url,
+                    source_kind="canonical_vacancy",
+                ),
+            ),
+            claims=tuple(claims),
+            source_content_sha256=task.source_content_sha256,
+            vacancy_snapshot_sha256=task.vacancy_snapshot_sha256,
+            promotion_receipt_sha256=task.promotion_receipt_sha256,
+            unknowns=("External employer facts have not been researched.",),
+        )
+    except PublicResearchError as exc:
+        if str(exc) == "initial_research_no_verbatim_support":
+            raise
+        raise PublicResearchError("initial_research_input_invalid") from None
+    except (AttributeError, KeyError, TypeError, UnicodeError, ValueError, OverflowError):
+        raise PublicResearchError("initial_research_input_invalid") from None
 
 
 class CanonicalCollectorVacancyLoader:
@@ -1058,6 +1329,37 @@ class SourceBoundResearchProvider:
         return self.materialize(task).dossier
 
 
+class InitialSourceBoundResearchProvider:
+    """Build one initial plan from the exact promoted canonical vacancy."""
+
+    def __init__(
+        self,
+        *,
+        canonical_vacancy_loader: CanonicalCollectorVacancyLoader,
+        repository_root: Path,
+        archive_root: Path,
+    ) -> None:
+        if not isinstance(canonical_vacancy_loader, CanonicalCollectorVacancyLoader):
+            raise PublicResearchError("initial research requires the canonical vacancy loader")
+        self.canonical_vacancy_loader = canonical_vacancy_loader
+        self.repository_root = repository_root
+        self.archive_root = archive_root
+        self.last_materialization: MaterializedPublicResearch | None = None
+
+    def research(self, task: ResearchTask) -> ResearchDossier:
+        source = self.canonical_vacancy_loader(task)
+        plan = build_initial_plan(task, source)
+        provider = SourceBoundResearchProvider(
+            plan=plan,
+            repository_root=self.repository_root,
+            archive_root=self.archive_root,
+            canonical_vacancy_loader=self.canonical_vacancy_loader,
+        )
+        dossier = provider.research(task)
+        self.last_materialization = provider.last_materialization
+        return dossier
+
+
 @dataclass(frozen=True)
 class RefreshPlanDerivation:
     plan_sha256: str
@@ -1573,6 +1875,13 @@ class RefreshDerivedResearchProvider:
             )
         citation = prior.citations[0]
         planned_claims: list[PlannedClaim] = []
+        selector_mapping = self._selector_map
+        selector_derivation_attempted = False
+        prior_selectors = [
+            support.selector
+            for claim in prior.claims
+            for support in claim.supports
+        ]
         for claim in prior.claims:
             if (
                 tuple(claim.citation_ids) != (citation.citation_id,)
@@ -1601,33 +1910,52 @@ class RefreshDerivedResearchProvider:
                 ):
                     raise PublicResearchError("prior claim support differs from dossier")
                 reviewed_selector = (
-                    self._selector_map.get(support.selector, support.selector)
-                    if self._selector_map is not None
+                    selector_mapping.get(support.selector, support.selector)
+                    if selector_mapping is not None
                     else support.selector
                 )
-                reviewed_match = _BYTE_SELECTOR.fullmatch(reviewed_selector)
-                if reviewed_match is None:
-                    raise PublicResearchError("reviewed current selector is invalid")
-                current_start, current_end = (
-                    int(reviewed_match.group(1)), int(reviewed_match.group(2))
-                )
-                current_selected = current.body[current_start:current_end]
-                try:
-                    current_excerpt = current_selected.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise PublicResearchError(
-                        "current support at prior selector is not UTF-8"
-                    ) from exc
-                if (
-                    current_end > len(current.body)
-                    or current_excerpt != support.excerpt
-                    or _sha256(current_selected) != support.excerpt_sha256
-                    or " ".join(claim.claim.split())
-                    != " ".join(current_excerpt.split())
-                ):
-                    raise PublicResearchError(
-                        "current claim differs at the exact prior selector"
+                def current_support_matches(selector: str) -> bool:
+                    reviewed_match = _BYTE_SELECTOR.fullmatch(selector)
+                    if reviewed_match is None:
+                        return False
+                    current_start, current_end = (
+                        int(reviewed_match.group(1)), int(reviewed_match.group(2))
                     )
+                    if current_end > len(current.body):
+                        return False
+                    current_selected = current.body[current_start:current_end]
+                    try:
+                        current_excerpt = current_selected.decode("utf-8")
+                    except UnicodeDecodeError:
+                        return False
+                    return (
+                        current_excerpt == support.excerpt
+                        and _sha256(current_selected) == support.excerpt_sha256
+                        and " ".join(claim.claim.split())
+                        == " ".join(current_excerpt.split())
+                    )
+
+                if not current_support_matches(reviewed_selector):
+                    if (
+                        self._selector_map is None
+                        and not selector_derivation_attempted
+                    ):
+                        selector_derivation_attempted = True
+                        try:
+                            rows = derive_selector_rows(
+                                prior_bytes, current.body, prior_selectors
+                            )
+                            selector_mapping = self._selector_map_rows(
+                                prior, prior_bytes, current, rows
+                            )
+                        except ValueError:
+                            selector_mapping = None
+                        if selector_mapping is not None:
+                            reviewed_selector = selector_mapping[support.selector]
+                    if not current_support_matches(reviewed_selector):
+                        raise PublicResearchError(
+                            "current claim differs at the exact prior selector"
+                        )
                 planned_supports.append(
                     PlannedSupport(
                         citation.citation_id,

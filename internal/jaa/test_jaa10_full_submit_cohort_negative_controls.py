@@ -253,3 +253,65 @@ def test_cohort_compiler_refuses_omitted_units_before_caller_counts_apply() -> N
             source_content_revision=SOURCE_CONTENT,
             metrics_evaluated=True,
         )
+
+
+@pytest.mark.parametrize("entrypoint", ["interruption", "observation"])
+@pytest.mark.parametrize("mode", ["explicit", "sealed", "unknown", "missing", "symlink", "sealed_rejected"])
+def test_cohort_corpus_authority_precedes_output(tmp_path, monkeypatch, entrypoint, mode):
+    """Exercise both real entrypoints up to corpus verification, using no corpus data."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from career_automation import shadow_full_submit_cohort as cohort
+
+    root = (tmp_path / "synthetic-corpus").resolve()
+    root.mkdir()
+    output = tmp_path / "output"
+    selected = []
+    sealed_calls = []
+    explicit = root
+    if mode == "missing":
+        explicit = Path("__JAA_CERTIFIED_CORPUS_ROOT_REQUIRED__")
+    if mode == "symlink":
+        explicit = tmp_path / "alias"
+        explicit.symlink_to(root, target_is_directory=True)
+    monkeypatch.setattr(cohort, "CERTIFIED_CORPUS", explicit)
+
+    def binding(repository):
+        assert repository == cohort.ROOT
+        sealed_calls.append(repository)
+        if mode == "sealed_rejected":
+            raise ValueError("sealed binding rejected")
+        return root, {"synthetic": True}
+
+    class CorpusBoundaryReached(Exception):
+        pass
+
+    def verify(path, seed):
+        assert not output.exists()
+        assert seed == cohort.TRACKED_SEED
+        selected.append(path)
+        raise CorpusBoundaryReached
+
+    monkeypatch.setattr(cohort, "load_installed_protected_corpus_binding", binding)
+    monkeypatch.setattr(cohort, "verify_graphcore_corpus", verify)
+    authority = mode if mode in ("explicit", "sealed", "unknown") else (
+        "sealed" if mode == "sealed_rejected" else "explicit"
+    )
+    from career_automation.protected_corpus_binding import ProtectedCorpusBindingError
+    expected = (CorpusBoundaryReached if mode in ("explicit", "sealed") else
+                ProtectedCorpusBindingError if mode in ("missing", "symlink") else ValueError)
+    with pytest.raises(expected):
+        if entrypoint == "interruption":
+            cohort.execute_frozen_loopback_interruption(
+                output, cohort.REQUIRED_INTERRUPTION_POINTS[0], corpus_authority=authority
+            )
+        else:
+            monkeypatch.setattr(cohort, "mutation_observations_from_runtime", lambda rows: ())
+            cohort.execute_frozen_loopback_observation(
+                output, observation_id="synthetic", observed_at=datetime.now(timezone.utc),
+                interruptions=tuple(SimpleNamespace(injection_point=p) for p in cohort.REQUIRED_INTERRUPTION_POINTS),
+                runtime_receipts=(), corpus_authority=authority,
+            )
+    assert not output.exists()
+    assert selected == ([root] if mode in ("explicit", "sealed") else [])
+    assert len(sealed_calls) == (1 if authority == "sealed" else 0)

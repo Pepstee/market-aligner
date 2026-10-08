@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from career_automation.adversarial_recruiter import (
-    RESULT_SCHEMA_VERSION,
     RecruiterAssessmentPackage,
     assess_application_as_recruiter,
 )
@@ -17,6 +18,9 @@ from career_automation.candidate_application_factory import (
 from career_automation.evidence_matching import canonical_json
 from career_automation.external_document_assurance import IntendedVacancy
 from career_automation.rendering import _build_text_pdf
+from career_automation.testing_adversarial_recruiter import (
+    fixture_recruiter_result,
+)
 from cv_generation.adversarial_rebuild import (
     AdversarialRebuildError,
     bind_cover_letter_recruiter_improvement,
@@ -26,6 +30,7 @@ from cv_generation.editorial_composition import (
     ApprovedCoverLetterClaim,
     CandidateEditorialAuthority,
     CoverLetterSection,
+    DetachedCodexEditorialAdapter,
     EditorialAtom,
     EditorialBackendResult,
     EditorialCompositionError,
@@ -36,6 +41,7 @@ from cv_generation.editorial_composition import (
     build_cover_letter_editorial_request,
     cover_letter_humanizer_request_sha256,
     run_cover_letter_composition_runtime,
+    run_editorial_composition_runtime,
     validate_cover_letter_editorial_draft,
 )
 from llm.client import Backend, LLMClient, LLMResponse
@@ -190,6 +196,86 @@ def _fixture():
     return listing, request, claims, writer, final
 
 
+def _current_cover_fixture():
+    authority = CandidateEditorialAuthority(
+        candidate_name="Casey Test",
+        candidate_city="Leeds, United Kingdom",
+        graduation_month_year=None,
+        dissertation_title=None,
+        source_sha256="a" * 64,
+        current_runtime=True,
+    )
+    claims = (
+        _claim(
+            "candidate-evidence",
+            "Built a reproducible evidence review process.",
+            "candidate",
+            "Evidence Match",
+        ),
+        _claim(
+            "employer-opening",
+            "Example Systems runs a support platform for software teams.",
+            "employer",
+            "Opening",
+        ),
+    )
+    request = build_cover_letter_editorial_request(
+        authority=authority,
+        role_title="Data Engineer",
+        company_name="Example Systems",
+        vacancy_sha256="b" * 64,
+        approved_claims=claims,
+    )
+    sections = (
+        CoverLetterSection(
+            "Opening",
+            (
+                EditorialAtom("connective", "Dear Hiring Manager,", None),
+                EditorialAtom(
+                    "connective",
+                    "I am applying for the Data Engineer role at Example Systems.",
+                    None,
+                ),
+                EditorialAtom("approved_claim", claims[1].text, claims[1].claim_id),
+            ),
+            current_runtime=True,
+        ),
+        CoverLetterSection(
+            "Evidence Match",
+            (EditorialAtom("approved_claim", claims[0].text, claims[0].claim_id),),
+            current_runtime=True,
+        ),
+        CoverLetterSection("Company Fit", (), current_runtime=True),
+        CoverLetterSection(
+            "Close",
+            (
+                EditorialAtom(
+                    "connective",
+                    "Thank you for considering my application.",
+                    None,
+                ),
+                EditorialAtom("connective", "Kind regards", None),
+                EditorialAtom("connective", authority.candidate_name, None),
+            ),
+            current_runtime=True,
+        ),
+    )
+    draft = build_cover_letter_editorial_draft(
+        candidate_name=authority.candidate_name,
+        sections=sections,
+        current_runtime=True,
+    )
+    return authority, claims, request, draft
+
+
+def _current_cover_wire_document(draft):
+    document = draft.document(include_identity=False)
+    document.pop("current_runtime", None)
+    for section in document["sections"]:
+        section.pop("current_runtime", None)
+    return document
+
+
 def _evidence(request, writer, final):
     return (
         EditorialStageEvidence(
@@ -220,7 +306,14 @@ class _Session:
 
     def invoke(self, *, request_bytes):
         self.adapter.calls.append((request_bytes, self.invocation_id))
-        response = canonical_json(self.adapter.draft.document()).encode()
+        response = self.adapter.response_bytes
+        if response is None:
+            document = (
+                _current_cover_wire_document(self.adapter.draft)
+                if self.adapter.draft.current_runtime
+                else self.adapter.draft.document()
+            )
+            response = canonical_json(document).encode()
         return EditorialBackendResult(
             response_bytes=response,
             invocation_id=self.invocation_id,
@@ -243,12 +336,43 @@ class _Adapter:
         self.environment = "synthetic"
         self.transport_identity = f"transport:{provider}"
         self.calls = []
+        self.response_bytes = None
 
     def available(self):
         return True
 
     def open_fresh_session(self, *, invocation_id):
         return _Session(self, invocation_id)
+
+
+def test_cv_runtime_rejects_cover_request_before_provider_availability() -> None:
+    _, request, _, writer, final = _fixture()
+
+    class _ProbeAdapter(_Adapter):
+        availability_calls = 0
+
+        def available(self):
+            self.availability_calls += 1
+            return True
+
+    writer_adapter = _ProbeAdapter("cover_letter_writer", "writer", writer)
+    humanizer_adapter = _ProbeAdapter(
+        "cover_letter_humanizer", "humanizer", final
+    )
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+        document_kind="cover_letter",
+    )
+
+    with pytest.raises(EditorialCompositionError, match="exact CV request"):
+        run_editorial_composition_runtime(request, runtime=runtime)
+
+    assert writer_adapter.availability_calls == 0
+    assert humanizer_adapter.availability_calls == 0
+    assert not writer_adapter.calls
+    assert not humanizer_adapter.calls
 
 
 def test_cover_runtime_rejects_forged_receipt_before_provider_availability() -> None:
@@ -315,7 +439,367 @@ def test_cover_letter_runtime_uses_distinct_one_shot_writer_and_humanizer() -> N
     assert humanizer_request["stage"] == "cover_letter_humanizer"
     assert "approved_claim" in " ".join(writer_request["instructions"])
     assert "em dash" in " ".join(humanizer_request["instructions"])
+    assert writer_request["instructions"] == [
+        "Return only one canonical JSON object matching the response schema.",
+        "Write a specific UK cover letter under one page using the four supplied sections.",
+        "Use approved_claim atoms verbatim and never invent or paraphrase facts.",
+        "Use the exact Dear Hiring Manager, salutation and exact Kind regards plus candidate signature.",
+        "After the salutation, Opening must contain an approved employer claim naming the company and role.",
+        "Use the strongest supported candidate evidence and only the supplied typed rhetorical atoms.",
+        "Add no work-rights text, AI disclosure, caveat, weakness, or unsupported tool claim.",
+        "Use at most 500 words and 3500 characters; add no em or en dash.",
+    ]
+    assert humanizer_request["instructions"] == [
+        "Return only one canonical JSON object matching the response schema.",
+        "Preserve every approved_claim atom and all four sections exactly.",
+        "Edit connective atoms only by selecting another supplied typed rhetorical atom for that section.",
+        "Preserve the exact salutation, sign-off, signature and opening employer hook.",
+        "Use no em dash, en dash, rule-of-three sales cadence, disclosure, or new fact.",
+    ]
+    assert not {"claim_section_policy", "required_claim_ids", "section_min_facts"} & set(
+        writer_request
+    )
+    assert not {"claim_section_policy", "required_claim_ids"} & set(humanizer_request)
+    assert writer_adapter.calls[0][0] == canonical_json(
+        {
+            "editorial_request": request.document(),
+            "instructions": writer_request["instructions"],
+            "rhetorical_catalog": writer_request["rhetorical_catalog"],
+            "schema_version": "jaa.cover-letter-writer-runtime-request.v3",
+            "stage": "cover_letter_writer",
+        }
+    ).encode()
+    assert humanizer_adapter.calls[0][0] == canonical_json(
+        {
+            "editorial_request": request.document(),
+            "humanizer_request_sha256": cover_letter_humanizer_request_sha256(
+                request, writer
+            ),
+            "instructions": humanizer_request["instructions"],
+            "schema_version": "jaa.cover-letter-humanizer-runtime-request.v3",
+            "stage": "cover_letter_humanizer",
+            "rhetorical_catalog": humanizer_request["rhetorical_catalog"],
+            "writer_draft": writer.document(),
+        }
+    ).encode()
 
+
+def test_current_cover_letter_runtime_binds_writer_and_humanizer_prompts() -> None:
+    _, claims, request, draft = _current_cover_fixture()
+    writer_adapter = _Adapter("cover_letter_writer", "writer", draft)
+    humanizer_adapter = _Adapter("cover_letter_humanizer", "humanizer", draft)
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+        document_kind="cover_letter",
+    )
+    writer_draft, final_draft, *_ = run_cover_letter_composition_runtime(
+        request, runtime=runtime
+    )
+    assert len(writer_adapter.calls) == 1
+    assert len(humanizer_adapter.calls) == 1
+    writer_request = json.loads(writer_adapter.calls[0][0])
+    humanizer_request = json.loads(humanizer_adapter.calls[0][0])
+    expected_section_policy = {
+        claim.claim_id: [claim.section_heading] for claim in claims
+    }
+    expected_claim_ids = [claim.claim_id for claim in claims]
+
+    assert writer_draft == final_draft == draft
+    assert writer_request["claim_section_policy"] == expected_section_policy
+    assert writer_request["available_claim_ids"] == expected_claim_ids
+    assert "required_claim_ids" not in writer_request
+    assert writer_request["section_min_facts"] == {
+        "Opening": 0,
+        "Evidence Match": 0,
+        "Company Fit": 0,
+    }
+    writer_instructions = " ".join(writer_request["instructions"])
+    assert (
+        "do not require an employer claim in Opening or Company Fit"
+        in writer_instructions
+    )
+    assert (
+        "Opening must contain an approved employer claim naming the company and role"
+        not in writer_instructions
+    )
+    assert (
+        "In Opening, emit separate atoms in this order: the exact supplied salutation as source_kind 'connective' with claim_id null; the exact role/company sentence in rhetorical_catalog['Opening'] as a separate 'connective' with claim_id null; then only zero or more approved_claim atoms assigned to Opening, each retaining its bound claim_id. Do not combine, omit, reorder, or relabel these atoms."
+        in writer_instructions
+    )
+    assert (
+        "Use only the supplied rhetorical catalog and add no claims or meta-signposts."
+        in writer_instructions
+    )
+    assert (
+        "Keep each approved claim ID and source meaning; paraphrase candidate claims only when every qualification and limitation remains explicit."
+        in writer_instructions
+    )
+    assert (
+        "Employer-kind claims must be copied exactly, character for character, from their bound approved source text; do not paraphrase, merge, or rewrite them."
+        in writer_instructions
+    )
+    expected_employer_claims = {
+        claim.claim_id: claim.text
+        for claim in request.approved_claims
+        if claim.fact_kind == "employer"
+    }
+    captured_employer_claims = {
+        claim["claim_id"]: claim["text"]
+        for claim in writer_request["editorial_request"]["approved_claims"]
+        if claim["fact_kind"] == "employer"
+    }
+    assert expected_employer_claims
+    assert captured_employer_claims == expected_employer_claims
+    expected_candidate_claims = {
+        claim.claim_id: claim.text
+        for claim in request.approved_claims
+        if claim.fact_kind == "candidate"
+    }
+    captured_candidate_claims = {
+        claim["claim_id"]: claim["text"]
+        for claim in writer_request["editorial_request"]["approved_claims"]
+        if claim["fact_kind"] == "candidate"
+    }
+    assert captured_candidate_claims == expected_candidate_claims
+    assert (
+        "Add no work-rights text, AI disclosure, unsupported tool claim, or internal process commentary."
+        in writer_instructions
+    )
+    current_framing_instruction = next(
+        instruction
+        for instruction in writer_request["instructions"]
+        if instruction.startswith("Omit whole claims that narrate internal governance")
+    )
+    assert "evidence provenance" in current_framing_instruction
+    assert "apologize, admit weakness, or use defensive framing" in current_framing_instruction
+    assert "Genuine AI/LLM technical experience" in current_framing_instruction
+    assert "employer facts remain exact" in current_framing_instruction
+    assert "first person for candidate statements" in writer_instructions
+    assert "only once" in writer_instructions
+    assert writer_request["claim_section_policy"] == humanizer_request[
+        "claim_section_policy"
+    ]
+    assert "required_claim_ids" not in humanizer_request
+    assert writer_request["available_claim_ids"] == expected_claim_ids
+    assert humanizer_request["available_claim_ids"] == expected_claim_ids
+    humanizer_instructions = " ".join(humanizer_request["instructions"])
+    assert (
+        "Preserve the two separate Opening connective atoms in order, with null claim IDs and exact text; do not combine or remove them."
+        in humanizer_instructions
+    )
+    assert (
+        "Do not add generic signposts or an Opening employer hook; follow the supplied claim assignments."
+        in humanizer_instructions
+    )
+    assert "Preserve the exact salutation, sign-off, signature, and required CTA." in humanizer_instructions
+    assert "Use no em dash, en dash, disclosure, internal commentary, or new fact." in humanizer_instructions
+
+
+def test_current_cover_runtime_passes_trusted_mode_to_both_response_parsers() -> None:
+    _, _, request, writer = _current_cover_fixture()
+    final = writer
+
+    def pretty(draft):
+        return json.dumps(
+            _current_cover_wire_document(draft), ensure_ascii=False, indent=2
+        ).encode("utf-8") + b"\n"
+
+    writer_bytes = pretty(writer)
+    humanizer_bytes = pretty(final)
+    writer_adapter = _Adapter("cover_letter_writer", "writer", writer)
+    writer_adapter.response_bytes = writer_bytes
+    humanizer_adapter = _Adapter("cover_letter_humanizer", "humanizer", final)
+    humanizer_adapter.response_bytes = humanizer_bytes
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=humanizer_adapter,
+        document_kind="cover_letter",
+    )
+
+    writer_draft, final_draft, writer_evidence, humanizer_evidence = (
+        run_cover_letter_composition_runtime(request, runtime=runtime)
+    )
+
+    assert writer_draft == writer
+    assert final_draft == final
+    assert writer_evidence.response_bytes_sha256 == hashlib.sha256(writer_bytes).hexdigest()
+    assert humanizer_evidence.response_bytes_sha256 == hashlib.sha256(
+        humanizer_bytes
+    ).hexdigest()
+
+
+def test_legacy_cover_runtime_still_requires_canonical_response_bytes() -> None:
+    _, request, _, writer, final = _fixture()
+    writer_adapter = _Adapter("cover_letter_writer", "writer", writer)
+    writer_adapter.response_bytes = json.dumps(
+        writer.document(), ensure_ascii=False, indent=2
+    ).encode("utf-8") + b"\n"
+    runtime = EditorialCompositionRuntime(
+        environment="synthetic",
+        writer=writer_adapter,
+        humanizer=_Adapter("cover_letter_humanizer", "humanizer", final),
+        document_kind="cover_letter",
+    )
+
+    with pytest.raises(EditorialCompositionError, match="not canonical JSON"):
+        run_cover_letter_composition_runtime(request, runtime=runtime)
+
+
+def test_detached_cover_adapter_binds_format_mode_to_request_and_preserves_bytes(
+    monkeypatch, tmp_path
+) -> None:
+    _, _, request, draft = _current_cover_fixture()
+    response = _current_cover_wire_document(draft)
+    response_bytes = json.dumps(
+        response, ensure_ascii=False, indent=2
+    ).encode("utf-8") + b"\n"
+    binary = tmp_path / "synthetic-codex"
+    binary.write_bytes(b"synthetic detached codex")
+    binary.chmod(0o700)
+    adapter = DetachedCodexEditorialAdapter(
+        stage="cover_letter_writer",
+        model="synthetic-model",
+        codex_binary=str(binary),
+        environment="synthetic",
+        process_environment={"HOME": str(tmp_path), "PATH": str(tmp_path)},
+    )
+    request_bytes = canonical_json(
+        {
+            "editorial_request": request.document(),
+            "instructions": [],
+            "stage": "cover_letter_writer",
+        }
+    ).encode("utf-8")
+
+    def fake_run(command, **kwargs):
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_bytes(response_bytes)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message"}}
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "cv_generation.editorial_composition.subprocess.run", fake_run
+    )
+    result = adapter.open_fresh_session(invocation_id="current-cover").invoke(
+        request_bytes=request_bytes
+    )
+    assert result.response_bytes == response_bytes
+    assert result.response_sha256 == hashlib.sha256(response_bytes).hexdigest()
+
+
+def test_detached_legacy_cover_adapter_requires_canonical_bytes_and_exact_mode(
+    monkeypatch, tmp_path
+) -> None:
+    _, request, _, draft, _ = _fixture()
+    response = draft.document()
+    response.pop("draft_sha256")
+    response_bytes = json.dumps(
+        response, ensure_ascii=False, indent=2
+    ).encode("utf-8") + b"\n"
+    binary = tmp_path / "synthetic-legacy-codex"
+    binary.write_bytes(b"synthetic detached codex")
+    binary.chmod(0o700)
+    adapter = DetachedCodexEditorialAdapter(
+        stage="cover_letter_writer",
+        model="synthetic-model",
+        codex_binary=str(binary),
+        environment="synthetic",
+        process_environment={"HOME": str(tmp_path), "PATH": str(tmp_path)},
+    )
+    request_bytes = canonical_json(
+        {
+            "editorial_request": request.document(),
+            "instructions": [],
+            "stage": "cover_letter_writer",
+        }
+    ).encode("utf-8")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_bytes(response_bytes)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message"}}
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "cv_generation.editorial_composition.subprocess.run", fake_run
+    )
+    with pytest.raises(EditorialCompositionError, match="not canonical JSON"):
+        adapter.open_fresh_session(invocation_id="legacy-cover").invoke(
+            request_bytes=request_bytes
+        )
+    malformed = json.loads(request_bytes)
+    malformed["editorial_request"]["authority"]["current_runtime_pre_review"] = 1
+    with pytest.raises(EditorialCompositionError, match="mode is invalid"):
+        adapter.open_fresh_session(invocation_id="bad-mode-cover").invoke(
+            request_bytes=canonical_json(malformed).encode("utf-8")
+        )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure", ("duplicate", "unknown_fact"))
+def test_detached_current_cover_adapter_keeps_duplicate_and_fact_guards(
+    monkeypatch, tmp_path, failure
+) -> None:
+    _, _, request, draft = _current_cover_fixture()
+    response = _current_cover_wire_document(draft)
+    if failure == "unknown_fact":
+        response["sections"][0]["atoms"][0]["source_kind"] = "unapproved_fact"
+        response_bytes = json.dumps(response, ensure_ascii=False, indent=2).encode()
+    else:
+        valid = canonical_json(response).encode()
+        response_bytes = b'{"candidate_name":"Other",' + valid[1:]
+    binary = tmp_path / f"synthetic-codex-{failure}"
+    binary.write_bytes(b"synthetic detached codex")
+    binary.chmod(0o700)
+    adapter = DetachedCodexEditorialAdapter(
+        stage="cover_letter_writer",
+        model="synthetic-model",
+        codex_binary=str(binary),
+        environment="synthetic",
+        process_environment={"HOME": str(tmp_path), "PATH": str(tmp_path)},
+    )
+    request_bytes = canonical_json(
+        {
+            "editorial_request": request.document(),
+            "instructions": [],
+            "stage": "cover_letter_writer",
+        }
+    ).encode("utf-8")
+
+    def fake_run(command, **kwargs):
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_bytes(response_bytes)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message"}}
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "cv_generation.editorial_composition.subprocess.run", fake_run
+    )
+    expected = "invalid JSON" if failure == "duplicate" else "source kind is unsupported"
+    with pytest.raises(EditorialCompositionError, match=expected):
+        adapter.open_fresh_session(invocation_id=f"current-cover-{failure}").invoke(
+            request_bytes=request_bytes
+        )
 
 def test_cover_letter_admission_rejects_claim_mutation_and_kolhoz_text() -> None:
     _, request, _, writer, final = _fixture()
@@ -359,6 +843,88 @@ def test_cover_letter_admission_rejects_claim_mutation_and_kolhoz_text() -> None
         match="forbidden em or en dash",
     ):
         validate_cover_letter_editorial_draft(request, kolhoz)
+
+
+def test_current_cover_letter_uses_bound_sections_and_exact_claims() -> None:
+    _, claims, request, draft = _current_cover_fixture()
+    validate_cover_letter_editorial_draft(request, draft)
+
+    omitted_employer = build_cover_letter_editorial_draft(
+        candidate_name=draft.candidate_name,
+        sections=(
+            replace(draft.sections[0], atoms=draft.sections[0].atoms[:2]),
+            *draft.sections[1:],
+        ),
+        current_runtime=True,
+    )
+    validate_cover_letter_editorial_draft(request, omitted_employer)
+
+    duplicated = build_cover_letter_editorial_draft(
+        candidate_name=draft.candidate_name,
+        sections=(
+            replace(
+                draft.sections[0],
+                atoms=(*draft.sections[0].atoms, draft.sections[0].atoms[2]),
+            ),
+            *draft.sections[1:],
+        ),
+        current_runtime=True,
+    )
+    with pytest.raises(EditorialCompositionError, match="repeats an approved claim"):
+        validate_cover_letter_editorial_draft(request, duplicated)
+
+    misplaced_company_fit = replace(
+        draft.sections[2],
+        atoms=(*draft.sections[2].atoms, draft.sections[1].atoms[-1]),
+    )
+    misplaced = build_cover_letter_editorial_draft(
+        candidate_name=draft.candidate_name,
+        sections=(
+            draft.sections[0],
+            draft.sections[1],
+            misplaced_company_fit,
+            *draft.sections[3:],
+        ),
+        current_runtime=True,
+    )
+    with pytest.raises(EditorialCompositionError, match="wrong section"):
+        validate_cover_letter_editorial_draft(request, misplaced)
+
+    with pytest.raises(EditorialCompositionError, match="claim policy"):
+        build_cover_letter_editorial_request(
+            authority=request.authority,
+            role_title=request.role_title,
+            company_name=request.company_name,
+            vacancy_sha256=request.vacancy_sha256,
+            approved_claims=(claims[1],),
+        )
+
+
+def test_current_cover_letter_pairs_remain_invalid_in_legacy_mode() -> None:
+    authority, _, _, _ = _current_cover_fixture()
+    legacy_authority = replace(authority, current_runtime=False)
+    legacy_incompatible_claims = (
+        _claim(
+            "candidate-opening",
+            "Built a reproducible evidence review process.",
+            "candidate",
+            "Opening",
+        ),
+        _claim(
+            "employer-evidence",
+            "Example Systems runs a support platform for software teams.",
+            "employer",
+            "Evidence Match",
+        ),
+    )
+    with pytest.raises(EditorialCompositionError, match="claim policy"):
+        build_cover_letter_editorial_request(
+            authority=legacy_authority,
+            role_title="Data Engineer",
+            company_name="Example Systems",
+            vacancy_sha256="b" * 64,
+            approved_claims=legacy_incompatible_claims,
+        )
 
 
 @pytest.mark.parametrize(
@@ -738,28 +1304,23 @@ def test_natural_full_letter_uses_only_typed_rhetoric_and_exact_evidence() -> No
 
 
 def _result() -> dict[str, object]:
-    reaction = {
-        "progression_probability_percent": 61,
-        "verdict": "progress",
-        "reasons": ["The application uses relevant evidence."],
-    }
-    return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "calibration_status": "uncalibrated",
-        "fit_percent": 62,
-        "fit_range_percent": {"low": 50, "high": 72},
-        "overall_verdict": "strong_fit",
-        "ats_reaction": reaction,
-        "human_reaction": reaction,
-        "strengths": [{"location": "cover_letter", "assessment": "Specific evidence."}],
-        "risks": [{"category": "relevance", "severity": "low", "location": "cover_letter", "assessment": "Employer proof could appear sooner."}],
+    value = fixture_recruiter_result(
+        fit_percent=62,
+        fit_low=50,
+        fit_high=72,
+        overall_verdict="strong_fit",
+    )
+    value.update({
+        "strengths": [{"location": "cover_letter", "assessment": "Specific evidence.", "outward_evidence_refs": ["cover_letter:char:0:1"]}],
+        "risks": [{"category": "relevance", "severity": "low", "location": "cover_letter", "assessment": "Employer proof could appear sooner.", "outward_evidence_refs": ["cover_letter:char:0:1"]}],
         "application_improvements": [
-            {"target": "cover_letter", "recommendation": "Lead with the evidence-led employer fact.", "expected_effect": "Makes the company match visible sooner."},
-            {"target": "cover_letter", "recommendation": "Add five years of unsupported ownership.", "expected_effect": "Would inflate seniority."},
-            {"target": "cv", "recommendation": "Change the CV order.", "expected_effect": "Moves project evidence."},
+            {"rank": 1, "target": "cover_letter", "recommendation": "Lead with the evidence-led employer fact.", "expected_effect": "Makes the company match visible sooner.", "support_required": False, "outward_evidence_refs": ["cover_letter:char:0:1"]},
+            {"rank": 2, "target": "cover_letter", "recommendation": "Add five years of unsupported ownership.", "expected_effect": "Would inflate seniority.", "support_required": True, "outward_evidence_refs": ["cover_letter:char:0:1"]},
+            {"rank": 3, "target": "cv", "recommendation": "Change the CV order.", "expected_effect": "Moves project evidence.", "support_required": False, "outward_evidence_refs": ["cv:char:0:1"]},
         ],
         "profile_improvements": [{"category": "experience", "recommendation": "Build larger-scale evidence.", "time_horizon": "months", "expected_effect": "Strengthens future applications."}],
-    }
+    })
+    return value
 
 
 class _Recruiter(Backend):

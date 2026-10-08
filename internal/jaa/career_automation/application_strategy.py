@@ -405,6 +405,7 @@ def compile_application_strategy(
     candidate_support: Iterable[CandidateSupport],
     employer_facts: Iterable[EmployerResearchFact],
     as_of: date,
+    candidate_document_targets: Mapping[str, Iterable[str]] | None = None,
     permit_eligible_gap_application: bool = False,
 ) -> ApplicationStrategy:
     """Compile one canonical plan without writing prose or promoting evidence."""
@@ -456,6 +457,37 @@ def compile_application_strategy(
     }
     if set(support_by_key) != expected_support_keys:
         raise ValueError("candidate support must align exactly with matched evidence")
+    normalized_document_targets: dict[str, tuple[str, ...]] | None = None
+    if candidate_document_targets is not None:
+        expected_evidence_ids = {evidence_id for _, evidence_id in expected_support_keys}
+        parsed_document_targets: dict[str, tuple[str, ...]] = {}
+        allowed_document_targets = frozenset({"cv", "cover_letter"})
+        for evidence_id, raw_targets in candidate_document_targets.items():
+            if not isinstance(evidence_id, str) or not evidence_id:
+                raise ValueError("candidate document target evidence ID is invalid")
+            if isinstance(raw_targets, (str, bytes)):
+                raise ValueError("candidate document targets must be a collection")
+            try:
+                targets = tuple(raw_targets)
+            except TypeError as exc:
+                raise ValueError("candidate document targets are malformed") from exc
+            if (
+                not targets
+                or any(not isinstance(target, str) for target in targets)
+                or len(set(targets)) != len(targets)
+                or not set(targets) <= allowed_document_targets
+            ):
+                raise ValueError("candidate document targets are malformed")
+            parsed_document_targets[evidence_id] = tuple(sorted(targets))
+        if set(parsed_document_targets) != expected_evidence_ids:
+            raise ValueError(
+                "candidate document targets must bind every matched evidence item"
+            )
+        if any(
+            frozenset(targets) != allowed_document_targets
+            for targets in parsed_document_targets.values()
+        ):
+            normalized_document_targets = parsed_document_targets
     coverage: list[RequirementCoverage] = []
     for requirement in requirement_rows:
         result = result_by_id[requirement.requirement_id]
@@ -538,7 +570,11 @@ def compile_application_strategy(
         "element_kinds": ELEMENT_KINDS,
         "directives": dict(DIRECTIVES),
         "research_kind_priority": RESEARCH_KIND_PRIORITY,
-        "directive_evidence_selection": "lexicographic_first",
+        "directive_evidence_selection": (
+            "document_scope_then_lexicographic_first"
+            if normalized_document_targets is not None
+            else "lexicographic_first"
+        ),
         "decisions": sorted(
             PLAN_DECISIONS
             if permit_eligible_gap_application
@@ -556,6 +592,8 @@ def compile_application_strategy(
         "candidate_support": support_document,
         "employer_facts": fact_document,
     }
+    if normalized_document_targets is not None:
+        input_document["candidate_document_targets"] = normalized_document_targets
     if permit_eligible_gap_application:
         input_document["permit_eligible_gap_application"] = True
     input_sha256 = content_hash(input_document)
@@ -570,11 +608,35 @@ def compile_application_strategy(
             result = result_by_id[requirement.requirement_id]
             # Coverage retains every match; one stable representative keeps
             # each document directive atomic and independently traceable.
-            support = support_by_key[
-                (requirement.requirement_id, sorted(result.evidence_ids)[0])
-            ]
+            evidence_ids = tuple(sorted(result.evidence_ids))
+            support_by_kind = {
+                kind: support_by_key[(requirement.requirement_id, evidence_ids[0])]
+                for kind in ELEMENT_KINDS
+            }
+            if normalized_document_targets is not None:
+                for kind, document_kind in (
+                    ("cv_emphasis", "cv"),
+                    ("cover_letter_argument", "cover_letter"),
+                ):
+                    scoped_evidence_ids = tuple(
+                        evidence_id
+                        for evidence_id in evidence_ids
+                        if document_kind
+                        in normalized_document_targets[evidence_id]
+                    )
+                    if not scoped_evidence_ids:
+                        raise ValueError(
+                            f"matched requirement lacks {document_kind}-scoped candidate evidence"
+                        )
+                    support_by_kind[kind] = support_by_key[
+                        (requirement.requirement_id, scoped_evidence_ids[0])
+                    ]
+                support_by_kind["employer_hook"] = support_by_kind[
+                    "cover_letter_argument"
+                ]
             fact = fact_rows[index % len(fact_rows)]
             for kind in ELEMENT_KINDS:
+                support = support_by_kind[kind]
                 element_identity = {
                     "fit_run_id": fit_run_id,
                     "kind": kind,

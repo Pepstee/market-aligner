@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,11 +14,34 @@ from market_aligner.state.importers import iter_raw_cache_roots
 
 
 class LegacyImportTests(unittest.TestCase):
+    def test_state_and_collector_exports_are_cycle_safe_in_fresh_interpreter(
+        self,
+    ) -> None:
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from market_aligner.state.importers import iter_raw_cache_roots; "
+                    "from market_aligner.collectors import Collector; "
+                    "from market_aligner.collectors.engine import Collector as EngineCollector; "
+                    "assert Collector is EngineCollector; "
+                    "assert callable(iter_raw_cache_roots)"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, probe.returncode, probe.stderr)
+
     def test_recursive_config_extension_and_cycle_detection(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "base.yaml").write_text(
-                yaml.safe_dump({"collection": {"workers": 4, "delay": 2}, "market": "one"}),
+                yaml.safe_dump(
+                    {"collection": {"workers": 4, "delay": 2}, "market": "one"}
+                ),
                 encoding="utf-8",
             )
             (root / "child.yaml").write_text(
@@ -49,7 +74,8 @@ class LegacyImportTests(unittest.TestCase):
             (first / "one.json").write_text(json.dumps(row), encoding="utf-8")
             (second / "duplicate.json").write_text(json.dumps([row]), encoding="utf-8")
             (second / "two.json").write_text(
-                json.dumps({**row, "job_id": "2", "url": "https://example.test/2"}) + "\n",
+                json.dumps({**row, "job_id": "2", "url": "https://example.test/2"})
+                + "\n",
                 encoding="utf-8",
             )
             rows = list(iter_raw_cache_roots([root / "one", root / "two"]))

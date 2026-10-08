@@ -43,7 +43,7 @@ class CandidateContact:
     full_name: str
     email: str
     phone: str | None
-    city: str
+    city: str | None
     record_id: str
     record_version: int
     provenance_sha256: str
@@ -51,10 +51,11 @@ class CandidateContact:
     def __post_init__(self) -> None:
         for value, label in (
             (self.full_name, "candidate name"),
-            (self.city, "candidate city"),
             (self.record_id, "contact record ID"),
         ):
             _safe_plain_text(value, label)
+        if self.city is not None:
+            _safe_plain_text(self.city, "candidate city")
         if self.phone is not None:
             _safe_plain_text(self.phone, "candidate phone")
         if not _EMAIL.fullmatch(self.email):
@@ -65,7 +66,7 @@ class CandidateContact:
             raise ValueError(
                 "contact provenance hash must be a lowercase SHA-256 digest"
             )
-        if "\n" in self.city or "," in self.city:
+        if self.city is not None and ("\n" in self.city or "," in self.city):
             raise ValueError("contact location must be city only")
 
     def document(self) -> dict[str, object]:

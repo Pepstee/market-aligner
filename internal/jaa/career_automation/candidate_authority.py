@@ -45,19 +45,29 @@ def _software_factory_root() -> Path:
 
 
 SOFTWARE_FACTORY_ROOT = _software_factory_root()
-INCOMING_ROOT = SOFTWARE_FACTORY_ROOT / (
-    ".incoming/mac-jaa-assurance-20260805-e1bb35a/operational-state"
-)
-CANDIDATE_EVIDENCE_ROOT = (
-    INCOMING_ROOT / "job-application-automation" / ("candidate-evidence")
-)
-JOBS_DATABASE_PATH = INCOMING_ROOT / (
-    "job-application-automation-gutua-20260803-evidence/"
-    "jaa11-rank29-inspection/jobs.sqlite3"
-)
-AVAILABILITY_PATH = SOFTWARE_FACTORY_ROOT / (
-    "giga-user/memory/entries/2026-08-05-jaa-operator-uk-availability.md"
-)
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+if os.environ.get("JAA_SOFTWARE_FACTORY_ROOT"):
+    INCOMING_ROOT = SOFTWARE_FACTORY_ROOT / (
+        ".incoming/mac-jaa-assurance-20260805-e1bb35a/operational-state"
+    )
+    CANDIDATE_EVIDENCE_ROOT = (
+        INCOMING_ROOT / "job-application-automation" / "candidate-evidence"
+    )
+    JOBS_DATABASE_PATH = INCOMING_ROOT / (
+        "job-application-automation-gutua-20260803-evidence/"
+        "jaa11-rank29-inspection/jobs.sqlite3"
+    )
+    AVAILABILITY_PATH = SOFTWARE_FACTORY_ROOT / (
+        "giga-user/memory/entries/2026-08-05-jaa-operator-uk-availability.md"
+    )
+else:
+    # Candidate authority is owner-private Market Aligner state.  The canonical
+    # checkout may recover exact inputs from older machines, but never tracks
+    # their contents or treats JAA as a separate project root.
+    AUTHORITY_INPUT_ROOT = REPOSITORY_ROOT / ".market-aligner-data" / "authority-inputs"
+    CANDIDATE_EVIDENCE_ROOT = AUTHORITY_INPUT_ROOT / "candidate-evidence"
+    JOBS_DATABASE_PATH = AUTHORITY_INPUT_ROOT / "jobs.sqlite3"
+    AVAILABILITY_PATH = AUTHORITY_INPUT_ROOT / "2026-08-05-jaa-operator-uk-availability.md"
 APPROVED_EVIDENCE_PATH = (
     CANDIDATE_EVIDENCE_ROOT / "approved_evidence_packet_2026-08-10.json"
 )

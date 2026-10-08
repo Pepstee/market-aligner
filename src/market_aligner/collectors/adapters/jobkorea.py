@@ -23,6 +23,8 @@ the fixture-driven self-test runs without Playwright installed.
 from __future__ import annotations
 
 import re
+import time
+from urllib.parse import parse_qs, quote_plus, urlparse
 from typing import Any, Iterable
 
 from .base import Adapter, JobUrl, RawPosting, USER_AGENT, contracts_now, register
@@ -30,6 +32,15 @@ from .base import Adapter, JobUrl, RawPosting, USER_AGENT, contracts_now, regist
 JOBKOREA_SEARCH_URL = "https://www.jobkorea.co.kr/Search/?stext={kw}"
 JOBKOREA_DETAIL_URL = "https://www.jobkorea.co.kr/Recruit/GI_Read/{id}"
 
+
+def _looks_entry_level_listing(text: str) -> bool:
+    """Conservative listing-level gate used before expensive detail fetches."""
+    return bool(re.search(r"신입|경력무관", text or "", flags=re.IGNORECASE))
+
+
+def _is_organic_listing_href(href: str, search_code: str = "630") -> bool:
+    """Exclude recommendation/ad carousels mixed into search pages."""
+    return (parse_qs(urlparse(href or "").query).get("sc") or [""])[0] == search_code
 
 @register
 class JobKoreaAdapter(Adapter):
@@ -81,13 +92,21 @@ class JobKoreaAdapter(Adapter):
     # LIVE path (live=True) — Playwright render then extract.
     # ------------------------------------------------------------------ #
     def _discover_live(self, terms: list[str]) -> Iterable[JobUrl]:
-        """Render the search page per term with Playwright and extract recruit
-        rows. Selectors are best-effort; confirm them in your env.
+        """Render paged JobKorea search results and extract recruit rows.
+
+        The donor implementation targets the 2026-07 search structure: result links carry
+        ``/Recruit/GI_Read/{id}``, while each card's rendered text carries the
+        entry/seniority label. ``entry_only`` avoids spending detail requests
+        on experienced-only positions during the calibration crawl.
         """
         from playwright.sync_api import sync_playwright  # lazy import
 
         cfg = self._board_config()
         search_tpl = cfg.get("search_url") or JOBKOREA_SEARCH_URL
+        max_pages = max(1, int(cfg.get("max_pages", 1) or 1))
+        entry_only = bool(cfg.get("entry_only", False))
+        organic_search_code = str(cfg.get("organic_search_code", "630"))
+        delay = max(0.0, float(cfg.get("rate_limit_seconds", 2.0) or 0.0))
 
         seen_ids: set[str] = set()
         with sync_playwright() as p:
@@ -95,27 +114,63 @@ class JobKoreaAdapter(Adapter):
             page = browser.new_page(user_agent=USER_AGENT)
             try:
                 for kw in terms or [""]:
-                    page.goto(search_tpl.format(kw=kw), wait_until="networkidle", timeout=45000)
-                    # TODO: confirm selector in your env — JobKorea's result list
-                    # anchors carry the recruit id in the GI_Read/{id} href.
-                    hrefs = page.eval_on_selector_all(
-                        "a[href*='GI_Read']",
-                        "els => els.map(e => e.getAttribute('href'))",
-                    )
-                    for href in hrefs or []:
-                        m = re.search(r"GI_Read/(\d+)", href or "")
-                        if not m:
-                            continue
-                        job_id = m.group(1)
-                        if job_id in seen_ids:
-                            continue
-                        seen_ids.add(job_id)
-                        yield JobUrl(
-                            board=self.board,
-                            job_id=job_id,
-                            url=self._detail_url(job_id),
-                            posted_at=None,
+                    base_url = search_tpl.format(kw=quote_plus(kw))
+                    for page_no in range(1, max_pages + 1):
+                        sep = "&" if "?" in base_url else "?"
+                        url = f"{base_url}{sep}Page_No={page_no}"
+                        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                        page.wait_for_selector(
+                            "main a[href*='/Recruit/GI_Read/']", timeout=30000
                         )
+                        records = page.eval_on_selector_all(
+                            "main a[href*='/Recruit/GI_Read/']",
+                            r"""els => {
+                              const byId = new Map();
+                              const titles = els.filter(a =>
+                                typeof a.className === 'string' &&
+                                a.className.includes('max-w-[700px]') &&
+                                (a.innerText || '').trim()
+                              );
+                              for (const a of titles) {
+                                const href = a.href || a.getAttribute('href') || '';
+                                const match = href.match(/GI_Read\/(\d+)/);
+                                if (!match) continue;
+                                const id = match[1];
+                                const card = a.closest('div.w-full');
+                                const text = (card?.innerText || a.innerText || '').trim();
+                                if (text.length > 0 && text.length < 2500) {
+                                  byId.set(id, {
+                                    id,
+                                    href,
+                                    title: (a.innerText || '').trim(),
+                                    text
+                                  });
+                                }
+                              }
+                              return Array.from(byId.values());
+                            }""",
+                        )
+                        for record in records or []:
+                            job_id = str(record.get("id", ""))
+                            if not job_id or job_id in seen_ids:
+                                continue
+                            if not _is_organic_listing_href(
+                                str(record.get("href", "")), organic_search_code
+                            ):
+                                continue
+                            if entry_only and not _looks_entry_level_listing(
+                                str(record.get("text", ""))
+                            ):
+                                continue
+                            seen_ids.add(job_id)
+                            yield JobUrl(
+                                board=self.board,
+                                job_id=job_id,
+                                url=self._detail_url(job_id),
+                                posted_at=None,
+                            )
+                        if delay and page_no < max_pages:
+                            time.sleep(delay)
             finally:
                 browser.close()
 
@@ -127,15 +182,21 @@ class JobKoreaAdapter(Adapter):
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(user_agent=USER_AGENT)
             try:
-                page.goto(job_url.url, wait_until="networkidle", timeout=45000)
-                # TODO: confirm selector in your env — the JD body container.
-                # ".detailArea" / ".tbCol" / ".dt" are the historical containers;
-                # fall back to the whole body if the specific block is absent.
+                page.goto(job_url.url, wait_until="domcontentloaded", timeout=45000)
+                try:
+                    page.wait_for_selector("main, .detailArea, #tab02, .secReadItem", timeout=30000)
+                except Exception:
+                    pass  # historical layouts may lack a main landmark
+                # The current detail page renders 모집요강, 지원자격, 스킬,
+                # 접수정보 and location under the main landmark. Historical
+                # selectors remain as fallbacks for older layouts.
                 html = None
-                for sel in (".detailArea", "#tab02", ".secReadItem", "body"):
+                for sel in ("main", ".detailArea", "#tab02", ".secReadItem", "body"):
                     try:
+                        if not page.locator(sel).count():
+                            continue
                         html = page.inner_html(sel)
-                        if html:
+                        if html and len(html) >= 200:
                             break
                     except Exception:
                         continue
@@ -147,11 +208,19 @@ class JobKoreaAdapter(Adapter):
             finally:
                 browser.close()
 
+        if not html or len(html) < 200:
+            raise RuntimeError(f"JobKorea detail body missing for {job_url.job_id}")
+
         return RawPosting(
             board=self.board,
             job_id=job_url.job_id,
             url=job_url.url,
             fetched_at=contracts_now(),
             raw_text=html,                                    # HTML board -> raw_text
-            raw_json={"id": job_url.job_id, "url": job_url.url, "title": title},
+            raw_json={
+                "id": job_url.job_id,
+                "url": job_url.url,
+                "title": title,
+                "source": "playwright",
+            },
         )

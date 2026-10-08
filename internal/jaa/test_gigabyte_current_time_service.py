@@ -229,7 +229,7 @@ def _runtime_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     local_bin = tmp_path / "local" / "bin"
     uv = tmp_path / "uv"
     runtime = uv / "runtime"
-    for directory in (bin_dir, local_bin, runtime / "bin"):
+    for directory in (venv, bin_dir, local_bin.parent, local_bin, uv, runtime, runtime / "bin"):
         directory.mkdir(parents=True, mode=0o700)
     entry = bin_dir / "python"
     venv_python = bin_dir / "python3.12"
@@ -244,6 +244,7 @@ def _runtime_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     alias.symlink_to(runtime)
     pyvenv = venv / "pyvenv.cfg"
     pyvenv.write_bytes(b"home = pinned\n")
+    pyvenv.chmod(0o600)
     identity = {"runtime": "pinned"}
     monkeypatch.setattr(installer, "PINNED_COMPONENT_ROOT", tmp_path)
     monkeypatch.setattr(installer, "PINNED_VENV_PYTHON", entry)
