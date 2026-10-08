@@ -472,13 +472,49 @@ class LLMPipelineTests(unittest.TestCase):
         self.assertNotIn(
             "enum", EXTRACTION_SCHEMA["properties"]["source_content_sha256"]
         )
+        self.assertEqual(
+            ["remote", "hybrid", "onsite", "unknown"],
+            EXTRACTION_SCHEMA["properties"]["remote_policy"]["enum"],
+        )
         self.assertEqual(2, len(runner.calls))
         self.assertIn(
             "exact top-level content_sha256 input value", runner.calls[0][1]["input"]
         )
-        self.assertEqual("market-aligner.codex-extraction.v3", EXTRACTION_PROMPT_VERSION)
+        self.assertIn(
+            "return exactly one of remote, hybrid, onsite, or unknown",
+            runner.calls[0][1]["input"],
+        )
+        self.assertEqual("market-aligner.codex-extraction.v4", EXTRACTION_PROMPT_VERSION)
         self.assertTrue(VACANCY_ELIGIBILITY_PROMPT_VERSION.endswith(".codex.v6"))
         self.assertEqual(EXTRACTION_PROMPT_VERSION, receipts[0].prompt_version)
+
+    def test_gateway_rejects_noncanonical_remote_policy(self) -> None:
+        digest = "c" * 64
+        payload = _extraction_payload(digest)
+        payload["remote_policy"] = "Not stated; listing has a city."
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "codex"
+            binary.write_bytes(b"synthetic codex binary")
+            runner = FakeCodexRunner([payload])
+            gateway = CodexSemanticGateway(
+                model="gpt-test-explicit",
+                codex_binary=str(binary),
+                environment={"HOME": temporary, "PATH": "/usr/bin"},
+                runner=runner,
+            )
+            with self.assertRaisesRegex(
+                CodexGatewayError, "remote_policy must be a canonical work-mode token"
+            ):
+                gateway.extract_vacancy(
+                    {
+                        "board": "synthetic",
+                        "job_id": "noncanonical-mode",
+                        "url": "https://example.invalid/noncanonical-mode",
+                        "content_sha256": digest,
+                        "raw_text": "synthetic vacancy",
+                    }
+                )
+        self.assertEqual(1, len(runner.calls))
 
     def test_gateway_rejects_invalid_source_digest_without_invocation(self) -> None:
         class DigestString(str):

@@ -62,12 +62,19 @@ class FixtureSemanticWorker:
         self,
         *,
         drift_extraction_input: bool = False,
+        extraction_prompt_version: str | None = None,
+        receipt_prompt_version: str | None = None,
         eligibility_prompt_version: str | None = "eligibility-v1",
+        extracted_remote_policy: str = "remote",
     ) -> None:
         self.drift_extraction_input = drift_extraction_input
+        self.vacancy_extraction_prompt_version = extraction_prompt_version
+        self.receipt_prompt_version = receipt_prompt_version
         self.vacancy_eligibility_prompt_version = eligibility_prompt_version
+        self.extracted_remote_policy = extracted_remote_policy
         self.extractions = 0
         self.alignments = 0
+        self.alignment_remote_policies: list[str] = []
         self.eligibility_extractions = 0
 
     def extract_vacancy(
@@ -89,14 +96,17 @@ class FixtureSemanticWorker:
             work_authorisation=(),
             contract_type="permanent",
             seniority="junior",
-            remote_policy="remote",
+            remote_policy=self.extracted_remote_policy,
             extraction_confidence=0.91,
         )
+        prompt_version = self.receipt_prompt_version
+        if prompt_version is None:
+            prompt_version = self.vacancy_extraction_prompt_version or "extract-v1"
         receipt = LLMReceipt.bind(
             receipt_id=f"extract-{self.extractions}",
             task="semantic_vacancy_extraction",
             model="fixture-semantic-v1",
-            prompt_version="extract-v1",
+            prompt_version=prompt_version,
             inputs=raw_context,
             output=extraction,
             created_at="2026-08-20T00:00:00Z",
@@ -136,6 +146,7 @@ class FixtureSemanticWorker:
         self.alignments += 1
         vacancy = dict(context["vacancy"])
         profile = dict(context["profile"])
+        self.alignment_remote_policies.append(str(vacancy["remote_policy"]))
         job_key = f"{vacancy['board']}:{vacancy['job_id']}"
         alignment = EvidenceAlignment(
             profile_id=str(profile["profile_id"]),
@@ -390,6 +401,145 @@ class ServiceTests(unittest.TestCase):
             new_worker.alignments,
             new_worker.eligibility_extractions,
         ))
+
+    def test_extraction_prompt_version_change_reextracts_cached_vacancy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            old_worker = FixtureSemanticWorker(
+                extraction_prompt_version="market-aligner.codex-extraction.v3"
+            )
+            old_run = ProcessingService(root, old_worker).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="extraction-v3-worker",
+                job_key="fixture:1",
+            )
+            new_worker = FixtureSemanticWorker(
+                extraction_prompt_version="market-aligner.codex-extraction.v4",
+                extracted_remote_policy="unknown",
+            )
+            new_run = ProcessingService(root, new_worker).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="extraction-v4-worker",
+                job_key="fixture:1",
+            )
+
+        self.assertNotEqual(old_run["config_sha256"], new_run["config_sha256"])
+        self.assertEqual(1, new_run["shard_claimed"])
+        self.assertEqual(1, new_worker.extractions)
+        self.assertEqual(1, new_worker.alignments)
+        self.assertEqual(["unknown"], new_worker.alignment_remote_policies)
+        self.assertEqual(0, new_worker.eligibility_extractions)
+
+    def test_unchanged_extraction_prompt_version_reuses_vacancy_and_alignment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            initial_worker = FixtureSemanticWorker(
+                extraction_prompt_version="market-aligner.codex-extraction.v4",
+                extracted_remote_policy="unknown",
+            )
+            initial_run = ProcessingService(root, initial_worker).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="extraction-v4-initial-worker",
+                job_key="fixture:1",
+            )
+            config.write_text(
+                "processing:\n  shard_size: 1\n  lease_seconds: 120\n",
+                encoding="utf-8",
+            )
+            unchanged_worker = FixtureSemanticWorker(
+                extraction_prompt_version="market-aligner.codex-extraction.v4",
+                extracted_remote_policy="remote",
+            )
+            unchanged_run = ProcessingService(root, unchanged_worker).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="extraction-v4-reuse-worker",
+                job_key="fixture:1",
+            )
+
+        self.assertNotEqual(initial_run["config_sha256"], unchanged_run["config_sha256"])
+        self.assertEqual(1, unchanged_run["shard_claimed"])
+        self.assertEqual(1, unchanged_run["semantic_extractions_reused"])
+        self.assertEqual(1, unchanged_run["evidence_alignments_reused"])
+        self.assertEqual(1, initial_worker.extractions)
+        self.assertEqual(1, initial_worker.alignments)
+        self.assertEqual(0, unchanged_worker.extractions)
+        self.assertEqual(0, unchanged_worker.alignments)
+
+    def test_extraction_prompt_version_validation_preserves_legacy_none(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            legacy_worker = FixtureSemanticWorker(extraction_prompt_version=None)
+            config_identities: list[dict[str, Any]] = []
+            original_hash = processing_module._sha256
+            config_identity_keys = {
+                "geographic_preference_policy",
+                "first_job_scope_policy",
+                "loaded_config",
+                "opportunity_policy",
+                "vacancy_eligibility_facts_version",
+                "vacancy_eligibility_prompt_version",
+            }
+
+            def capture_config_identity(value: object) -> str:
+                if isinstance(value, Mapping) and set(value) == config_identity_keys:
+                    config_identities.append(dict(value))
+                return original_hash(value)
+
+            with patch.object(
+                processing_module, "_sha256", side_effect=capture_config_identity
+            ):
+                legacy_run = ProcessingService(root, legacy_worker).process(
+                    config,
+                    profile_id=profile_id,
+                    track="automation",
+                    worker_id="legacy-extraction-worker",
+                    job_key="fixture:1",
+                )
+            invalid_worker = FixtureSemanticWorker(extraction_prompt_version=" v4 ")
+            with self.assertRaisesRegex(
+                ValueError, "semantic worker extraction prompt version is invalid"
+            ):
+                ProcessingService(root, invalid_worker).process(
+                    config,
+                    profile_id=profile_id,
+                    track="automation",
+                    worker_id="invalid-extraction-worker",
+                    job_key="fixture:1",
+                )
+
+        self.assertEqual(0, legacy_run["errors"])
+        self.assertEqual(1, len(config_identities))
+        self.assertNotIn("vacancy_extraction_prompt_version", config_identities[0])
+
+    def test_extraction_receipt_prompt_version_must_match_worker_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile_id, config = _processing_fixture(root)
+            worker = FixtureSemanticWorker(
+                extraction_prompt_version="market-aligner.codex-extraction.v4",
+                receipt_prompt_version="market-aligner.codex-extraction.v3",
+            )
+            run = ProcessingService(root, worker).process(
+                config,
+                profile_id=profile_id,
+                track="automation",
+                worker_id="mismatched-extraction-receipt-worker",
+                job_key="fixture:1",
+            )
+
+        self.assertEqual(1, worker.extractions)
+        self.assertEqual(1, run["errors"])
 
     def test_fresh_assessment_database_is_owner_private_under_common_umask(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

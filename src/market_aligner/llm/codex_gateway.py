@@ -35,11 +35,12 @@ from market_aligner.llm.contracts import (
 
 
 PROVIDER_IDENTITY = "openai-codex-cli"
-EXTRACTION_PROMPT_VERSION = "market-aligner.codex-extraction.v3"
+EXTRACTION_PROMPT_VERSION = "market-aligner.codex-extraction.v4"
 VACANCY_ELIGIBILITY_PROMPT_VERSION = f"{VACANCY_ELIGIBILITY_FACTS_VERSION}.codex.v6"
 ALIGNMENT_PROMPT_VERSION = "market-aligner.codex-alignment.v2"
 CURRENT_FACT_SELECTION_PROMPT_VERSION = "market-aligner.current-profile-fact-selection.v4"
 CANDIDATE_POLICY_PROMPT_VERSION = "market-aligner.candidate-policy-extraction.v1"
+_REMOTE_POLICY_VALUES = ("remote", "hybrid", "onsite", "unknown")
 _CANDIDATE_POLICY_TASK = "candidate_policy_extraction"
 _CURRENT_PROFILE_CONTEXT_SCHEMA = "market-aligner.current-profile-selection-context.v1"
 _MAX_CURRENT_PROFILE_CONTEXT_BYTES = 16_384
@@ -137,7 +138,14 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
         },
         "contract_type": {"type": "string"},
         "seniority": {"type": "string"},
-        "remote_policy": {"type": "string"},
+        "remote_policy": {
+            "type": "string",
+            "enum": list(_REMOTE_POLICY_VALUES),
+            "description": (
+                "One canonical token for the role's explicit work arrangement. Use unknown "
+                "when the arrangement is unstated, ambiguous, or unrelated boilerplate."
+            ),
+        },
         "extraction_confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "unknown_fields": {"type": "array", "items": {"type": "string"}},
     },
@@ -517,9 +525,14 @@ _PROMPTS = {
         "obtain work authorisation. Never list applicant entitlements or infer from location "
         "or sponsorship alone. Return [] if no country is explicitly required. Never put full "
         "country names or prose in that field; preserve ambiguous or uncodeable wording in "
-        "unknown_fields and other text fields. Preserve absences, including an unstated "
-        "work_authorisation requirement, in unknown_fields and return only the required JSON "
-        "object."
+        "unknown_fields and other text fields. For remote_policy, return exactly one of "
+        "remote, hybrid, onsite, or unknown. Use remote, hybrid, or onsite only when the "
+        "vacancy explicitly states that role's work arrangement; do not infer it from a city, "
+        "country, office location, or unrelated company boilerplate. Use unknown when the "
+        "arrangement is unstated, ambiguous, or contradictory. Put explanations and source "
+        "wording in location, description, or unknown_fields, never in remote_policy. Preserve "
+        "absences, including an unstated work_authorisation requirement, in unknown_fields and "
+        "return only the required JSON object."
     ),
     "evidence_alignment": (
         "Assess the normalized vacancy requirements only against the supplied bounded profile "
@@ -788,6 +801,7 @@ def _validate_events(
 class CodexSemanticGateway:
     """Production LLMGateway using isolated one-attempt Codex CLI calls."""
 
+    vacancy_extraction_prompt_version = EXTRACTION_PROMPT_VERSION
     vacancy_eligibility_prompt_version = VACANCY_ELIGIBILITY_PROMPT_VERSION
 
     def __init__(
@@ -973,6 +987,9 @@ class CodexSemanticGateway:
             raise CodexGatewayError(
                 "work_authorisation must be sorted unique uppercase two-letter country codes"
             )
+        remote_policy = payload.get("remote_policy")
+        if type(remote_policy) is not str or remote_policy not in _REMOTE_POLICY_VALUES:
+            raise CodexGatewayError("remote_policy must be a canonical work-mode token")
         payload = dict(payload)
         payload["work_authorisation"] = _canonical_work_authorisation(
             payload["work_authorisation"]

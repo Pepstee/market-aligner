@@ -283,11 +283,20 @@ def _cached_vacancy(
     *,
     job_key: str,
     source_content_sha256: str,
+    expected_prompt_version: str | None = None,
 ) -> Vacancy | None:
     """Replay only an exact-content accepted vacancy from processing state."""
 
     if not prior or not isinstance(prior.get("vacancy"), Mapping):
         return None
+    if expected_prompt_version is not None:
+        receipt = prior.get("extraction_receipt")
+        if (
+            not isinstance(receipt, Mapping)
+            or receipt.get("task") != "semantic_vacancy_extraction"
+            or receipt.get("prompt_version") != expected_prompt_version
+        ):
+            return None
     value = dict(prior["vacancy"])  # type: ignore[arg-type]
     for key in _VACANCY_SEQUENCE_FIELDS:
         value[key] = tuple(value.get(key) or ())
@@ -474,6 +483,15 @@ class ProcessingService:
         }
         profile_context = profile.llm_context(evidence)
         authority_sha256 = _sha256(authority_document)
+        extraction_prompt_version = getattr(
+            self.worker, "vacancy_extraction_prompt_version", None
+        )
+        if extraction_prompt_version is not None and (
+            type(extraction_prompt_version) is not str
+            or not extraction_prompt_version
+            or extraction_prompt_version != extraction_prompt_version.strip()
+        ):
+            raise ValueError("semantic worker extraction prompt version is invalid")
         eligibility_prompt_version = getattr(
             self.worker, "vacancy_eligibility_prompt_version", None
         )
@@ -483,16 +501,19 @@ class ProcessingService:
             or eligibility_prompt_version != eligibility_prompt_version.strip()
         ):
             raise ValueError("semantic worker eligibility prompt version is invalid")
-        config_sha256 = _sha256(
-            {
-                "geographic_preference_policy": asdict(geographic_policy),
-                "first_job_scope_policy": asdict(first_job_policy),
-                "loaded_config": config,
-                "opportunity_policy": asdict(self.opportunity_policy),
-                "vacancy_eligibility_facts_version": VACANCY_ELIGIBILITY_FACTS_VERSION,
-                "vacancy_eligibility_prompt_version": eligibility_prompt_version,
-            }
-        )
+        config_identity = {
+            "geographic_preference_policy": asdict(geographic_policy),
+            "first_job_scope_policy": asdict(first_job_policy),
+            "loaded_config": config,
+            "opportunity_policy": asdict(self.opportunity_policy),
+            "vacancy_eligibility_facts_version": VACANCY_ELIGIBILITY_FACTS_VERSION,
+            "vacancy_eligibility_prompt_version": eligibility_prompt_version,
+        }
+        if extraction_prompt_version is not None:
+            config_identity["vacancy_extraction_prompt_version"] = (
+                extraction_prompt_version
+            )
+        config_sha256 = _sha256(config_identity)
         report_scope = {
             "evidence_authority_sha256": authority_sha256,
             "processing_config_sha256": config_sha256,
@@ -535,7 +556,9 @@ class ProcessingService:
                     prior,
                     job_key=raw.key,
                     source_content_sha256=source_content_sha256,
+                    expected_prompt_version=extraction_prompt_version,
                 )
+                vacancy_reused = vacancy is not None
                 shell = vacancy_shell_from_raw(raw)
                 raw_context = {
                     "board": raw.board,
@@ -558,6 +581,14 @@ class ProcessingService:
                         task="semantic_vacancy_extraction",
                         inputs=raw_context,
                     )
+                    if (
+                        extraction_prompt_version is not None
+                        and extraction_receipt.prompt_version
+                        != extraction_prompt_version
+                    ):
+                        raise ValueError(
+                            "semantic worker extraction prompt version differs"
+                        )
                     vacancy = accept_extraction(raw, extraction, extraction_receipt)
                     extraction_receipt_value = asdict(extraction_receipt)
                 eligibility_inputs = vacancy_eligibility_input(raw)
@@ -642,7 +673,9 @@ class ProcessingService:
                     else:
                         parked += 1
                 else:
-                    reused_axes = _cached_alignment_axes(prior)
+                    reused_axes = (
+                        _cached_alignment_axes(prior) if vacancy_reused else None
+                    )
                     alignment_receipt_value: object | None = None
                     if reused_axes is not None:
                         technical_alignment, evidence_match = reused_axes
